@@ -1,0 +1,553 @@
+<resources>
+    <string name="app_name">PhotoEasy</string>
+    
+    <!-- General & Navigation -->
+    <string name="nav_home">Projects</string>
+    <string name="nav_new_project">New Project</string>
+    <string name="nav_gallery">Open Photo</string>
+    <string name="nav_settings">Settings</string>
+    <string name="action_save">Save Project</string>
+    <string name="action_export">Export Image</string>
+    <string name="action_undo">Undo</string>
+    <string name="action_redo">Redo</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_apply">Apply</string>
+    <string name="action_reset">Reset</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_duplicate">Duplicate</string>
+    <string name="action_edit">Edit</string>
+    <string name="action_share">Share</string>
+    
+    <!-- Home / Dashboard -->
+    <string name="home_title">PhotoEasy Studio</string>
+    <string name="home_subtitle">Create, Edit, and Enhance Photos easily</string>
+    <string name="recent_projects">Recent Projects</string>
+    <string name="no_projects_yet">No saved projects yet</string>
+    <string name="no_projects_desc">Create a blank canvas or import a photo to start editing!</string>
+    <string name="btn_blank_canvas">Blank Canvas</string>
+    <string name="btn_open_photo">Open Photo</string>
+    <string name="btn_sample_photo">Try Sample Photo</string>
+    
+    <!-- New Project Dialog / Canvas Creator -->
+    <string name="create_canvas_title">Create New Canvas</string>
+    <string name="canvas_name">Project Name</string>
+    <string name="width_px">Width (px)</string>
+    <string name="height_px">Height (px)</string>
+    <string name="lock_aspect_ratio">Lock Aspect Ratio</string>
+    <string name="preset_square">Square (1:1)</string>
+    <string name="preset_story">Story (9:16)</string>
+    <string name="preset_landscape">HD Landscape (16:9)</string>
+    <string name="preset_portrait">Portrait (4:5)</string>
+    <string name="preset_custom">Custom</string>
+    <string name="bg_color">Background Color</string>
+    <string name="bg_transparent">Transparent</string>
+    <string name="bg_white">White</string>
+    <string name="bg_black">Black</string>
+    
+    <!-- Editing Tools -->
+    <string name="tool_adjust">Adjust</string>
+    <string name="tool_filters">Filters</string>
+    <string name="tool_crop">Crop &amp; Perspective</string>
+    <string name="tool_select">Selection</string>
+    <string name="tool_layers">Layers</string>
+    <string name="tool_text">Text</string>
+    <string name="tool_inpaint">Object Removal</string>
+    <string name="tool_auto">Smart Auto</string>
+    
+    <!-- Color Adjustments -->
+    <string name="adj_brightness">Brightness</string>
+    <string name="adj_contrast">Contrast</string>
+    <string name="adj_saturation">Saturation</string>
+    <string name="adj_temperature">Temperature</string>
+    <string name="adj_tint">Tint</string>
+    <string name="adj_exposure">Exposure</string>
+    <string name="adj_highlights">Highlights</string>
+    <string name="adj_shadows">Shadows</string>
+    <string name="adj_sharpness">Sharpness</string>
+    <string name="adj_vignette">Vignette</string>
+    <string name="adj_smart_auto">Smart Auto Fix</string>
+    <string name="adj_smart_auto_applied">Smart Auto enhancement applied!</string>
+    
+    <!-- Filters -->
+    <string name="filter_none">Original</string>
+    <string name="filter_vintage">Vintage</string>
+    <string name="filter_sepia">Sepia</string>
+    <string name="filter_grayscale">B&amp;W</string>
+    <string name="filter_cyberpunk">Cyberpunk</string>
+    <string name="filter_cinematic">Cinematic</string>
+    <string name="filter_hdr">HDR Look</string>
+    <string name="filter_warm">Warm Sunset</string>
+    <string name="filter_cool">Cool Breeze</string>
+    <string name="filter_glow">Soft Glow</string>
+    <string name="filter_pixelate">Pixelate</string>
+    <string name="filter_edges">Edge Detect</string>
+    <string name="filter_glitch">Glitch / CRT</string>
+    <string name="filter_orange_teal">Orange &amp; Teal</string>
+    <string name="filter_moody_dark">Moody Dark</string>
+    <string name="filter_vaporwave">Vaporwave Neon</string>
+    <string name="filter_film_noir">Film Noir</string>
+    <string name="filter_kodachrome">Kodachrome</string>
+    <string name="filter_pastel_dream">Pastel Dream</string>
+    <string name="filter_duotone_violet">Duotone Violet</string>
+    <string name="filter_emerald_mint">Emerald &amp; Mint</string>
+    <string name="filter_golden_hour">Golden Hour</string>
+    <string name="filter_solarize">Solarize</string>
+    <string name="filter_bleach_bypass">Bleach Bypass</string>
+    <string name="filter_cross_process">Cross Process</string>
+    
+    <!-- Crop & Transform -->
+    <string name="crop_free">Freeform</string>
+    <string name="rotate_left">Rotate Left</string>
+    <string name="rotate_right">Rotate Right</string>
+    <string name="flip_h">Flip H</string>
+    <string name="flip_v">Flip V</string>
+    <string name="perspective_transform">Perspective Crop</string>
+    <string name="drag_corners_perspective">Drag the 4 corners to fit the object. Tap Apply to crop and straighten.</string>
+    
+    <!-- Selection Tools -->
+    <string name="select_quick_brush">Quick Selection Brush</string>
+    <string name="select_lasso">Lasso Tool</string>
+    <string name="select_polygon">Polygon Pen Tool</string>
+    <string name="select_magic_wand">Magic Wand</string>
+    <string name="select_brush_size">Brush Size</string>
+    <string name="select_tolerance">Color Tolerance</string>
+    <string name="select_invert">Invert Mask</string>
+    <string name="select_clear">Clear Selection</string>
+    <string name="select_erase">Erase Selection</string>
+    <string name="select_copy_layer">Copy Selection to Layer</string>
+    <string name="select_instructions">Draw or tap on photo to select area</string>
+    <string name="select_mode_add">+ Add</string>
+    <string name="select_mode_subtract">- Subtract</string>
+    <string name="select_mode_intersect">Intersect</string>
+    <string name="select_mode_replace">Replace</string>
+    <string name="select_feather">Feather</string>
+    <string name="select_grow">Grow</string>
+    <string name="select_shrink">Shrink</string>
+    <string name="select_smooth">Smooth</string>
+    <string name="select_refine">Refine Edge</string>
+    
+    <!-- Object Removal / Inpainting -->
+    <string name="inpaint_title">Object Removal</string>
+    <string name="inpaint_brush">Removal Brush</string>
+    <string name="inpaint_instructions">Paint over unwanted object to remove it content-aware</string>
+    <string name="inpaint_action">Remove Object</string>
+    <string name="inpaint_processing">Removing object cleanly…</string>
+    <string name="inpaint_success">Object removed!</string>
+    
+    <!-- Layers Panel -->
+    <string name="layers_title">Layers Stack</string>
+    <string name="layer_add">Add Layer</string>
+    <string name="layer_add_image">Image Layer</string>
+    <string name="layer_add_text">Text Layer</string>
+    <string name="layer_add_fill">Color Fill Layer</string>
+    <string name="layer_add_adjustment">Adjustment Layer</string>
+    <string name="layer_color_fill">Color Fill Layer</string>
+    <string name="layer_opacity">Opacity</string>
+    <string name="layer_blend_mode">Blend Mode</string>
+    <string name="layer_visibility">Toggle Visibility</string>
+    <string name="layer_lock">Lock Layer</string>
+    <string name="layer_move_up">Move Up</string>
+    <string name="layer_move_down">Move Down</string>
+    <string name="layer_merge_down">Merge Down</string>
+    <string name="layer_delete">Delete Layer</string>
+    <string name="layer_duplicate">Duplicate Layer</string>
+    
+    <!-- Blend Modes -->
+    <string name="blend_normal">Normal</string>
+    <string name="blend_multiply">Multiply</string>
+    <string name="blend_screen">Screen</string>
+    <string name="blend_overlay">Overlay</string>
+    <string name="blend_darken">Darken</string>
+    <string name="blend_lighten">Lighten</string>
+    <string name="blend_soft_light">Soft Light</string>
+    <string name="blend_hard_light">Hard Light</string>
+    <string name="blend_difference">Difference</string>
+    <string name="blend_add">Add / Plus</string>
+    
+    <!-- Text Tool & Fonts -->
+    <string name="text_edit_title">Edit Text</string>
+    <string name="text_hint">Enter text (Arabic &amp; English supported)</string>
+    <string name="font_family">Font Family</string>
+    <string name="font_cairo">Cairo (Arabic/EN)</string>
+    <string name="font_tajawal">Tajawal (Arabic/EN)</string>
+    <string name="font_amiri">Amiri (Naskh Arabic)</string>
+    <string name="font_montserrat">Montserrat (Modern)</string>
+    <string name="font_default">System Default</string>
+    <string name="text_color">Text Color</string>
+    <string name="text_stroke_color">Outline Color</string>
+    <string name="text_stroke_width">Outline Thickness</string>
+    <string name="text_shadow_color">Shadow Color</string>
+    <string name="text_shadow_radius">Shadow Blur</string>
+    <string name="text_line_spacing">Line Spacing</string>
+    <string name="text_letter_spacing">Letter Spacing</string>
+    <string name="text_max_width">Max Line Width</string>
+    <string name="text_align">Alignment</string>
+    <string name="text_align_left">Left</string>
+    <string name="text_align_center">Center</string>
+    <string name="text_align_right">Right</string>
+    <string name="text_size">Font Size</string>
+    
+    <!-- Export Dialog -->
+    <string name="export_title">Export Image</string>
+    <string name="export_format">File Format</string>
+    <string name="format_jpg">JPEG (.jpg)</string>
+    <string name="format_png">PNG (.png - Lossless/Transparent)</string>
+    <string name="export_quality">JPEG Quality</string>
+    <string name="export_dimensions">Output Dimensions: %1$d x %2$d px</string>
+    <string name="export_success">Image exported &amp; saved to Gallery successfully!</string>
+    <string name="export_failed">Failed to export image</string>
+    <string name="project_saved">Project saved successfully!</string>
+    
+    <!-- Settings -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_language">Language / اللغة</string>
+    <string name="language_auto">System Default</string>
+    <string name="language_en">English</string>
+    <string name="language_ar">العربية (Arabic)</string>
+    <string name="settings_app_ver">PhotoEasy v1.0 • Professional Photo Editor</string>
+
+    <!-- Additional UI & Transform Strings -->
+    <string name="crop_transform">Transform</string>
+    <string name="crop_aspect_ratios">Aspect Ratios</string>
+    <string name="crop_original">Original</string>
+    <string name="action_apply_crop">Apply Crop</string>
+    <string name="crop_fine_angle">Fine Angle</string>
+    <string name="select_refine_edges_title">Refine Selection Edges:</string>
+    <string name="filter_presets_title">Preset Filters &amp; FX</string>
+    <string name="canvas_resize_title">Resize Canvas &amp; Image</string>
+    <string name="canvas_resize_presets">Quick Presets</string>
+    <string name="canvas_resize_scale_content">Scale Layer Contents proportionally</string>
+    <string name="preset_quick_presets">Presets</string>
+    <string name="status_processing">Processing PhotoEasy…</string>
+    <string name="canvas_fit">Fit</string>
+    <string name="canvas_width">Width</string>
+
+    <!-- Autosave & Unsaved Dialog -->
+    <string name="unsaved_title">Unsaved Changes</string>
+    <string name="unsaved_desc">You have unsaved changes in your project. Would you like to save before exiting?</string>
+    <string name="unsaved_save_exit">Save &amp; Exit</string>
+    <string name="unsaved_discard">Discard Changes</string>
+    <string name="restore_session_title">Unsaved Session Recovered</string>
+    <string name="restore_session_desc">You have an unsaved project session from your previous visit.</string>
+    <string name="restore_session_btn">Restore Session</string>
+
+    <!-- Text Tool & Canvas Validation -->
+    <string name="text_no_layer_selected">No text layer selected.</string>
+    <string name="text_add_layer_button">Add New Text Layer</string>
+    <string name="canvas_invalid_dimensions">Invalid canvas size (64–4096 px, max 12 Megapixels).</string>
+
+    <string name="tool_transform">Transform</string>
+    <string name="transform_title">Transform</string>
+    <string name="transform_rotation">Rotation</string>
+    <string name="transform_reset">Reset</string>
+    <string name="crop_pro_hint">Drag corners or edges and drag inside the frame to reposition the crop.</string>
+    <string name="filter_preview_hint">Live previews from the current image</string>
+    <string name="select_rectangle">Rectangle</string>
+    <string name="select_ellipse">Ellipse</string>
+    <string name="select_edge_radius">Edge radius</string>
+    <string name="select_all">Select all</string>
+    <string name="inpaint_radius">Fill radius</string>
+    <string name="inpaint_feather">Edge blending</string>
+    <string name="inpaint_quality_hint">Select slightly beyond the object edge for the cleanest fill.</string>
+
+    <!-- UX polish / accessibility -->
+    <string name="cd_back">Back</string>
+    <string name="cd_settings">Settings</string>
+    <string name="cd_more">More options</string>
+    <string name="cd_resize">Resize canvas</string>
+    <string name="cd_smart_auto">Smart Auto</string>
+    <string name="cd_save">Save project</string>
+    <string name="cd_export">Export image</string>
+    <string name="cd_zoom_out">Zoom out</string>
+    <string name="cd_zoom_in">Zoom in</string>
+    <string name="cd_fit_screen">Fit to screen</string>
+    <string name="cd_undo_point">Undo point</string>
+    <string name="cd_clear_points">Clear points</string>
+    <string name="cd_layer_hidden">Hidden layer</string>
+    <string name="cd_layer_menu">Layer actions</string>
+    <string name="cd_add_layer">Add layer</string>
+    <string name="status_saved">Saved</string>
+    <string name="status_unsaved">Unsaved</string>
+    <string name="status_working">Working…</string>
+    <string name="toolbar_more">More</string>
+    <string name="filter_apply">Apply Filter</string>
+    <string name="filter_cancel">Cancel Preview</string>
+    <string name="filter_preview_instruction">Tap a filter to preview it. Apply when you are happy with the result.</string>
+    <string name="filter_original_compare">Original</string>
+    <string name="adj_reset_all">Reset all</string>
+    <string name="selection_refine_group">Refine Selection</string>
+    <string name="selection_actions">Selection Actions</string>
+    <string name="selection_undo">Undo selection</string>
+    <string name="selection_redo">Redo selection</string>
+    <string name="select_brush">Brush</string>
+    <string name="select_lasso_short">Lasso</string>
+    <string name="select_polygon_short">Polygon</string>
+    <string name="select_wand_short">Wand</string>
+    <string name="select_wand_contiguous">Contiguous</string>
+    <string name="select_wand_all_colors">All Colors</string>
+    <string name="inpaint_add_mask">Paint</string>
+    <string name="inpaint_erase_mask">Erase mask</string>
+    <string name="inpaint_clear_mask">Clear mask</string>
+    <string name="inpaint_undo_mask">Undo mask</string>
+    <string name="inpaint_mode_hint">Paint over the object. Use Erase mask to correct the selection before removing it.</string>
+    <string name="crop_current_size">Crop: %1$d × %2$d px</string>
+    <string name="crop_ratio_selected">Selected ratio: %1$s</string>
+    <string name="layer_actions">Layer actions</string>
+    <string name="layer_thumbnail">Layer thumbnail</string>
+    <string name="layer_more_actions">More layer actions</string>
+    <string name="layer_empty_text">Text</string>
+    <string name="delete_project_title">Delete project?</string>
+    <string name="delete_project_message">This project and its saved edits will be permanently deleted.</string>
+    <string name="delete_project_confirm">Delete project</string>
+    <string name="sample_project_hint">Want to explore first? Try a sample project.</string>
+    <string name="new_canvas_name_default">New Project</string>
+    <string name="processing_blocking_hint">Please wait while PhotoEasy finishes this operation.</string>
+    <string name="text_add_empty">Add text</string>
+    <string name="zoom_percent">Zoom %1$d%%</string>
+    <string name="fit_mode">Fit</string>
+    <string name="width_mode">Width</string>
+    <string name="actual_size">100%</string>
+    <string name="action_done">Done</string>
+    <string name="action_more">More</string>
+    <string name="action_close">Close</string>
+    <string name="action_clear">Clear</string>
+    <string name="canvas_before_after">Compare</string>
+    <string name="project_dimensions">%1$d × %2$d px</string>
+    <string name="project_delete_menu">Delete</string>
+    <string name="saved_indicator_accessible">Project saved</string>
+    <string name="unsaved_indicator_accessible">Project has unsaved changes</string>
+
+    <!-- Runtime operation messages -->
+    <string name="status_saving_changes">Saving changes…</string>
+    <string name="status_save_failed_storage">Couldn’t save the project. Check free storage and try again.</string>
+    <string name="status_saving_project">Saving project…</string>
+    <string name="status_loading_photo">Loading photo…</string>
+    <string name="status_photo_added">Photo added</string>
+    <string name="status_photo_load_failed">Couldn’t load the photo</string>
+    <string name="status_importing_photo">Importing photo…</string>
+    <string name="status_image_decode_failed">This image couldn’t be decoded.</string>
+    <string name="status_import_failed">Import failed</string>
+    <string name="status_loading_sample">Loading sample…</string>
+    <string name="status_sample_failed">Couldn’t load the sample</string>
+    <string name="status_adjustment_added">Adjustment layer added</string>
+    <string name="status_layer_locked">Layer locked</string>
+    <string name="status_layer_unlocked">Layer unlocked</string>
+    <string name="status_locked_delete">Unlock the layer before deleting it.</string>
+    <string name="status_locked_duplicate">Unlock the layer before duplicating it.</string>
+    <string name="status_duplicating_layer">Duplicating layer…</string>
+    <string name="status_layer_duplicated">Layer duplicated</string>
+    <string name="status_duplicate_failed">Couldn’t duplicate the layer</string>
+    <string name="status_locked_merge">Unlock both layers before merging.</string>
+    <string name="status_merging_layers">Merging layers…</string>
+    <string name="status_layers_merged">Layers merged</string>
+    <string name="status_merge_failed">Couldn’t merge the layers</string>
+    <string name="status_canvas_resized">Canvas resized to %1$d × %2$d</string>
+    <string name="status_applying_perspective">Applying perspective crop…</string>
+    <string name="status_perspective_applied">Perspective crop applied</string>
+    <string name="status_perspective_failed">Perspective crop failed</string>
+    <string name="status_canvas_cropped">Crop applied</string>
+    <string name="status_analyzing_image">Analyzing image…</string>
+    <string name="status_smart_auto_applied">Smart Auto applied</string>
+    <string name="status_smart_auto_failed">Smart Auto failed</string>
+    <string name="status_select_object_first">Paint over the object first.</string>
+    <string name="status_content_aware_removal">Removing object…</string>
+    <string name="status_object_removed">Object removed</string>
+    <string name="status_object_remove_failed">Object removal failed</string>
+    <string name="status_selecting_area">Creating selection…</string>
+    <string name="status_selection_failed">Selection failed</string>
+    <string name="status_feathering">Feathering selection…</string>
+    <string name="status_feather_failed">Feathering failed</string>
+    <string name="status_expanding_selection">Expanding selection…</string>
+    <string name="status_expand_failed">Expanding selection failed</string>
+    <string name="status_contracting_selection">Contracting selection…</string>
+    <string name="status_contract_failed">Contracting selection failed</string>
+    <string name="status_smoothing_selection">Smoothing selection…</string>
+    <string name="status_smooth_failed">Smoothing failed</string>
+    <string name="status_refining_selection">Refining selection…</string>
+    <string name="status_refine_failed">Refining selection failed</string>
+    <string name="status_inverting_selection">Inverting selection…</string>
+    <string name="status_invert_failed">Inverting selection failed</string>
+    <string name="status_nothing_selected">Nothing is selected.</string>
+    <string name="status_copying_selection">Copying selection…</string>
+    <string name="status_copied_new_layer">Copied to a new layer</string>
+    <string name="status_copy_failed">Couldn’t copy the selection</string>
+    <string name="layer_name_background">Background</string>
+    <string name="layer_name_image">Image Layer</string>
+    <string name="layer_name_imported">Imported Photo</string>
+    <string name="layer_name_adjustment">Adjustment Layer %1$d</string>
+    <string name="layer_name_selection">Selection Layer</string>
+
+    <string name="layer_name_text">Text: %1$s</string>
+    <string name="sample_project_name">Welcome to PhotoEasy</string>
+    <string name="sample_layer_art">Creative Art</string>
+    <string name="sample_layer_title">Title Text</string>
+    <string name="sample_title_text">Create freely with PhotoEasy</string>
+    <string name="cd_editor_canvas">Editor canvas. Use one finger for the active tool and two fingers to pan or zoom.</string>
+    <string name="status_storage_permission_denied">Storage permission was denied. PhotoEasy could not save to the Gallery.</string>
+
+    <!-- Quick Selection & Edge Snapping Strings -->
+    <string name="select_quick_selection">Quick Selection Tool</string>
+    <string name="select_quick_selection_short">Quick Select</string>
+    <string name="select_sample_all_layers">All Layers</string>
+    <string name="select_auto_enhance">Auto-Enhance</string>
+    <string name="select_quick_mode_hint">Brush over object to intelligently snap to edges</string>
+
+    <!-- Perspective Crop Strings -->
+    <string name="perspective_fit_canvas">Fit to Image</string>
+    <string name="perspective_drag_hint">Drag corners or edge handles. Drag inside to move quad.</string>
+    <string name="perspective_loupe">Loupe</string>
+
+    <!-- Layer Mask Strings -->
+    <string name="layer_mask_title">Layer Mask</string>
+    <string name="layer_mask_add">Add Layer Mask</string>
+    <string name="layer_mask_from_selection">Mask from Selection</string>
+    <string name="layer_mask_invert">Invert Mask</string>
+    <string name="layer_mask_disable">Disable Mask</string>
+    <string name="layer_mask_enable">Enable Mask</string>
+    <string name="layer_mask_delete">Delete Mask</string>
+    <string name="layer_mask_apply">Apply Mask</string>
+    <string name="layer_mask_editing_mask">Editing Mask</string>
+    <string name="layer_mask_editing_layer">Editing Layer</string>
+    <string name="layer_mask_paint_black">Paint Black (Hide)</string>
+    <string name="layer_mask_paint_white">Paint White (Reveal)</string>
+    <string name="status_layer_mask_added">Layer mask added</string>
+    <string name="status_layer_mask_inverted">Layer mask inverted</string>
+    <string name="status_layer_mask_applied">Layer mask applied</string>
+    <string name="status_layer_mask_deleted">Layer mask removed</string>
+
+    <!-- Filter Intensity -->
+    <string name="filter_intensity">Filter Intensity</string>
+
+    <!-- Professional Transform Strings -->
+    <string name="transform_scale">Scale</string>
+    <string name="transform_scale_x">Scale X (Width)</string>
+    <string name="transform_scale_y">Scale Y (Height)</string>
+    <string name="transform_proportional">Lock Proportions</string>
+    <string name="transform_pos_x">Position X</string>
+    <string name="transform_pos_y">Position Y</string>
+    <string name="transform_center_canvas">Center on Canvas</string>
+    <string name="transform_fit_canvas">Fit to Canvas</string>
+    <string name="transform_fill_canvas">Fill Canvas</string>
+
+    <!-- Professional Inpaint / Remove Selection -->
+    <string name="inpaint_mode_brush">Brush</string>
+    <string name="inpaint_mode_lasso">Lasso Box</string>
+    <string name="inpaint_mode_box">Rectangle</string>
+    <string name="inpaint_remove_now">Remove Object</string>
+
+    <!-- Text Effects & Styling -->
+    <string name="text_position">Text Position</string>
+    <string name="text_center_canvas">Center Text</string>
+    <string name="text_drop_shadow">Drop Shadow</string>
+    <string name="text_outer_glow">Outer Glow</string>
+    <string name="text_glow_radius">Glow Radius</string>
+    <string name="text_glow_color">Glow Color</string>
+    <string name="text_shadow_offset_x">Shadow Offset X</string>
+    <string name="text_shadow_offset_y">Shadow Offset Y</string>
+    <string name="text_custom_color">Custom Color</string>
+    <string name="text_pick_color">Select Color</string>
+
+    <!-- Professional Blur & Effects Strings -->
+    <string name="filter_tab_presets">Presets</string>
+    <string name="filter_tab_pro_effects">Pro Blur &amp; Effects</string>
+    <string name="effect_gaussian_blur">Gaussian Blur</string>
+    <string name="effect_surface_blur">Surface Blur</string>
+    <string name="effect_oil_paint">Oil Paint</string>
+    <string name="effect_sharpen">Sharpen (Unsharp Mask)</string>
+    <string name="effect_noise_reduction">Noise Reduction</string>
+    <string name="effect_motion_blur">Motion Blur</string>
+    <string name="effect_radial_blur">Radial / Zoom Blur</string>
+    <string name="effect_radius">Radius</string>
+    <string name="effect_threshold">Edge Threshold</string>
+    <string name="effect_levels">Smoothness &amp; Paint Levels</string>
+    <string name="effect_amount">Sharpen Amount</string>
+    <string name="effect_strength">Denoise Strength</string>
+    <string name="effect_distance">Motion Distance</string>
+    <string name="effect_angle">Angle</string>
+    <string name="effect_apply_layer">Apply Effect to Layer</string>
+    <string name="status_effect_applied">Effect applied to layer</string>
+
+    <!-- Layer Mask Advanced Controls -->
+    <string name="layer_mask_feather">Mask Feather (Soft Edge)</string>
+    <string name="layer_mask_density">Mask Density</string>
+    <string name="layer_mask_overlay">Ruby Mask Overlay</string>
+    <string name="layer_mask_reveal_all">Reveal All (White)</string>
+    <string name="layer_mask_hide_all">Hide All (Black)</string>
+    <string name="layer_mask_controls">Mask Controls</string>
+    <string name="layer_mask_brush_size">Mask Brush Size</string>
+
+    <!-- Curves, Hue/Sat, Color Replacement -->
+    <string name="adj_tab_basic">Basic</string>
+    <string name="adj_tab_curves">Curves</string>
+    <string name="adj_tab_hue_sat">Hue / Saturation</string>
+    <string name="adj_tab_replace_color">Replace Color</string>
+    <string name="curves_channel_rgb">RGB</string>
+    <string name="curves_channel_red">Red</string>
+    <string name="curves_channel_green">Green</string>
+    <string name="curves_channel_blue">Blue</string>
+    <string name="curves_reset_channel">Reset Channel</string>
+    <string name="curves_preset_s_curve">S-Curve Contrast</string>
+    <string name="curves_preset_lift_shadows">Lift Shadows</string>
+    <string name="curves_preset_deep_blacks">Deep Blacks</string>
+    <string name="curves_preset_linear">Reset Linear</string>
+    <string name="hue_shift">Hue Shift</string>
+    <string name="hue_saturation">Saturation</string>
+    <string name="hue_lightness">Lightness</string>
+    <string name="color_range_all">Master</string>
+    <string name="color_range_reds">Reds</string>
+    <string name="color_range_yellows">Yellows</string>
+    <string name="color_range_greens">Greens</string>
+    <string name="color_range_cyans">Cyans</string>
+    <string name="color_range_blues">Blues</string>
+    <string name="color_range_magentas">Magentas</string>
+    <string name="replace_source_color">Color to Replace</string>
+    <string name="replace_tolerance">Fuzziness / Tolerance</string>
+    <string name="replace_target_color">Replacement Color</string>
+    <string name="replace_enabled">Active Replacement</string>
+    <string name="status_selection_active_scoped">Selection Active • Scoped to selection</string>
+
+    <!-- Before & After Comparison -->
+    <string name="compare_title">Before &amp; After</string>
+    <string name="compare_hold_general">Hold: Before</string>
+    <string name="compare_split_mode">Split View</string>
+    <string name="compare_before">BEFORE</string>
+    <string name="compare_after">AFTER</string>
+    <string name="compare_this_adjustment">Hold to see without this adjustment</string>
+    <string name="compare_basic_adjustments">Hold: Compare Basic</string>
+    <string name="compare_curves">Hold: Compare Curves</string>
+    <string name="compare_hsl">Hold: Compare HSL</string>
+    <string name="compare_replace_color">Hold: Compare Color Replace</string>
+    <string name="compare_filter">Hold: View Without Filter</string>
+
+    <!-- Upgraded AI Inpaint & Object Removal -->
+    <string name="inpaint_engine_title">Removal Algorithm</string>
+    <string name="inpaint_engine_ai">AI Texture Synthesis</string>
+    <string name="inpaint_engine_telea">Fast Marching (Telea)</string>
+    <string name="inpaint_smart_snap">Smart Edge Snapping</string>
+    <string name="inpaint_smart_snap_hint">Snaps mask tightly to object contours to prevent color halo fringes</string>
+    <string name="inpaint_seamless_blend">Seamless Poisson Blending</string>
+    <string name="inpaint_seamless_blend_hint">Eliminates visible boundaries between new texture and background</string>
+    <string name="inpaint_engine_desc_ai">Synthesizes real texture and continues structural edges without blurring</string>
+    <string name="inpaint_engine_desc_telea">Smooth color propagation suitable for small scratches and blemishes</string>
+
+    <!-- Professional Edge & Hair Refine (Select & Mask) -->
+    <string name="select_subject">Select Subject</string>
+    <string name="select_subject_desc">One-tap intelligent subject isolation</string>
+    <string name="select_refine_advanced">Refine Edge &amp; Hair</string>
+    <string name="refine_edge_dialog_title">Refine Edge &amp; Hair (Select &amp; Mask)</string>
+    <string name="refine_radius">Detection Radius</string>
+    <string name="refine_smart_radius">Smart Adaptive Radius</string>
+    <string name="refine_hair">Refine Hair &amp; Fur</string>
+    <string name="refine_hair_desc">Sub-pixel alpha matting for fine hair strands</string>
+    <string name="refine_smooth">Smooth</string>
+    <string name="refine_feather">Feather</string>
+    <string name="refine_contrast">Contrast</string>
+    <string name="refine_shift_edge">Shift Edge</string>
+    <string name="refine_decontaminate">Decontaminate Colors</string>
+    <string name="refine_decontaminate_desc">Cleans background color bleeding through hair strands</string>
+    <string name="refine_view_mode">Preview Mode</string>
+    <string name="refine_magnetic_snap">Magnetic Edge Snap</string>
+    <string name="status_subject_selected">Subject selected successfully</string>
+    <string name="status_matting_complete">Edge &amp; hair matting applied</string>
+    <string name="status_matting_failed">Edge refinement failed</string>
+</resources>

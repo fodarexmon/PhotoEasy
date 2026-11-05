@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:translateX="0"
+        android:translateY="0">
+        <!-- Rounded Photo Frame / Canvas -->
+        <path
+            android:fillColor="#1E202E"
+            android:strokeColor="#6366F1"
+            android:strokeWidth="3"
+            android:pathData="M30,30 h48 a6,6 0 0,1 6,6 v36 a6,6 0 0,1 -6,6 h-48 a6,6 0 0,1 -6,-6 v-36 a6,6 0 0,1 6,-6 z" />
+        
+        <!-- Mountain / Landscape lines in frame -->
+        <path
+            android:fillColor="#818CF8"
+            android:pathData="M30,68 L44,48 L56,62 L66,52 L78,68 Z" />
+            
+        <!-- Sun / Lens circle -->
+        <path
+            android:fillColor="#F59E0B"
+            android:pathData="M42,42 A6,6 0 1,1 42,41.9 Z" />
+
+        <!-- Magic Wand / Sparkle Overlay -->
+        <path
+            android:fillColor="#EC4899"
+            android:pathData="M68,26 L70,32 L76,34 L70,36 L68,42 L66,36 L60,34 L66,32 Z" />
+            
+        <!-- Small sparkle -->
+        <path
+            android:fillColor="#06B6D4"
+            android:pathData="M28,26 L29,30 L33,31 L29,32 L28,36 L27,32 L23,31 L27,30 Z" />
+    </group>
+</vector>

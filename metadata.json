@@ -1,0 +1,6 @@
+{
+  "name": "PhotoEasy",
+  "description": "Professional photo editor with layers, Before & After split slider and hold comparison, AI exemplar object removal with texture synthesis, Trimap Guided Alpha Matting, Hair Refine, Color Decontamination, Subject Selection, and Magnetic Snapping.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

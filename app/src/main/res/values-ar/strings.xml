@@ -1,0 +1,553 @@
+<resources>
+    <string name="app_name">فوتو إيزي PhotoEasy</string>
+    
+    <!-- General & Navigation -->
+    <string name="nav_home">المشاريع</string>
+    <string name="nav_new_project">مشروع جديد</string>
+    <string name="nav_gallery">فتح صورة</string>
+    <string name="nav_settings">الإعدادات</string>
+    <string name="action_save">حفظ المشروع</string>
+    <string name="action_export">تصدير الصورة</string>
+    <string name="action_undo">تراجع</string>
+    <string name="action_redo">إعادة</string>
+    <string name="action_cancel">إلغاء</string>
+    <string name="action_apply">تطبيق</string>
+    <string name="action_reset">إعادة ضبط</string>
+    <string name="action_delete">حذف</string>
+    <string name="action_duplicate">تكرار</string>
+    <string name="action_edit">تعديل</string>
+    <string name="action_share">مشاركة</string>
+    
+    <!-- Home / Dashboard -->
+    <string name="home_title">استوديو فوتو إيزي</string>
+    <string name="home_subtitle">إنشاء وتعديل وتحسين الصور بكل سهولة</string>
+    <string name="recent_projects">المشاريع الأخيرة</string>
+    <string name="no_projects_yet">لا توجد مشاريع محفوظة بعد</string>
+    <string name="no_projects_desc">أنشئ لوحة عمل جديدة أو استورد صورة للبدء!</string>
+    <string name="btn_blank_canvas">لوحة فارغة</string>
+    <string name="btn_open_photo">فتح صورة</string>
+    <string name="btn_sample_photo">تجربة صورة عينة</string>
+    
+    <!-- New Project Dialog / Canvas Creator -->
+    <string name="create_canvas_title">إنشاء لوحة رسم جديدة</string>
+    <string name="canvas_name">اسم المشروع</string>
+    <string name="width_px">العرض (بكسل)</string>
+    <string name="height_px">الارتفاع (بكسل)</string>
+    <string name="lock_aspect_ratio">قفل نسبة الأبعاد</string>
+    <string name="preset_square">مربع (1:1)</string>
+    <string name="preset_story">ستوري (9:16)</string>
+    <string name="preset_landscape">أفقي عالي الدقة (16:9)</string>
+    <string name="preset_portrait">بورتريه (4:5)</string>
+    <string name="preset_custom">مخصص</string>
+    <string name="bg_color">لون الخلفية</string>
+    <string name="bg_transparent">شفاف</string>
+    <string name="bg_white">أبيض</string>
+    <string name="bg_black">أسود</string>
+    
+    <!-- Editing Tools -->
+    <string name="tool_adjust">الضبط</string>
+    <string name="tool_filters">الفلاتر</string>
+    <string name="tool_crop">القص والمنظور</string>
+    <string name="tool_select">أدوات التحديد</string>
+    <string name="tool_layers">الطبقات</string>
+    <string name="tool_text">الكتابة النصية</string>
+    <string name="tool_inpaint">إزالة العناصر</string>
+    <string name="tool_auto">تحسين ذكي</string>
+    
+    <!-- Color Adjustments -->
+    <string name="adj_brightness">الإضاءة</string>
+    <string name="adj_contrast">التباين</string>
+    <string name="adj_saturation">تشبع الألوان</string>
+    <string name="adj_temperature">حرارة اللون</string>
+    <string name="adj_tint">الصبغة</string>
+    <string name="adj_exposure">التعريض</string>
+    <string name="adj_highlights">المناطق المضيئة</string>
+    <string name="adj_shadows">الظلال</string>
+    <string name="adj_sharpness">الحدة</string>
+    <string name="adj_vignette">تعتيم الأطراف</string>
+    <string name="adj_smart_auto">الضبط الذكي التلقائي</string>
+    <string name="adj_smart_auto_applied">تم تطبيق التحسين الذكي بنجاح!</string>
+    
+    <!-- Filters -->
+    <string name="filter_none">الأصلي</string>
+    <string name="filter_vintage">كلاسيكي (فينتاج)</string>
+    <string name="filter_sepia">سيبيا</string>
+    <string name="filter_grayscale">أبيض وأسود</string>
+    <string name="filter_cyberpunk">سايبر بانك</string>
+    <string name="filter_cinematic">سينمائي</string>
+    <string name="filter_hdr">تأثير HDR</string>
+    <string name="filter_warm">غروب دافئ</string>
+    <string name="filter_cool">نسيم بارد</string>
+    <string name="filter_glow">توهج ناعم</string>
+    <string name="filter_pixelate">بكسلة</string>
+    <string name="filter_edges">تحديد الحواف</string>
+    <string name="filter_glitch">قلتش / شاشة شاش</string>
+    <string name="filter_orange_teal">برتقالي وتركواز</string>
+    <string name="filter_moody_dark">داكن درامي</string>
+    <string name="filter_vaporwave">نيون ريترو</string>
+    <string name="filter_film_noir">فيلم نوار</string>
+    <string name="filter_kodachrome">كوداكروم 64</string>
+    <string name="filter_pastel_dream">حلم الباستيل</string>
+    <string name="filter_duotone_violet">ثنائي اللون بنفسجي</string>
+    <string name="filter_emerald_mint">زمردي ونعناعي</string>
+    <string name="filter_golden_hour">الساعة الذهبية</string>
+    <string name="filter_solarize">سولارايز</string>
+    <string name="filter_bleach_bypass">تجاوز التبييض</string>
+    <string name="filter_cross_process">معالجة متقاطعة</string>
+    
+    <!-- Crop & Transform -->
+    <string name="crop_free">قص حر</string>
+    <string name="rotate_left">تدوير يسار</string>
+    <string name="rotate_right">تدوير يمين</string>
+    <string name="flip_h">عكس أفقي</string>
+    <string name="flip_v">عكس رأسي</string>
+    <string name="perspective_transform">قص منظوري</string>
+    <string name="drag_corners_perspective">اسحب الزوايا الأربع لتطابق حواف العنصر ثم اضغط تطبيق للقص والاستعدال.</string>
+    
+    <!-- Selection Tools -->
+    <string name="select_quick_brush">فرشاة التحديد السريع</string>
+    <string name="select_lasso">أداة الحبل (Lasso)</string>
+    <string name="select_polygon">أداة القلم متعدد الأضلاع</string>
+    <string name="select_magic_wand">العصا السحرية</string>
+    <string name="select_brush_size">حجم الفرشاة</string>
+    <string name="select_tolerance">درجة تسامح اللون</string>
+    <string name="select_invert">عكس التحديد</string>
+    <string name="select_clear">مسح التحديد</string>
+    <string name="select_erase">مسح المنطقة المحددة</string>
+    <string name="select_copy_layer">نسخ التحديد لطبقة جديدة</string>
+    <string name="select_instructions">ارسم أو انقر على الصورة لتحديد المنطقة</string>
+    <string name="select_mode_add">+ إضافة</string>
+    <string name="select_mode_subtract">- طرح</string>
+    <string name="select_mode_intersect">تقاطع</string>
+    <string name="select_mode_replace">استبدال</string>
+    <string name="select_feather">تنعيم الحواف (Feather)</string>
+    <string name="select_grow">توسيع التحديد</string>
+    <string name="select_shrink">تقليص التحديد</string>
+    <string name="select_smooth">صقل التحديد</string>
+    <string name="select_refine">تحسين الحواف</string>
+    
+    <!-- Object Removal / Inpainting -->
+    <string name="inpaint_title">إزالة الكائنات والأشخاص</string>
+    <string name="inpaint_brush">فرشاة الإزالة</string>
+    <string name="inpaint_instructions">قم بالرسم فوق الشيء المراد إزالته ليتم إخفاؤه بسلاسة</string>
+    <string name="inpaint_action">إزالة الكائن</string>
+    <string name="inpaint_processing">جاري إزالة الكائن بذكاء…</string>
+    <string name="inpaint_success">تمت إزالة الكائن بنجاح!</string>
+    
+    <!-- Layers Panel -->
+    <string name="layers_title">شجرة الطبقات</string>
+    <string name="layer_add">إضافة طبقة</string>
+    <string name="layer_add_image">طبقة صورة</string>
+    <string name="layer_add_text">طبقة نص</string>
+    <string name="layer_add_fill">طبقة تعبئة لونية</string>
+    <string name="layer_add_adjustment">طبقة تعديلات (Adjustment Layer)</string>
+    <string name="layer_color_fill">طبقة تعبئة لونية</string>
+    <string name="layer_opacity">الشفافية</string>
+    <string name="layer_blend_mode">نمط الدمج</string>
+    <string name="layer_visibility">إظهار / إخفاء الطبقة</string>
+    <string name="layer_lock">قفل الطبقة</string>
+    <string name="layer_move_up">تحريك للأعلى</string>
+    <string name="layer_move_down">تحريك للأسفل</string>
+    <string name="layer_merge_down">دمج مع الطبقة السفلى</string>
+    <string name="layer_delete">حذف الطبقة</string>
+    <string name="layer_duplicate">تكرار الطبقة</string>
+    
+    <!-- Blend Modes -->
+    <string name="blend_normal">عادي</string>
+    <string name="blend_multiply">ضرب (Multiply)</string>
+    <string name="blend_screen">شاشة (Screen)</string>
+    <string name="blend_overlay">تراكب (Overlay)</string>
+    <string name="blend_darken">تغميق (Darken)</string>
+    <string name="blend_lighten">تفتيح (Lighten)</string>
+    <string name="blend_soft_light">ضوء خافت</string>
+    <string name="blend_hard_light">ضوء قوي</string>
+    <string name="blend_difference">الفرق (Difference)</string>
+    <string name="blend_add">إضافة (Add)</string>
+    
+    <!-- Text Tool & Fonts -->
+    <string name="text_edit_title">تحرير النص</string>
+    <string name="text_hint">أدخل النص هنا (يدعم العربية والإنجليزية)</string>
+    <string name="font_family">خط النص</string>
+    <string name="font_cairo">خط القاهرة Cairo</string>
+    <string name="font_tajawal">خط تجوال Tajawal</string>
+    <string name="font_amiri">خط أميري Amiri</string>
+    <string name="font_montserrat">خط مونتسيرات Montserrat</string>
+    <string name="font_default">خط النظام الافتراضي</string>
+    <string name="text_color">لون النص</string>
+    <string name="text_stroke_color">لون الإطار (Outline)</string>
+    <string name="text_stroke_width">سُمك الإطار</string>
+    <string name="text_shadow_color">لون الظل</string>
+    <string name="text_shadow_radius">مدى تشويش الظل</string>
+    <string name="text_line_spacing">تباعد الأسطر</string>
+    <string name="text_letter_spacing">تباعد الحروف</string>
+    <string name="text_max_width">أقصى عرض للسطر</string>
+    <string name="text_align">محاذاة النص</string>
+    <string name="text_align_left">يسار</string>
+    <string name="text_align_center">وسط</string>
+    <string name="text_align_right">يمين</string>
+    <string name="text_size">حجم الخط</string>
+    
+    <!-- Export Dialog -->
+    <string name="export_title">تصدير الصورة</string>
+    <string name="export_format">صيغة الملف</string>
+    <string name="format_jpg">صورة JPEG (.jpg)</string>
+    <string name="format_png">صورة PNG (.png - جودة عالية / شفافية)</string>
+    <string name="export_quality">جودة JPEG</string>
+    <string name="export_dimensions">أبعاد الصورة: %1$d x %2$d بكسل</string>
+    <string name="export_success">تم تصدير الصورة وحفظها في المعرض بنجاح!</string>
+    <string name="export_failed">فشل تصدير الصورة</string>
+    <string name="project_saved">تم حفظ المشروع بنجاح!</string>
+    
+    <!-- Settings -->
+    <string name="settings_title">الإعدادات</string>
+    <string name="settings_language">اللغة / Language</string>
+    <string name="language_auto">حسب لغة الجهاز</string>
+    <string name="language_en">الإنجليزية (English)</string>
+    <string name="language_ar">العربية (Arabic)</string>
+    <string name="settings_app_ver">فوتو إيزي الإصدار 1.0 • محرر الصور الاحترافي</string>
+
+    <!-- Additional UI & Transform Strings -->
+    <string name="crop_transform">التحويل والتدوير</string>
+    <string name="crop_aspect_ratios">نسب الأبعاد</string>
+    <string name="crop_original">الأصلي</string>
+    <string name="action_apply_crop">تطبيق القص</string>
+    <string name="crop_fine_angle">الزاوية الدقيقة</string>
+    <string name="select_refine_edges_title">تحسين وتنعيم حواف التحديد:</string>
+    <string name="filter_presets_title">الفلاتر والتأثيرات الجاهزة</string>
+    <string name="canvas_resize_title">تغيير حجم اللوحة والصورة</string>
+    <string name="canvas_resize_presets">مقاسات جاهزة</string>
+    <string name="canvas_resize_scale_content">تكبير/تصغير محتوى الطبقات بنسبة وتناسب</string>
+    <string name="preset_quick_presets">نماذج جاهزة</string>
+    <string name="status_processing">جاري المعالجة...</string>
+    <string name="canvas_fit">احتواء</string>
+    <string name="canvas_width">العرض</string>
+
+    <!-- Autosave & Unsaved Dialog -->
+    <string name="unsaved_title">تغييرات غير محفوظة</string>
+    <string name="unsaved_desc">لديك تعديلات غير محفوظة في المشروع. هل تريد حفظ التغييرات قبل الخروج؟</string>
+    <string name="unsaved_save_exit">حفظ والخروج</string>
+    <string name="unsaved_discard">تجاهل التعديلات</string>
+    <string name="restore_session_title">تم استعادة جلسة غير محفوظة</string>
+    <string name="restore_session_desc">توجد جلسة عمل سابقة لم يتم إغلاقها بشكل عادي.</string>
+    <string name="restore_session_btn">استعادة الجلسة</string>
+
+    <!-- Text Tool & Canvas Validation -->
+    <string name="text_no_layer_selected">لم يتم اختيار طبقة نصية.</string>
+    <string name="text_add_layer_button">إضافة طبقة نصية جديدة</string>
+    <string name="canvas_invalid_dimensions">أبعاد لوحة غير صالحة (64–4096 بكسل، وأقل من 12 ميجابكسل).</string>
+
+    <string name="tool_transform">تحويل</string>
+    <string name="transform_title">تحويل الطبقة</string>
+    <string name="transform_rotation">الدوران</string>
+    <string name="transform_reset">إعادة ضبط</string>
+    <string name="crop_pro_hint">اسحب الزوايا أو الحواف واسحب داخل الإطار لتحريك منطقة القص.</string>
+    <string name="filter_preview_hint">معاينات حية من الصورة الحالية</string>
+    <string name="select_rectangle">مستطيل</string>
+    <string name="select_ellipse">بيضاوي</string>
+    <string name="select_edge_radius">نطاق الحافة</string>
+    <string name="select_all">تحديد الكل</string>
+    <string name="inpaint_radius">نطاق الملء</string>
+    <string name="inpaint_feather">دمج الحواف</string>
+    <string name="inpaint_quality_hint">حدد مساحة تتجاوز حافة العنصر قليلًا للحصول على أفضل نتيجة.</string>
+
+    <!-- UX polish / accessibility -->
+    <string name="cd_back">رجوع</string>
+    <string name="cd_settings">الإعدادات</string>
+    <string name="cd_more">المزيد من الخيارات</string>
+    <string name="cd_resize">تغيير حجم اللوحة</string>
+    <string name="cd_smart_auto">التحسين الذكي</string>
+    <string name="cd_save">حفظ المشروع</string>
+    <string name="cd_export">تصدير الصورة</string>
+    <string name="cd_zoom_out">تصغير</string>
+    <string name="cd_zoom_in">تكبير</string>
+    <string name="cd_fit_screen">احتواء داخل الشاشة</string>
+    <string name="cd_undo_point">التراجع عن النقطة</string>
+    <string name="cd_clear_points">مسح النقاط</string>
+    <string name="cd_layer_hidden">طبقة مخفية</string>
+    <string name="cd_layer_menu">إجراءات الطبقة</string>
+    <string name="cd_add_layer">إضافة طبقة</string>
+    <string name="status_saved">محفوظ</string>
+    <string name="status_unsaved">غير محفوظ</string>
+    <string name="status_working">جاري العمل…</string>
+    <string name="toolbar_more">المزيد</string>
+    <string name="filter_apply">تطبيق الفلتر</string>
+    <string name="filter_cancel">إلغاء المعاينة</string>
+    <string name="filter_preview_instruction">اضغط على أي فلتر لمعاينته ثم طبّقه عندما تعجبك النتيجة.</string>
+    <string name="filter_original_compare">الأصلي</string>
+    <string name="adj_reset_all">إعادة ضبط الكل</string>
+    <string name="selection_refine_group">تحسين التحديد</string>
+    <string name="selection_actions">إجراءات التحديد</string>
+    <string name="selection_undo">تراجع عن التحديد</string>
+    <string name="selection_redo">إعادة التحديد</string>
+    <string name="select_brush">فرشاة</string>
+    <string name="select_lasso_short">حبل</string>
+    <string name="select_polygon_short">مضلع</string>
+    <string name="select_wand_short">عصا</string>
+    <string name="select_wand_contiguous">متصل (متجاور)</string>
+    <string name="select_wand_all_colors">شامل (كل الألوان)</string>
+    <string name="inpaint_add_mask">رسم</string>
+    <string name="inpaint_erase_mask">مسح القناع</string>
+    <string name="inpaint_clear_mask">مسح القناع</string>
+    <string name="inpaint_undo_mask">تراجع عن القناع</string>
+    <string name="inpaint_mode_hint">ارسم فوق العنصر، واستخدم مسح القناع لتصحيح التحديد قبل الإزالة.</string>
+    <string name="crop_current_size">القص: %1$d × %2$d بكسل</string>
+    <string name="crop_ratio_selected">النسبة المختارة: %1$s</string>
+    <string name="layer_actions">إجراءات الطبقة</string>
+    <string name="layer_thumbnail">معاينة الطبقة</string>
+    <string name="layer_more_actions">المزيد من إجراءات الطبقة</string>
+    <string name="layer_empty_text">نص</string>
+    <string name="delete_project_title">حذف المشروع؟</string>
+    <string name="delete_project_message">سيتم حذف هذا المشروع وتعديلاته المحفوظة نهائيًا.</string>
+    <string name="delete_project_confirm">حذف المشروع</string>
+    <string name="sample_project_hint">تريد التجربة أولًا؟ افتح مشروعًا تجريبيًا.</string>
+    <string name="new_canvas_name_default">مشروع جديد</string>
+    <string name="processing_blocking_hint">يرجى الانتظار حتى ينتهي PhotoEasy من العملية الحالية.</string>
+    <string name="text_add_empty">إضافة نص</string>
+    <string name="zoom_percent">تكبير %1$d%%</string>
+    <string name="fit_mode">احتواء</string>
+    <string name="width_mode">العرض</string>
+    <string name="actual_size">100٪</string>
+    <string name="action_done">تم</string>
+    <string name="action_more">المزيد</string>
+    <string name="action_close">إغلاق</string>
+    <string name="action_clear">مسح</string>
+    <string name="canvas_before_after">مقارنة</string>
+    <string name="project_dimensions">%1$d × %2$d بكسل</string>
+    <string name="project_delete_menu">حذف</string>
+    <string name="saved_indicator_accessible">المشروع محفوظ</string>
+    <string name="unsaved_indicator_accessible">يوجد تعديلات غير محفوظة</string>
+
+    <!-- Runtime operation messages -->
+    <string name="status_saving_changes">جارٍ حفظ التغييرات…</string>
+    <string name="status_save_failed_storage">تعذر حفظ المشروع. تحقق من المساحة المتاحة ثم حاول مرة أخرى.</string>
+    <string name="status_saving_project">جارٍ حفظ المشروع…</string>
+    <string name="status_loading_photo">جارٍ تحميل الصورة…</string>
+    <string name="status_photo_added">تمت إضافة الصورة</string>
+    <string name="status_photo_load_failed">تعذر تحميل الصورة</string>
+    <string name="status_importing_photo">جارٍ استيراد الصورة…</string>
+    <string name="status_image_decode_failed">تعذر قراءة هذه الصورة.</string>
+    <string name="status_import_failed">فشل استيراد الصورة</string>
+    <string name="status_loading_sample">جارٍ تحميل المثال…</string>
+    <string name="status_sample_failed">تعذر تحميل المثال</string>
+    <string name="status_adjustment_added">تمت إضافة طبقة تعديلات</string>
+    <string name="status_layer_locked">تم قفل الطبقة</string>
+    <string name="status_layer_unlocked">تم إلغاء قفل الطبقة</string>
+    <string name="status_locked_delete">افتح قفل الطبقة قبل حذفها.</string>
+    <string name="status_locked_duplicate">افتح قفل الطبقة قبل نسخها.</string>
+    <string name="status_duplicating_layer">جارٍ نسخ الطبقة…</string>
+    <string name="status_layer_duplicated">تم نسخ الطبقة</string>
+    <string name="status_duplicate_failed">تعذر نسخ الطبقة</string>
+    <string name="status_locked_merge">افتح قفل الطبقتين قبل الدمج.</string>
+    <string name="status_merging_layers">جارٍ دمج الطبقات…</string>
+    <string name="status_layers_merged">تم دمج الطبقات</string>
+    <string name="status_merge_failed">تعذر دمج الطبقات</string>
+    <string name="status_canvas_resized">تم تغيير اللوحة إلى %1$d × %2$d</string>
+    <string name="status_applying_perspective">جارٍ تطبيق القص المنظوري والاستعدال…</string>
+    <string name="status_perspective_applied">تم تطبيق القص المنظوري بنجاح</string>
+    <string name="status_perspective_failed">فشل تطبيق القص المنظوري</string>
+    <string name="status_canvas_cropped">تم تطبيق القص</string>
+    <string name="status_analyzing_image">جارٍ تحليل الصورة…</string>
+    <string name="status_smart_auto_applied">تم تطبيق التحسين الذكي</string>
+    <string name="status_smart_auto_failed">فشل التحسين الذكي</string>
+    <string name="status_select_object_first">ارسم فوق العنصر أولًا.</string>
+    <string name="status_content_aware_removal">جارٍ إزالة العنصر…</string>
+    <string name="status_object_removed">تمت إزالة العنصر</string>
+    <string name="status_object_remove_failed">فشلت إزالة العنصر</string>
+    <string name="status_selecting_area">جارٍ إنشاء التحديد…</string>
+    <string name="status_selection_failed">فشل التحديد</string>
+    <string name="status_feathering">جارٍ تنعيم حافة التحديد…</string>
+    <string name="status_feather_failed">فشل تنعيم الحافة</string>
+    <string name="status_expanding_selection">جارٍ توسيع التحديد…</string>
+    <string name="status_expand_failed">فشل توسيع التحديد</string>
+    <string name="status_contracting_selection">جارٍ تقليص التحديد…</string>
+    <string name="status_contract_failed">فشل تقليص التحديد</string>
+    <string name="status_smoothing_selection">جارٍ تنعيم التحديد…</string>
+    <string name="status_smooth_failed">فشل تنعيم التحديد</string>
+    <string name="status_refining_selection">جارٍ تحسين التحديد…</string>
+    <string name="status_refine_failed">فشل تحسين التحديد</string>
+    <string name="status_inverting_selection">جارٍ عكس التحديد…</string>
+    <string name="status_invert_failed">فشل عكس التحديد</string>
+    <string name="status_nothing_selected">لا توجد منطقة محددة.</string>
+    <string name="status_copying_selection">جارٍ نسخ التحديد…</string>
+    <string name="status_copied_new_layer">تم النسخ إلى طبقة جديدة</string>
+    <string name="status_copy_failed">تعذر نسخ التحديد</string>
+    <string name="layer_name_background">الخلفية</string>
+    <string name="layer_name_image">طبقة صورة</string>
+    <string name="layer_name_imported">صورة مستوردة</string>
+    <string name="layer_name_adjustment">طبقة تعديلات %1$d</string>
+    <string name="layer_name_selection">طبقة التحديد</string>
+
+    <string name="layer_name_text">نص: %1$s</string>
+    <string name="sample_project_name">مرحبًا بك في PhotoEasy</string>
+    <string name="sample_layer_art">لوحة إبداعية</string>
+    <string name="sample_layer_title">نص العنوان</string>
+    <string name="sample_title_text">صمّم وابدع بكل سهولة مع PhotoEasy</string>
+    <string name="cd_editor_canvas">لوحة تحرير الصورة. استخدم إصبعًا واحدًا للأداة النشطة وإصبعين للتحريك أو التكبير.</string>
+    <string name="status_storage_permission_denied">تم رفض إذن التخزين، لذلك لم يتمكن PhotoEasy من الحفظ في المعرض.</string>
+
+    <!-- Quick Selection & Edge Snapping Strings -->
+    <string name="select_quick_selection">أداة التحديد السريع</string>
+    <string name="select_quick_selection_short">تحديد سريع</string>
+    <string name="select_sample_all_layers">كل الطبقات</string>
+    <string name="select_auto_enhance">تحسين ذكي للحواف</string>
+    <string name="select_quick_mode_hint">مرر الفرشاة فوق العنصر لتلتصق الحواف تلقائياً بدقة متناهية</string>
+
+    <!-- Perspective Crop Strings -->
+    <string name="perspective_fit_canvas">ملاءمة للصورة</string>
+    <string name="perspective_drag_hint">اسحب الزوايا أو مقابض الحواف. اسحب داخل الإطار لتحريكه بالكامل.</string>
+    <string name="perspective_loupe">عدسة مكبرة</string>
+
+    <!-- Layer Mask Strings -->
+    <string name="layer_mask_title">قناع الطبقة</string>
+    <string name="layer_mask_add">إضافة قناع للطبقة</string>
+    <string name="layer_mask_from_selection">إنشاء قناع من التحديد</string>
+    <string name="layer_mask_invert">عكس القناع</string>
+    <string name="layer_mask_disable">تعطيل القناع</string>
+    <string name="layer_mask_enable">تفعيل القناع</string>
+    <string name="layer_mask_delete">حذف القناع</string>
+    <string name="layer_mask_apply">تطبيق القناع نهائياً</string>
+    <string name="layer_mask_editing_mask">تعديل القناع (الأسود يخفي والأبيض يظهر)</string>
+    <string name="layer_mask_editing_layer">تعديل محتوى الطبقة</string>
+    <string name="layer_mask_paint_black">تلوين بالأسود (إخفاء)</string>
+    <string name="layer_mask_paint_white">تلوين بالأبيض (إظهار)</string>
+    <string name="status_layer_mask_added">تمت إضافة قناع الطبقة</string>
+    <string name="status_layer_mask_inverted">تم عكس قناع الطبقة</string>
+    <string name="status_layer_mask_applied">تم تطبيق القناع على الطبقة بنجاح</string>
+    <string name="status_layer_mask_deleted">تمت إزالة قناع الطبقة</string>
+
+    <!-- Filter Intensity -->
+    <string name="filter_intensity">شدة الفلتر</string>
+
+    <!-- Professional Transform Strings -->
+    <string name="transform_scale">الحجم</string>
+    <string name="transform_scale_x">المقياس الأفقي (العرض)</string>
+    <string name="transform_scale_y">المقياس الرأسي (الارتفاع)</string>
+    <string name="transform_proportional">قفل النسبة والتناسب</string>
+    <string name="transform_pos_x">الموضع الأفقي X</string>
+    <string name="transform_pos_y">الموضع الرأسي Y</string>
+    <string name="transform_center_canvas">توسيط في اللوحة</string>
+    <string name="transform_fit_canvas">ملاءمة للوحة</string>
+    <string name="transform_fill_canvas">تعبئة اللوحة</string>
+
+    <!-- Professional Inpaint / Remove Selection -->
+    <string name="inpaint_mode_brush">فرشاة</string>
+    <string name="inpaint_mode_lasso">تحديد حر (لاوسو)</string>
+    <string name="inpaint_mode_box">صندوق مستطيل</string>
+    <string name="inpaint_remove_now">إزالة العنصر الآن</string>
+
+    <!-- Text Effects & Styling -->
+    <string name="text_position">موضع النص</string>
+    <string name="text_center_canvas">توسيط النص</string>
+    <string name="text_drop_shadow">ظل ساقط (Drop Shadow)</string>
+    <string name="text_outer_glow">وهج خارجي (Outer Glow)</string>
+    <string name="text_glow_radius">مدى الوهج</string>
+    <string name="text_glow_color">لون الوهج</string>
+    <string name="text_shadow_offset_x">إزاحة الظل الأفقية</string>
+    <string name="text_shadow_offset_y">إزاحة الظل الرأسية</string>
+    <string name="text_custom_color">لون مخصص</string>
+    <string name="text_pick_color">اختيار اللون</string>
+
+    <!-- Professional Blur & Effects Strings -->
+    <string name="filter_tab_presets">الفلاتر الجاهزة</string>
+    <string name="filter_tab_pro_effects">تأثيرات وتمويه احترافي</string>
+    <string name="effect_gaussian_blur">تمويه غاوسي (Gaussian)</string>
+    <string name="effect_surface_blur">تمويه السطح (Surface Blur)</string>
+    <string name="effect_oil_paint">تأثير الرسم الزيتي (Oil Paint)</string>
+    <string name="effect_sharpen">زيادة الحدة (Sharpen)</string>
+    <string name="effect_noise_reduction">إزالة التشويش (Denoise)</string>
+    <string name="effect_motion_blur">تمويه حركي (Motion Blur)</string>
+    <string name="effect_radial_blur">تمويه شعاعي (Radial Blur)</string>
+    <string name="effect_radius">نصف القطر</string>
+    <string name="effect_threshold">عتبة الحواف (Threshold)</string>
+    <string name="effect_levels">مستويات التنعيم والطلاء</string>
+    <string name="effect_amount">مقدار الحدة</string>
+    <string name="effect_strength">قوة تنقية التشويش</string>
+    <string name="effect_distance">مسافة الحركة</string>
+    <string name="effect_angle">الزاوية</string>
+    <string name="effect_apply_layer">تطبيق التأثير على الطبقة</string>
+    <string name="status_effect_applied">تم تطبيق التأثير على الطبقة بنجاح</string>
+
+    <!-- Layer Mask Advanced Controls -->
+    <string name="layer_mask_feather">تنعيم حواف القناع (Feather)</string>
+    <string name="layer_mask_density">كثافة وشفافية القناع</string>
+    <string name="layer_mask_overlay">عرض القناع الياقوتي (Overlay)</string>
+    <string name="layer_mask_reveal_all">كشف الكل (أبيض)</string>
+    <string name="layer_mask_hide_all">إخفاء الكل (أسود)</string>
+    <string name="layer_mask_controls">خصائص وتحكمات القناع</string>
+    <string name="layer_mask_brush_size">حجم فرشاة القناع</string>
+
+    <!-- Curves, Hue/Sat, Color Replacement -->
+    <string name="adj_tab_basic">الأساسي</string>
+    <string name="adj_tab_curves">المنحنيات (Curves)</string>
+    <string name="adj_tab_hue_sat">درجة اللون والتشبع (HSL)</string>
+    <string name="adj_tab_replace_color">استبدال الألوان (Replace)</string>
+    <string name="curves_channel_rgb">RGB عام</string>
+    <string name="curves_channel_red">الأحمر Red</string>
+    <string name="curves_channel_green">الأخضر Green</string>
+    <string name="curves_channel_blue">الأزرق Blue</string>
+    <string name="curves_reset_channel">إعادة تعيين القناة</string>
+    <string name="curves_preset_s_curve">تباين منحنى S</string>
+    <string name="curves_preset_lift_shadows">تفتيح الظلال المظلمة</string>
+    <string name="curves_preset_deep_blacks">تعميق السواد والتباين</string>
+    <string name="curves_preset_linear">إعادة تعيين خطي</string>
+    <string name="hue_shift">إزاحة درجة اللون (Hue)</string>
+    <string name="hue_saturation">التشبع (Saturation)</string>
+    <string name="hue_lightness">الإضاءة والسطوع (Lightness)</string>
+    <string name="color_range_all">كافة الألوان (Master)</string>
+    <string name="color_range_reds">الأحمر</string>
+    <string name="color_range_yellows">الأصفر</string>
+    <string name="color_range_greens">الأخضر</string>
+    <string name="color_range_cyans">السماوي</string>
+    <string name="color_range_blues">الأزرق</string>
+    <string name="color_range_magentas">الأرجواني</string>
+    <string name="replace_source_color">اللون المراد استبداله</string>
+    <string name="replace_tolerance">نطاق التسامح (Fuzziness)</string>
+    <string name="replace_target_color">اللون البديل الجديد</string>
+    <string name="replace_enabled">تفعيل استبدال اللون</string>
+    <string name="status_selection_active_scoped">التحديد نشط • التأثير محصور في التحديد</string>
+
+    <!-- مقارنة قبل وبعد -->
+    <string name="compare_title">مقارنة قبل وبعد</string>
+    <string name="compare_hold_general">اضغط مطولاً: الأصل</string>
+    <string name="compare_split_mode">تقسيم الشاشة</string>
+    <string name="compare_before">قبل</string>
+    <string name="compare_after">بعد</string>
+    <string name="compare_this_adjustment">اضغط مطولاً للمعاينة بدون هذا التعديل</string>
+    <string name="compare_basic_adjustments">معاينة قبل/بعد الأساسية</string>
+    <string name="compare_curves">معاينة قبل/بعد المنحنيات</string>
+    <string name="compare_hsl">معاينة قبل/بعد HSL</string>
+    <string name="compare_replace_color">معاينة قبل/بعد استبدال اللون</string>
+    <string name="compare_filter">معاينة الصورة بدون فلتر</string>
+
+    <!-- ترقية محرك إزالة الكائنات الذكي -->
+    <string name="inpaint_engine_title">خوارزمية الإزالة والملء</string>
+    <string name="inpaint_engine_ai">ذكاء اصطناعي وترقيع الأنسجة</string>
+    <string name="inpaint_engine_telea">المسح السريع (Telea)</string>
+    <string name="inpaint_smart_snap">الالتصاق المغناطيسي الذكي بالحواف</string>
+    <string name="inpaint_smart_snap_hint">يحصر التحديد تلقائياً بحواف الكائن لمنع ظهور هالات لونية</string>
+    <string name="inpaint_seamless_blend">الدمج التوافقي السلس (Poisson)</string>
+    <string name="inpaint_seamless_blend_hint">يزيل أي فواصل أو حواف ظاهرة بين النسيج الجديد والخلفية</string>
+    <string name="inpaint_engine_desc_ai">يستنسخ تفاصيل النسيج الحقيقي ويكمل الخطوط الهندسية دون أي تغبيش</string>
+    <string name="inpaint_engine_desc_telea">سحب ومزج لوني سريع ومناسب للخدوش والبقع الصغيرة</string>
+
+    <!-- تحسين الحواف وخصل الشعر الاحترافي (Select & Mask) -->
+    <string name="select_subject">تحديد العنصر تلقائياً</string>
+    <string name="select_subject_desc">عزل العنصر الأساسي تلقائياً بنقرة واحدة</string>
+    <string name="select_refine_advanced">تنقيح الحواف والشعر (Refine Edge)</string>
+    <string name="refine_edge_dialog_title">تنقيح الحواف والشعر (Select &amp; Mask)</string>
+    <string name="refine_radius">نصف قطر كشف الحواف (Radius)</string>
+    <string name="refine_smart_radius">نصف قطر تكيفي ذكي (Smart Radius)</string>
+    <string name="refine_hair">تنقيح الشعر والفرو (Hair Refine)</string>
+    <string name="refine_hair_desc">فصل خصلات الشعر الفردية بدقة البكسل الفرعية</string>
+    <string name="refine_smooth">تنعيم المسار (Smooth)</string>
+    <string name="refine_feather">تدرج الحواف (Feather)</string>
+    <string name="refine_contrast">التباين الحاد (Contrast)</string>
+    <string name="refine_shift_edge">ترحيل الحافة (Shift Edge)</string>
+    <string name="refine_decontaminate">إزالة التلوث اللوني (Decontaminate)</string>
+    <string name="refine_decontaminate_desc">ينظف ألوان الخلفية المتسربة بين خصلات الشعر</string>
+    <string name="refine_view_mode">نمط المعاينة</string>
+    <string name="refine_magnetic_snap">الالتصاق المغناطيسي للحواف</string>
+    <string name="status_subject_selected">تم تحديد العنصر الأساسي بنجاح</string>
+    <string name="status_matting_complete">تم تطبيق تنقيح الحواف والشعر بنجاح</string>
+    <string name="status_matting_failed">فشل تنقيح الحواف</string>
+</resources>
