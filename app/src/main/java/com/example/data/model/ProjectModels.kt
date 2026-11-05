@@ -79,7 +79,9 @@ enum class SelectionToolType {
     ELLIPSE,
     LASSO,
     POLYGON,
-    MAGIC_WAND
+    MAGIC_WAND,
+    /** Drags the selection outline itself (no image pixels move). */
+    MOVE_SELECTION
 }
 
 enum class SelectionMode {
@@ -227,6 +229,13 @@ data class Layer(
             maskBitmap = maskBitmap?.copy(maskBitmap?.config ?: Bitmap.Config.ALPHA_8, true)
         )
     }
+
+    /**
+     * Cheap, per-frame snapshot for the background preview renderer: freezes the layer's scalar
+     * properties but shares bitmap and mask references (they are replaced, never recycled, while
+     * a render may be reading them), avoiding a full mask copy on every frame.
+     */
+    fun previewSnapshot(): Layer = this.copy()
 
     /**
      * Explicit layer duplication by user action.

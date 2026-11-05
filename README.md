@@ -7,7 +7,7 @@ Professional Android photo editor built with Kotlin + Jetpack Compose.
 Requirements:
 - Android Studio with Android SDK / Build Tools 36 installed
 - JDK 17 or newer (JDK 17 is the baseline required by AGP 9.1.1)
-- Internet access on the first Gradle sync (dependencies and OpenCV are resolved from Google/Maven Central)
+- Internet access on the first Gradle sync (dependencies are resolved from Google/Maven Central)
 
 Debug build from the project root:
 
@@ -27,7 +27,7 @@ Release bundle:
 ./gradlew bundleRelease
 ```
 
-For signed release builds, either place `my-upload-key.jks` in the project root or set `KEYSTORE_PATH`, `STORE_PASSWORD`, `KEY_ALIAS`, and `KEY_PASSWORD` environment variables.
+For signed release builds, either place `my-upload-key.jks` in the project root or set `KEYSTORE_PATH`, and provide `STORE_PASSWORD` and `KEY_PASSWORD` as environment variables. The key alias is fixed to `upload` in `app/build.gradle.kts`.
 
 ## UX / editor improvements in this revision
 
@@ -40,7 +40,7 @@ For signed release builds, either place `my-upload-key.jks` in the project root 
 - Live filter thumbnails generated from the current image, transient preview, Apply/Cancel, and press-to-compare with the original.
 - Adjustments include Reset All and non-destructive press-to-compare.
 - Selection workspace reorganized into tool/mode/refine groups with Rectangle/Ellipse/Lasso/Polygon/Wand, independent selection Undo/Redo, Add/Subtract/Intersect, and lower-memory ALPHA_8 operations.
-- Content-aware removal has dedicated Paint/Erase mask modes, mask Undo/Clear, radius/edge controls, and OpenCV Telea + Navier–Stokes hybrid inpainting with a Kotlin fallback.
+- Content-aware removal has dedicated Paint/Erase mask modes, mask Undo/Clear, radius/edge controls, and two pure-Kotlin engines: multi-scale PatchMatch image completion (content-aware fill, default) and Telea fast marching. The hole is grown a few pixels to remove halos and cross-faded with the original across the feather ring.
 - Copy Selection to New Layer now copies from the authoritative image source, keeps antialiased alpha, and preserves document-space geometry.
 - Layer panel now uses thumbnails, flexible height, and an overflow action menu instead of a cramped row of buttons.
 - Top bar is reduced to core actions with Save/Resize/Smart Auto moved to overflow, plus visible Saved/Unsaved/Working state.
@@ -53,5 +53,12 @@ For signed release builds, either place `my-upload-key.jks` in the project root 
 
 - Source/proxy geometry is separated so preview and export share the same document-space transforms.
 - Destructive operations persist a high-quality authoritative source version while the editor keeps a lighter preview proxy.
-- Content-aware removal uses the official `org.opencv:opencv:4.14.0` Maven artifact.
-- Project persistence uses schema versioning and safer commit checks.
+- Content-aware removal is implemented in Kotlin (`InpaintEngine`); there is no OpenCV dependency.
+- Project persistence uses schema versioning (currently 5) and safer commit checks. Schema 5 also stores curves, HSL, colour replacement, filter intensity, mask density/feather and text glow/shadow offsets.
+- Layer masks and selections live in document space (canvas-sized ALPHA_8). Masks are saved as lossless grayscale PNG and reloaded as editable bitmaps; unchanged masks are not re-encoded on autosave.
+- Layer bitmaps are saved lossless (WebP lossless on Android 11+, PNG below). Unreferenced `source_*` assets are cleaned up, except those still needed by undo/redo.
+- Selection edits are serialised and copy-on-write, so the canvas never reads a half-edited mask.
+- Adjustment layers honour their mask, which is how adjustments are limited to an area (non-destructive adjustments always apply to the whole layer).
+- The app works offline and does not request the INTERNET permission. "Select Subject" uses ML Kit on-device subject segmentation (model delivered by Google Play services) and falls back to a built-in saliency method.
+- Refine Edge (`RefineEdgeEngine`): trimap band in all directions (O(N) morphology, Smart Radius by local texture), colour-sampling alpha estimation (best F/B pair along 8 rays), colour guided filter for hair, decontamination that preserves layer transparency; processed in tiles around the edge band to keep memory low.
+- Selection tools: live strokes, magnifier loupe, live magnetic snapping, editable shapes, Move selection, magic-wand drag-to-tolerance, live modifier sliders, Refine Edge live preview, Quick Mask view, hold-to-subtract, compressed multi-level selection undo (`SelectionHistory`), and the selection is saved with the project (`selection.png`).

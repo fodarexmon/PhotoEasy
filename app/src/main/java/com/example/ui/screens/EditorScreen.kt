@@ -1,7 +1,13 @@
 package com.example.ui.screens
 
+import android.content.ClipData
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.PointF
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.ui.platform.LocalContext
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -211,6 +217,35 @@ fun EditorScreen(
     onRedoSelection: () -> Unit = {},
     onSaveProject: () -> Unit,
     onExportConfirm: (isPng: Boolean, quality: Int) -> Unit,
+    onStrokeSegment: ((List<PointF>, Float, com.example.ui.viewmodel.StrokePhase) -> Unit)? = null,
+    selectionRevision: Long = 0L,
+    onMagicWandDrag: ((Int, Int, Int, com.example.ui.viewmodel.StrokePhase) -> Unit)? = null,
+    editableShape: com.example.ui.viewmodel.EditableShape? = null,
+    shapeFromCenter: Boolean = false,
+    shapeLockSquare: Boolean = false,
+    onToggleShapeFromCenter: (Boolean) -> Unit = {},
+    onToggleShapeLockSquare: (Boolean) -> Unit = {},
+    onShapeCreated: ((android.graphics.RectF, Boolean) -> Unit)? = null,
+    onShapeEdited: ((android.graphics.RectF) -> Unit)? = null,
+    onMoveSelection: ((Float, Float) -> Unit)? = null,
+    isQuickMaskView: Boolean = false,
+    onToggleQuickMask: () -> Unit = {},
+    onTemporarySubtract: ((Boolean) -> Unit)? = null,
+    modifierOp: com.example.ui.viewmodel.SelectionModifierOp = com.example.ui.viewmodel.SelectionModifierOp.FEATHER,
+    modifierAmount: Float = 0f,
+    onModifierPreview: (com.example.ui.viewmodel.SelectionModifierOp, Float) -> Unit = { _, _ -> },
+    onModifierCommit: () -> Unit = {},
+    isQuickAutoEnhance: Boolean = true,
+    onToggleQuickAutoEnhance: (Boolean) -> Unit = {},
+    isQuickSampleAll: Boolean = false,
+    onToggleQuickSampleAll: (Boolean) -> Unit = {},
+    refinePreview: Bitmap? = null,
+    refinePreviewMode: com.example.ui.viewmodel.RefinePreviewMode = com.example.ui.viewmodel.RefinePreviewMode.OVERLAY,
+    onRefinePreviewModeChange: (com.example.ui.viewmodel.RefinePreviewMode) -> Unit = {},
+    onRequestRefinePreview: (com.example.engine.RefineEdgeConfig) -> Unit = {},
+    exportSuccessUri: Uri? = null,
+    onExportResultConsumed: () -> Unit = {},
+    onRenameProject: (String) -> Unit = {},
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onClearStatusMessage: () -> Unit,
@@ -256,6 +291,7 @@ fun EditorScreen(
     var currentCropRect by remember { mutableStateOf<android.graphics.RectF?>(null) }
     var showExportDialog by remember { mutableStateOf(false) }
     var showTopMenu by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
     var compareOriginal by remember { mutableStateOf(false) }
     var showGeneralOriginal by remember { mutableStateOf(false) }
     var isSplitCompareActive by remember { mutableStateOf(false) }
@@ -273,6 +309,8 @@ fun EditorScreen(
     }
 
     BackHandler {
+        // Never leave the editor (or a tool) while an operation is still writing to the project.
+        if (isProcessing) return@BackHandler
         if (isSplitCompareActive) {
             isSplitCompareActive = false
             return@BackHandler
@@ -340,8 +378,36 @@ fun EditorScreen(
         )
     }
 
-    LaunchedEffect(statusMessage) {
-        if (statusMessage != null) {
+    // After a successful export: confirm and offer to share the saved image right away.
+    val context = LocalContext.current
+    val exportedText = stringResource(R.string.export_success)
+    val shareLabel = stringResource(R.string.action_share)
+    LaunchedEffect(exportSuccessUri) {
+        val uri = exportSuccessUri ?: return@LaunchedEffect
+        val result = snackbarHostState.showSnackbar(
+            message = exportedText,
+            actionLabel = shareLabel,
+            duration = SnackbarDuration.Long
+        )
+        if (result == SnackbarResult.ActionPerformed) {
+            val mime = try { context.contentResolver.getType(uri) } catch (_: Exception) { null } ?: "image/*"
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = mime
+                putExtra(Intent.EXTRA_STREAM, uri)
+                clipData = ClipData.newRawUri(null, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            try {
+                context.startActivity(Intent.createChooser(send, shareLabel).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+            } catch (_: Exception) {
+            }
+        }
+        onExportResultConsumed()
+    }
+
+    // Progress text is shown by the processing overlay; only results are shown as snackbars.
+    LaunchedEffect(statusMessage, isProcessing) {
+        if (statusMessage != null && !isProcessing) {
             snackbarHostState.showSnackbar(statusMessage)
             onClearStatusMessage()
         }
@@ -377,6 +443,13 @@ fun EditorScreen(
         }
     }
 
+    // hasSelection scans the whole mask; compute it once per mask (selection edits publish a new bitmap)
+    // instead of on every recomposition (e.g. every slider tick).
+    val hasActiveSelectionCached by androidx.compose.runtime.produceState(initialValue = false, selectionMask, selectionRevision) {
+        val m = selectionMask
+        value = m != null && !m.isRecycled &&
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { SelectionEngine.hasSelection(m) }
+    }
     val selectedLayer = project.layers.getOrNull(selectedLayerIndex)
     val saveStateLabel = when {
         isProcessing -> stringResource(R.string.status_working)
@@ -395,7 +468,7 @@ fun EditorScreen(
                     .padding(horizontal = 6.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = onBackClick) {
+                IconButton(onClick = onBackClick, enabled = !isProcessing) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.cd_back), tint = Color.White)
                 }
 
@@ -419,15 +492,17 @@ fun EditorScreen(
                     )
                 }
 
-                IconButton(onClick = onUndo, enabled = canUndo) {
-                    Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = stringResource(R.string.action_undo), tint = if (canUndo) Color.White else Color.Gray)
+                val undoEnabled = canUndo && !isProcessing
+                val redoEnabled = canRedo && !isProcessing
+                IconButton(onClick = onUndo, enabled = undoEnabled) {
+                    Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = stringResource(R.string.action_undo), tint = if (undoEnabled) Color.White else Color.Gray)
                 }
-                IconButton(onClick = onRedo, enabled = canRedo) {
-                    Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = stringResource(R.string.action_redo), tint = if (canRedo) Color.White else Color.Gray)
+                IconButton(onClick = onRedo, enabled = redoEnabled) {
+                    Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = stringResource(R.string.action_redo), tint = if (redoEnabled) Color.White else Color.Gray)
                 }
                 IconButton(
                     onClick = { isSplitCompareActive = !isSplitCompareActive },
-                    interactionSource = generalCompareInteraction,
+                    enabled = !isProcessing,
                     modifier = Modifier.testTag("btn_compare_before_after")
                 ) {
                     Icon(
@@ -436,11 +511,11 @@ fun EditorScreen(
                         tint = if (isSplitCompareActive || isGeneralComparing) AmberAccent else Color.White
                     )
                 }
-                IconButton(onClick = { showExportDialog = true }, modifier = Modifier.testTag("btn_export_image")) {
+                IconButton(onClick = { showExportDialog = true }, enabled = !isProcessing, modifier = Modifier.testTag("btn_export_image")) {
                     Icon(Icons.Default.Download, contentDescription = stringResource(R.string.cd_export), tint = IndigoPrimary)
                 }
                 Box {
-                    IconButton(onClick = { showTopMenu = true }) {
+                    IconButton(onClick = { showTopMenu = true }, enabled = !isProcessing) {
                         Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.cd_more), tint = Color.White)
                     }
                     DropdownMenu(expanded = showTopMenu, onDismissRequest = { showTopMenu = false }) {
@@ -448,6 +523,11 @@ fun EditorScreen(
                             text = { Text(stringResource(R.string.action_save)) },
                             leadingIcon = { Icon(Icons.Default.Save, null) },
                             onClick = { showTopMenu = false; onSaveProject() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.action_rename)) },
+                            leadingIcon = { Icon(Icons.Default.Edit, null) },
+                            onClick = { showTopMenu = false; showRenameDialog = true }
                         )
                         DropdownMenuItem(
                             text = { Text(stringResource(R.string.canvas_resize_title)) },
@@ -477,7 +557,7 @@ fun EditorScreen(
             fun ActiveContextualPanelContent() {
                 when (activeTool) {
                     ActiveTool.ADJUST -> {
-                        val hasSel = selectionMask != null && SelectionEngine.hasSelection(selectionMask)
+                        val hasSel = hasActiveSelectionCached
                         selectedLayer?.let { layer ->
                             AdjustmentsPanel(
                                 adjustments = layer.adjustments,
@@ -498,7 +578,7 @@ fun EditorScreen(
                     }
 
                     ActiveTool.FILTERS -> {
-                        val hasSel = selectionMask != null && SelectionEngine.hasSelection(selectionMask)
+                        val hasSel = hasActiveSelectionCached
                         selectedLayer?.let { layer ->
                             FiltersPanel(
                                 selectedFilter = layer.filter,
@@ -515,7 +595,16 @@ fun EditorScreen(
                                     onToolSelect(ActiveTool.NONE)
                                 },
                                 hasActiveSelection = hasSel,
-                                onClearSelection = onClearSelection
+                                onClearSelection = onClearSelection,
+                                // Same size the ViewModel decodes for destructive effects (authoritative source).
+                                fullResMaxDimension = run {
+                                    val bmpMax = layer.bitmap?.let { maxOf(it.width, it.height) } ?: 0
+                                    if (layer.sourceAssetPath != null) {
+                                        val intrinsic = maxOf(layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight()).toInt().coerceIn(64, 4096)
+                                        val original = maxOf(layer.originalWidth, layer.originalHeight)
+                                        if (original > 0) minOf(intrinsic, original) else intrinsic
+                                    } else bmpMax
+                                }
                             )
                         }
                     }
@@ -567,7 +656,21 @@ fun EditorScreen(
                             onSelectSubject = onSelectSubject,
                             onOpenRefineEdgeDialog = onOpenRefineEdgeDialog,
                             isMagneticSnap = isMagneticSnap,
-                            onToggleMagneticSnap = onToggleMagneticSnap
+                            onToggleMagneticSnap = onToggleMagneticSnap,
+                            isQuickAutoEnhance = isQuickAutoEnhance,
+                            onToggleQuickAutoEnhance = onToggleQuickAutoEnhance,
+                            isQuickSampleAll = isQuickSampleAll,
+                            onToggleQuickSampleAll = onToggleQuickSampleAll,
+                            isQuickMaskView = isQuickMaskView,
+                            onToggleQuickMask = onToggleQuickMask,
+                            shapeFromCenter = shapeFromCenter,
+                            onToggleShapeFromCenter = onToggleShapeFromCenter,
+                            shapeLockSquare = shapeLockSquare,
+                            onToggleShapeLockSquare = onToggleShapeLockSquare,
+                            modifierOp = modifierOp,
+                            modifierAmount = modifierAmount,
+                            onModifierPreview = onModifierPreview,
+                            onModifierCommit = onModifierCommit
                         )
                     }
 
@@ -634,7 +737,7 @@ fun EditorScreen(
                             onSetEditingMask = onSetEditingMask,
                             onToggleMaskPaintColor = onToggleMaskPaintColor,
                             isMaskEditingBlack = isMaskEditingBlack,
-                            hasActiveSelection = selectionMask != null && SelectionEngine.hasSelection(selectionMask),
+                            hasActiveSelection = hasActiveSelectionCached,
                             onMaskDensityChange = onMaskDensityChange,
                             onMaskFeatherChange = onMaskFeatherChange,
                             onRevealAllMask = onRevealAllMask,
@@ -825,7 +928,21 @@ fun EditorScreen(
                             splitComparePosition = splitComparePosition,
                             onSplitComparePositionChange = { splitComparePosition = it },
                             onToggleSplitCompare = { isSplitCompareActive = !isSplitCompareActive },
-                            showMaskRubyOverlay = showMaskRubyOverlay
+                            showMaskRubyOverlay = showMaskRubyOverlay,
+                            maskBrushSizeDp = maskBrushSizeDp,
+                            onStrokeSegment = onStrokeSegment,
+                            selectionRevision = selectionRevision,
+                            isMagneticSnap = isMagneticSnap,
+                            magicWandTolerance = magicWandTolerance,
+                            onMagicWandDrag = onMagicWandDrag,
+                            editableShape = editableShape,
+                            shapeFromCenter = shapeFromCenter,
+                            shapeLockSquare = shapeLockSquare,
+                            onShapeCreated = onShapeCreated,
+                            onShapeEdited = onShapeEdited,
+                            onMoveSelection = onMoveSelection,
+                            isQuickMaskView = isQuickMaskView,
+                            onTemporarySubtract = onTemporarySubtract
                         )
 
                         // Floating Before & After quick action pill
@@ -843,7 +960,8 @@ fun EditorScreen(
                                     .clickable(
                                         interactionSource = generalCompareInteraction,
                                         indication = null,
-                                        onClick = { isSplitCompareActive = !isSplitCompareActive }
+                                        // Press & hold shows the original; the split view is toggled from the top bar.
+                                        onClick = {}
                                     )
                                     .padding(horizontal = 10.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -864,32 +982,6 @@ fun EditorScreen(
                             }
                         }
 
-                        if (isProcessing) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(Color.Black.copy(alpha = 0.55f))
-                                    .pointerInput(isProcessing) {
-                                        awaitPointerEventScope {
-                                            while (true) {
-                                                val event = awaitPointerEvent()
-                                                event.changes.forEach { it.consume() }
-                                            }
-                                        }
-                                    },
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                    CircularProgressIndicator(color = IndigoPrimary)
-                                    Spacer(modifier = Modifier.height(12.dp))
-                                    Text(
-                                        text = statusMessage ?: stringResource(R.string.status_processing),
-                                        color = Color.White,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
-                        }
                     }
 
                     // Right Studio Contextual Inspector Panel
@@ -942,7 +1034,21 @@ fun EditorScreen(
                             splitComparePosition = splitComparePosition,
                             onSplitComparePositionChange = { splitComparePosition = it },
                             onToggleSplitCompare = { isSplitCompareActive = !isSplitCompareActive },
-                            showMaskRubyOverlay = showMaskRubyOverlay
+                            showMaskRubyOverlay = showMaskRubyOverlay,
+                            maskBrushSizeDp = maskBrushSizeDp,
+                            onStrokeSegment = onStrokeSegment,
+                            selectionRevision = selectionRevision,
+                            isMagneticSnap = isMagneticSnap,
+                            magicWandTolerance = magicWandTolerance,
+                            onMagicWandDrag = onMagicWandDrag,
+                            editableShape = editableShape,
+                            shapeFromCenter = shapeFromCenter,
+                            shapeLockSquare = shapeLockSquare,
+                            onShapeCreated = onShapeCreated,
+                            onShapeEdited = onShapeEdited,
+                            onMoveSelection = onMoveSelection,
+                            isQuickMaskView = isQuickMaskView,
+                            onTemporarySubtract = onTemporarySubtract
                         )
 
                         // Floating Before & After quick action pill
@@ -960,7 +1066,8 @@ fun EditorScreen(
                                     .clickable(
                                         interactionSource = generalCompareInteraction,
                                         indication = null,
-                                        onClick = { isSplitCompareActive = !isSplitCompareActive }
+                                        // Press & hold shows the original; the split view is toggled from the top bar.
+                                        onClick = {}
                                     )
                                     .padding(horizontal = 10.dp, vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -980,18 +1087,6 @@ fun EditorScreen(
                                 )
                             }
                         }
-                        if (isProcessing) Box(
-                            Modifier.fillMaxSize().background(Color.Black.copy(alpha = .55f)).pointerInput(isProcessing) {
-                                awaitPointerEventScope { while (true) { val event = awaitPointerEvent(); event.changes.forEach { it.consume() } } }
-                            },
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                CircularProgressIndicator(color = IndigoPrimary)
-                                Spacer(Modifier.height(10.dp))
-                                Text(statusMessage ?: stringResource(R.string.status_processing), color = Color.White, fontWeight = FontWeight.Bold)
-                            }
-                        }
                     }
                     AnimatedVisibility(visible = activeTool != ActiveTool.NONE, enter = slideInVertically { it }, exit = slideOutVertically { it }) {
                         val panelMaxHeight = when {
@@ -1002,6 +1097,36 @@ fun EditorScreen(
                         Box(Modifier.fillMaxWidth().heightIn(max = panelMaxHeight).background(StudioSurface)) { ActiveContextualPanelContent() }
                     }
                     ToolBarItemsContent(false)
+                }
+            }
+
+            // Blocks the WHOLE editor (canvas, panels and tool rail) while a long operation runs,
+            // so a second operation cannot start on top of the first one.
+            if (isProcessing) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    event.changes.forEach { it.consume() }
+                                }
+                            }
+                        }
+                        .testTag("editor_processing_overlay"),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = IndigoPrimary)
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = statusMessage ?: stringResource(R.string.status_processing),
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
             }
         }
@@ -1019,6 +1144,17 @@ fun EditorScreen(
         )
     }
 
+    if (showRenameDialog) {
+        RenameProjectDialog(
+            initialName = project.name,
+            onDismiss = { showRenameDialog = false },
+            onConfirm = { newName ->
+                showRenameDialog = false
+                onRenameProject(newName)
+            }
+        )
+    }
+
     if (isResizeDialogOpen) {
         CanvasResizeDialog(
             currentWidth = project.width,
@@ -1031,7 +1167,11 @@ fun EditorScreen(
     if (isRefineEdgeDialogOpen) {
         com.example.ui.components.RefineEdgeDialog(
             onDismiss = onCloseRefineEdgeDialog,
-            onApply = onApplyRefineEdge
+            onApply = onApplyRefineEdge,
+            preview = refinePreview,
+            previewMode = refinePreviewMode,
+            onPreviewModeChange = onRefinePreviewModeChange,
+            onRequestPreview = onRequestRefinePreview
         )
     }
 }

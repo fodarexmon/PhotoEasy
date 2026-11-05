@@ -13,6 +13,8 @@ import android.graphics.RectF
 import com.example.data.model.Layer
 import com.example.data.model.SelectionMode
 import java.nio.ByteBuffer
+import kotlin.math.max
+import kotlin.math.min
 
 object SelectionEngine {
 
@@ -251,9 +253,65 @@ object SelectionEngine {
     fun selectAll(mask: Bitmap) = mask.eraseColor(Color.WHITE)
 
     fun hasSelection(mask: Bitmap): Boolean {
-        val row = IntArray(mask.width)
-        for (y in 0 until mask.height) { mask.getPixels(row,0,mask.width,0,y,mask.width,1); if (row.any { ((it ushr 24) and 0xFF) > 0 }) return true }
+        if (mask.isRecycled) return false
+        val (data, rowBytes) = readAlphaBytes(mask)
+        val w = mask.width
+        for (y in 0 until mask.height) {
+            val row = y * rowBytes
+            for (x in 0 until w) if (data[row + x].toInt() != 0) return true
+        }
         return false
+    }
+
+    /** Tight bounding box of all non-zero mask pixels, or null when nothing is selected. */
+    fun selectionBounds(mask: Bitmap): android.graphics.Rect? {
+        if (mask.isRecycled) return null
+        val (data, rowBytes) = readAlphaBytes(mask)
+        var minX = Int.MAX_VALUE; var minY = Int.MAX_VALUE; var maxX = -1; var maxY = -1
+        for (y in 0 until mask.height) {
+            val row = y * rowBytes
+            for (x in 0 until mask.width) {
+                if (data[row + x].toInt() != 0) {
+                    if (x < minX) minX = x
+                    if (x > maxX) maxX = x
+                    if (y < minY) minY = y
+                    if (y > maxY) maxY = y
+                }
+            }
+        }
+        return if (maxX < 0) null else android.graphics.Rect(minX, minY, maxX + 1, maxY + 1)
+    }
+
+    /** Alpha values packed row by row (width * height bytes), independent of the bitmap's row padding. */
+    fun alphaBytesPacked(mask: Bitmap): ByteArray {
+        val (data, rowBytes) = readAlphaBytes(mask)
+        val w = mask.width
+        if (rowBytes == w) return if (data.size == w * mask.height) data else data.copyOf(w * mask.height)
+        val out = ByteArray(w * mask.height)
+        for (y in 0 until mask.height) System.arraycopy(data, y * rowBytes, out, y * w, w)
+        return out
+    }
+
+    /** Builds a mutable ALPHA_8 mask from [alphaBytesPacked] output. */
+    fun alphaMaskFromPacked(bytes: ByteArray, width: Int, height: Int): Bitmap {
+        val mask = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
+        val rowBytes = mask.rowBytes
+        val data = if (rowBytes == width) {
+            if (bytes.size == mask.byteCount) bytes else bytes.copyOf(mask.byteCount)
+        } else {
+            ByteArray(rowBytes * height).also { dst ->
+                for (y in 0 until height) System.arraycopy(bytes, y * width, dst, y * rowBytes, width)
+            }
+        }
+        writeAlphaBytes(mask, data)
+        return mask
+    }
+
+    /** Moves the selection outline by (dx, dy) document pixels without touching image pixels. */
+    fun translateMask(mask: Bitmap, dx: Float, dy: Float): Bitmap {
+        val out = Bitmap.createBitmap(mask.width, mask.height, Bitmap.Config.ALPHA_8)
+        Canvas(out).drawBitmap(mask, dx, dy, Paint(Paint.FILTER_BITMAP_FLAG))
+        return out
     }
 
     private fun applyShapeToMask(mask: Bitmap, path: Path, mode: SelectionMode) {
@@ -389,7 +447,9 @@ object SelectionEngine {
             return srcPixels[sy * srcRegionW + sx]
         }
 
-        var sumR = 0L; var sumG = 0L; var sumB = 0L; var sampleCount = 0
+        var sampleCount = 0
+        val samples = IntArray(4096)
+        var sampleFill = 0
         val rSq = brushRadius * brushRadius
 
         val localSelected = ByteArray(boxW * boxH)
@@ -415,10 +475,9 @@ object SelectionEngine {
                             localSelected[idx] = 1
                             queue[tail++] = (ly shl 16) or lx
                             val color = getSrcPixel(cx, cy)
-                            val cr = (color shr 16) and 0xFF
-                            val cg = (color shr 8) and 0xFF
-                            val cb = color and 0xFF
-                            sumR += cr; sumG += cg; sumB += cb
+                            // Reservoir of brush colours (bounded) for the multi-colour model below.
+                            if (sampleFill < samples.size) samples[sampleFill++] = color
+                            else samples[(sampleCount * 2654435761L % samples.size).toInt().let { if (it < 0) -it else it }] = color
                             sampleCount++
                         }
                     }
@@ -427,9 +486,10 @@ object SelectionEngine {
         }
 
         if (sampleCount == 0) return
-        val meanR = (sumR / sampleCount).toFloat()
-        val meanG = (sumG / sampleCount).toFloat()
-        val meanB = (sumB / sampleCount).toFloat()
+        // Multi-colour model: k-means on the brushed colours, so objects made of several colours
+        // or textures (a striped shirt, a face with hair) are grown correctly instead of matching
+        // only one average colour.
+        val centers = colorClusters(samples, sampleFill, maxClusters = 5)
 
         val tolNorm = tolerance.coerceIn(5, 100) / 100f
         val maxColorDistSq = (3.0f * (tolNorm * 220f) * (tolNorm * 220f)).toInt()
@@ -492,10 +552,19 @@ object SelectionEngine {
                         if (!closeToStroke) continue
 
                         val color = getSrcPixel(mx, my)
-                        val cr = ((color shr 16) and 0xFF) - meanR
-                        val cg = ((color shr 8) and 0xFF) - meanG
-                        val cb = (color and 0xFF) - meanB
-                        val distSq = (cr * cr + cg * cg + cb * cb).toInt()
+                        val pr = ((color shr 16) and 0xFF).toFloat()
+                        val pg = ((color shr 8) and 0xFF).toFloat()
+                        val pb = (color and 0xFF).toFloat()
+                        var distSq = Int.MAX_VALUE
+                        var ci = 0
+                        while (ci < centers.size) {
+                            val cr = pr - centers[ci]
+                            val cg = pg - centers[ci + 1]
+                            val cb = pb - centers[ci + 2]
+                            val d = (cr * cr + cg * cg + cb * cb).toInt()
+                            if (d < distSq) distSq = d
+                            ci += 3
+                        }
 
                         if (distSq <= maxColorDistSq) {
                             localSelected[nIdx] = 1
@@ -534,6 +603,52 @@ object SelectionEngine {
 
         applyBitmapToMask(mask, grownMask, mode)
         grownMask.recycle()
+    }
+
+    /**
+     * Small k-means over packed RGB colours. Returns cluster centres as [r0,g0,b0, r1,g1,b1, …].
+     * Clusters that end up tiny (< 3% of samples, usually stray edge pixels) are dropped.
+     */
+    private fun colorClusters(samples: IntArray, count: Int, maxClusters: Int): FloatArray {
+        val n = count.coerceAtLeast(1)
+        val k = min(maxClusters, n)
+        val centers = FloatArray(k * 3)
+        // Deterministic spread initialisation.
+        for (c in 0 until k) {
+            val p = samples[(c * (n - 1)) / max(1, k - 1)]
+            centers[c * 3] = ((p shr 16) and 0xFF).toFloat()
+            centers[c * 3 + 1] = ((p shr 8) and 0xFF).toFloat()
+            centers[c * 3 + 2] = (p and 0xFF).toFloat()
+        }
+        val sums = DoubleArray(k * 3)
+        val counts = IntArray(k)
+        repeat(6) {
+            java.util.Arrays.fill(sums, 0.0)
+            java.util.Arrays.fill(counts, 0)
+            for (i in 0 until n) {
+                val p = samples[i]
+                val r = ((p shr 16) and 0xFF).toFloat(); val g = ((p shr 8) and 0xFF).toFloat(); val b = (p and 0xFF).toFloat()
+                var best = 0; var bestD = Float.MAX_VALUE
+                for (c in 0 until k) {
+                    val dr = r - centers[c * 3]; val dg = g - centers[c * 3 + 1]; val db = b - centers[c * 3 + 2]
+                    val d = dr * dr + dg * dg + db * db
+                    if (d < bestD) { bestD = d; best = c }
+                }
+                sums[best * 3] += r.toDouble(); sums[best * 3 + 1] += g.toDouble(); sums[best * 3 + 2] += b.toDouble()
+                counts[best]++
+            }
+            for (c in 0 until k) if (counts[c] > 0) {
+                centers[c * 3] = (sums[c * 3] / counts[c]).toFloat()
+                centers[c * 3 + 1] = (sums[c * 3 + 1] / counts[c]).toFloat()
+                centers[c * 3 + 2] = (sums[c * 3 + 2] / counts[c]).toFloat()
+            }
+        }
+        val minCount = max(1, (n * 0.03f).toInt())
+        val kept = ArrayList<Float>()
+        for (c in 0 until k) if (counts[c] >= minCount) {
+            kept.add(centers[c * 3]); kept.add(centers[c * 3 + 1]); kept.add(centers[c * 3 + 2])
+        }
+        return if (kept.isEmpty()) centers else kept.toFloatArray()
     }
 
     /**
@@ -973,8 +1088,12 @@ object SelectionEngine {
      * Evaluates local Sobel luminance gradient around (px, py) and snaps to the highest contrast contour.
      */
     fun snapPointToEdge(point: PointF, source: Bitmap, searchRadius: Int = 10): PointF {
-        val px = point.x.toInt().coerceIn(searchRadius, source.width - 1 - searchRadius)
-        val py = point.y.toInt().coerceIn(searchRadius, source.height - 1 - searchRadius)
+        // The search window plus the 1px gradient border must fit inside the image; otherwise
+        // coerceIn below would receive an empty range and throw.
+        if (source.isRecycled || source.width < 2 * searchRadius + 3 || source.height < 2 * searchRadius + 3) return point
+        // +1 margin: the gradient below samples x±1 / y±1 around every candidate.
+        val px = point.x.toInt().coerceIn(searchRadius + 1, source.width - 2 - searchRadius)
+        val py = point.y.toInt().coerceIn(searchRadius + 1, source.height - 2 - searchRadius)
 
         var maxGrad = 0f
         var bestX = point.x

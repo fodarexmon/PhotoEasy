@@ -543,21 +543,21 @@ private fun CustomColorPickerDialog(
 
                 // Red Slider
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Red", color = Color(0xFFEF4444), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text(stringResource(R.string.curves_channel_red), color = Color(0xFFEF4444), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     Text("${(r * 255).toInt()}", color = Color.White, fontSize = 12.sp)
                 }
                 Slider(value = r, onValueChange = { r = it }, valueRange = 0f..1f)
 
                 // Green Slider
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Green", color = Color(0xFF10B981), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text(stringResource(R.string.curves_channel_green), color = Color(0xFF10B981), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     Text("${(g * 255).toInt()}", color = Color.White, fontSize = 12.sp)
                 }
                 Slider(value = g, onValueChange = { g = it }, valueRange = 0f..1f)
 
                 // Blue Slider
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("Blue", color = Color(0xFF3B82F6), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    Text(stringResource(R.string.curves_channel_blue), color = Color(0xFF3B82F6), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     Text("${(b * 255).toInt()}", color = Color.White, fontSize = 12.sp)
                 }
                 Slider(value = b, onValueChange = { b = it }, valueRange = 0f..1f)

@@ -82,11 +82,11 @@ fun AdjustmentsPanel(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f, fill = false)) {
                         Icon(Icons.Default.SelectAll, contentDescription = null, tint = CyanAccent, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            text = stringResource(R.string.status_selection_active_scoped),
+                            text = stringResource(R.string.status_selection_adjust_whole_layer),
                             color = Color.White,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium
@@ -147,7 +147,7 @@ fun AdjustmentsPanel(
                     )
                 )
             } else {
-                basicBeforeHold?.let { onAdjustmentsChange(it); onAdjustmentsCommit() }
+                basicBeforeHold?.let { onAdjustmentsChange(it) }
                 basicBeforeHold = null
             }
         }
@@ -161,7 +161,7 @@ fun AdjustmentsPanel(
                 val def = listOf(android.graphics.PointF(0f, 0f), android.graphics.PointF(255f, 255f))
                 onAdjustmentsChange(adjustments.copy(curvesRgb = def, curvesRed = def, curvesGreen = def, curvesBlue = def))
             } else {
-                curvesBeforeHold?.let { onAdjustmentsChange(it); onAdjustmentsCommit() }
+                curvesBeforeHold?.let { onAdjustmentsChange(it) }
                 curvesBeforeHold = null
             }
         }
@@ -174,7 +174,7 @@ fun AdjustmentsPanel(
                 hslBeforeHold = adjustments
                 onAdjustmentsChange(adjustments.copy(hueShift = 0f, hslSaturation = 0f, hslLightness = 0f))
             } else {
-                hslBeforeHold?.let { onAdjustmentsChange(it); onAdjustmentsCommit() }
+                hslBeforeHold?.let { onAdjustmentsChange(it) }
                 hslBeforeHold = null
             }
         }
@@ -187,7 +187,7 @@ fun AdjustmentsPanel(
                 replaceBeforeHold = adjustments
                 onAdjustmentsChange(adjustments.copy(replaceColorEnabled = false))
             } else {
-                replaceBeforeHold?.let { onAdjustmentsChange(it); onAdjustmentsCommit() }
+                replaceBeforeHold?.let { onAdjustmentsChange(it) }
                 replaceBeforeHold = null
             }
         }
@@ -332,8 +332,8 @@ private fun AdjustmentSlider(
             onValueChange(defaultValue)
         } else {
             if (abs(savedValueBeforeHold - defaultValue) > 0.01f) {
+                // Restore only; comparing is not an edit and must not add an undo step.
                 onValueChange(savedValueBeforeHold)
-                onValueChangeFinished()
             }
         }
     }
@@ -366,10 +366,9 @@ private fun AdjustmentSlider(
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 if (isModified || isHoldingSliderCompare) {
                     IconButton(
-                        onClick = {
-                            onValueChange(defaultValue)
-                            onValueChangeFinished()
-                        },
+                        // Press & hold = compare with the default. A tap must not silently reset the
+                        // value (use "Reset all" or drag the slider for that).
+                        onClick = {},
                         interactionSource = sliderCompareInteraction,
                         modifier = Modifier.size(28.dp).testTag("btn_compare_${label.lowercase().replace(" ", "_")}")
                     ) {

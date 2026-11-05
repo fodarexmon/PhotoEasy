@@ -7,6 +7,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.PointF
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -113,7 +114,91 @@ class ProjectRepository(private val context: Context) {
         }
     }
 
-    suspend fun saveProject(project: Project): Boolean = withContext(Dispatchers.IO) {
+    private fun pointsToJson(points: List<PointF>): JSONArray = JSONArray().apply {
+        points.forEach { p -> put(JSONArray().put(p.x.toDouble()).put(p.y.toDouble())) }
+    }
+
+    private fun jsonToPoints(arr: JSONArray?): List<PointF>? {
+        if (arr == null) return null
+        val list = mutableListOf<PointF>()
+        for (i in 0 until arr.length()) {
+            val p = arr.optJSONArray(i) ?: continue
+            list.add(PointF(p.optDouble(0, 0.0).toFloat(), p.optDouble(1, 0.0).toFloat()))
+        }
+        return if (list.size >= 2) list else null
+    }
+
+    /**
+     * Masks are persisted as opaque grayscale PNG (white = reveal). Encoding ALPHA_8 bitmaps
+     * directly is codec-dependent, so the alpha channel is written into RGB explicitly.
+     */
+    private fun encodeMaskAsGray(mask: Bitmap): Bitmap {
+        val w = mask.width
+        val h = mask.height
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val row = IntArray(w)
+        for (y in 0 until h) {
+            mask.getPixels(row, 0, w, 0, y, w, 1)
+            for (x in 0 until w) {
+                val a = (row[x] ushr 24) and 0xFF
+                row[x] = (0xFF shl 24) or (a shl 16) or (a shl 8) or a
+            }
+            out.setPixels(row, 0, w, 0, y, w, 1)
+        }
+        return out
+    }
+
+    /**
+     * Decodes a persisted mask into a MUTABLE ALPHA_8 bitmap so it can be edited after reopening.
+     * New files store the mask in the gray channel; legacy files may store it in alpha.
+     */
+    private fun decodeMask(file: File, storedAsGray: Boolean): Bitmap? {
+        val decoded = BitmapFactory.decodeFile(
+            file.absolutePath,
+            BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 }
+        ) ?: return null
+        val useGray = storedAsGray || !decoded.hasAlpha()
+        val w = decoded.width
+        val h = decoded.height
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
+        val row = IntArray(w)
+        for (y in 0 until h) {
+            decoded.getPixels(row, 0, w, 0, y, w, 1)
+            for (x in 0 until w) {
+                val p = row[x]
+                val v = if (useGray) (p shr 16) and 0xFF else (p ushr 24) and 0xFF
+                row[x] = v shl 24
+            }
+            out.setPixels(row, 0, w, 0, y, w, 1)
+        }
+        decoded.recycle()
+        return out
+    }
+
+    /**
+     * Content hash of each mask as last written to (or read from) disk, keyed by "projectId/layerId".
+     * Lets autosave skip re-encoding unchanged masks, which is the most expensive part of a save.
+     */
+    private val savedMaskHashes = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun maskHash(mask: Bitmap): Long? = try {
+        val bytes = ByteArray(mask.rowBytes * mask.height)
+        mask.copyPixelsToBuffer(java.nio.ByteBuffer.wrap(bytes))
+        val crc = java.util.zip.CRC32()
+        crc.update(bytes)
+        crc.value xor (mask.width.toLong() shl 40) xor (mask.height.toLong() shl 20)
+    } catch (_: Throwable) {
+        null
+    }
+
+    private fun commitTmpFile(tmpFile: File, target: File): Boolean =
+        tmpFile.renameTo(target) || run { if (target.exists() && !target.delete()) false else tmpFile.renameTo(target) }
+
+    /**
+     * @param protectedFileNames file names inside the project directory that must survive orphan
+     * cleanup even though the current layer stack does not reference them (e.g. undo history).
+     */
+    suspend fun saveProject(project: Project, protectedFileNames: Set<String> = emptySet()): Boolean = withContext(Dispatchers.IO) {
         try {
             val projDir = File(projectsDir, project.id).apply { if (!exists()) mkdirs() }
             project.updatedAt = System.currentTimeMillis()
@@ -122,7 +207,7 @@ class ProjectRepository(private val context: Context) {
 
             // Save layer bitmaps & build JSON
             val jsonObj = JSONObject().apply {
-                put("schemaVersion", 4)
+                put("schemaVersion", 5)
                 put("id", project.id)
                 put("name", project.name)
                 put("width", project.width)
@@ -147,19 +232,35 @@ class ProjectRepository(private val context: Context) {
                         put("rotation", layer.rotation.toDouble())
                         put("colorFillHex", layer.colorFillHex)
                         put("filter", layer.filter.name)
+                        put("filterIntensity", layer.filterIntensity.toDouble())
 
                         // Save adjustments config
+                        val adj = layer.adjustments
                         val adjObj = JSONObject().apply {
-                            put("brightness", layer.adjustments.brightness.toDouble())
-                            put("contrast", layer.adjustments.contrast.toDouble())
-                            put("saturation", layer.adjustments.saturation.toDouble())
-                            put("temperature", layer.adjustments.temperature.toDouble())
-                            put("tint", layer.adjustments.tint.toDouble())
-                            put("exposure", layer.adjustments.exposure.toDouble())
-                            put("highlights", layer.adjustments.highlights.toDouble())
-                            put("shadows", layer.adjustments.shadows.toDouble())
-                            put("sharpness", layer.adjustments.sharpness.toDouble())
-                            put("vignette", layer.adjustments.vignette.toDouble())
+                            put("brightness", adj.brightness.toDouble())
+                            put("contrast", adj.contrast.toDouble())
+                            put("saturation", adj.saturation.toDouble())
+                            put("temperature", adj.temperature.toDouble())
+                            put("tint", adj.tint.toDouble())
+                            put("exposure", adj.exposure.toDouble())
+                            put("highlights", adj.highlights.toDouble())
+                            put("shadows", adj.shadows.toDouble())
+                            put("sharpness", adj.sharpness.toDouble())
+                            put("vignette", adj.vignette.toDouble())
+                            put("curvesRgb", pointsToJson(adj.curvesRgb))
+                            put("curvesRed", pointsToJson(adj.curvesRed))
+                            put("curvesGreen", pointsToJson(adj.curvesGreen))
+                            put("curvesBlue", pointsToJson(adj.curvesBlue))
+                            put("hueShift", adj.hueShift.toDouble())
+                            put("hslSaturation", adj.hslSaturation.toDouble())
+                            put("hslLightness", adj.hslLightness.toDouble())
+                            put("hslColorRange", adj.hslColorRange)
+                            put("replaceColorEnabled", adj.replaceColorEnabled)
+                            put("replaceSourceColorHex", adj.replaceSourceColorHex)
+                            put("replaceTolerance", adj.replaceTolerance.toDouble())
+                            put("replaceTargetHue", adj.replaceTargetHue.toDouble())
+                            put("replaceTargetSaturation", adj.replaceTargetSaturation.toDouble())
+                            put("replaceTargetLightness", adj.replaceTargetLightness.toDouble())
                         }
                         put("adjustments", adjObj)
 
@@ -174,6 +275,10 @@ class ProjectRepository(private val context: Context) {
                             put("alignment", layer.textConfig.alignment.name)
                             put("shadowColorHex", layer.textConfig.shadowColorHex)
                             put("shadowRadiusDp", layer.textConfig.shadowRadiusDp.toDouble())
+                            put("shadowDxDp", layer.textConfig.shadowDxDp.toDouble())
+                            put("shadowDyDp", layer.textConfig.shadowDyDp.toDouble())
+                            put("outerGlowColorHex", layer.textConfig.outerGlowColorHex)
+                            put("outerGlowRadiusDp", layer.textConfig.outerGlowRadiusDp.toDouble())
                             put("lineSpacingMultiplier", layer.textConfig.lineSpacingMultiplier.toDouble())
                             put("letterSpacingEm", layer.textConfig.letterSpacingEm.toDouble())
                             put("maxLineWidthPercent", layer.textConfig.maxLineWidthPercent.toDouble())
@@ -182,8 +287,11 @@ class ProjectRepository(private val context: Context) {
 
                         // Save bitmap if present (using dirty flag, transactional save & WebP format)
                         layer.bitmap?.let { bmp ->
-                            val preferredFileName = "layer_${layer.id}.webp"
-                            val legacyFileName = "layer_${layer.id}.png"
+                            // Lossless only: WEBP_LOSSLESS on API 30+, PNG below (the old lossy WEBP
+                            // fallback degraded the layer a little more on every save).
+                            val losslessWebp = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                            val preferredFileName = if (losslessWebp) "layer_${layer.id}.webp" else "layer_${layer.id}.png"
+                            val legacyFileName = if (losslessWebp) "layer_${layer.id}.png" else "layer_${layer.id}.webp"
                             val preferredFile = File(projDir, preferredFileName)
                             val legacyFile = File(projDir, legacyFileName)
 
@@ -194,14 +302,9 @@ class ProjectRepository(private val context: Context) {
                             } else {
                                 val tmpFileName = "$preferredFileName.tmp"
                                 val tmpFile = File(projDir, tmpFileName)
-                                val compressFormat = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                                    Bitmap.CompressFormat.WEBP_LOSSLESS
-                                } else {
-                                    @Suppress("DEPRECATION")
-                                    Bitmap.CompressFormat.WEBP
-                                }
+                                val compressFormat = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) Bitmap.CompressFormat.WEBP_LOSSLESS else Bitmap.CompressFormat.PNG
                                 FileOutputStream(tmpFile).use { out ->
-                                    if (!bmp.compress(compressFormat, 95, out)) throw java.io.IOException("Layer encoding failed")
+                                    if (!bmp.compress(compressFormat, 100, out)) throw java.io.IOException("Layer encoding failed")
                                     out.flush(); out.fd.sync()
                                 }
                                 val committed = tmpFile.renameTo(preferredFile) || run { if (preferredFile.exists() && !preferredFile.delete()) false else tmpFile.renameTo(preferredFile) }
@@ -227,26 +330,36 @@ class ProjectRepository(private val context: Context) {
 
                         put("isMaskEnabled", layer.isMaskEnabled)
                         put("isEditingMask", layer.isEditingMask)
+                        put("maskDensity", layer.maskDensity.toDouble())
+                        put("maskFeather", layer.maskFeather.toDouble())
                         layer.maskBitmap?.let { maskBmp ->
                             if (!maskBmp.isRecycled) {
-                                val maskFileName = "mask_${layer.id}.webp"
+                                val maskFileName = "mask_${layer.id}.png"
                                 val maskFile = File(projDir, maskFileName)
                                 val tmpMaskFile = File(projDir, "$maskFileName.tmp")
-                                val compressFormat = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                                    Bitmap.CompressFormat.WEBP_LOSSLESS
-                                } else {
-                                    @Suppress("DEPRECATION")
-                                    Bitmap.CompressFormat.WEBP
-                                }
-                                try {
-                                    FileOutputStream(tmpMaskFile).use { out ->
-                                        maskBmp.compress(compressFormat, 95, out)
-                                        out.flush(); out.fd.sync()
+                                val hashKey = "${project.id}/${layer.id}"
+                                val currentHash = maskHash(maskBmp)
+                                val unchanged = currentHash != null && savedMaskHashes[hashKey] == currentHash && maskFile.exists()
+                                if (!unchanged) {
+                                    // Any failure aborts the whole save: the previous manifest and its
+                                    // mask file stay intact instead of being orphan-cleaned.
+                                    val grayMask = encodeMaskAsGray(maskBmp)
+                                    try {
+                                        FileOutputStream(tmpMaskFile).use { out ->
+                                            if (!grayMask.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                                                throw java.io.IOException("Mask encoding failed")
+                                            }
+                                            out.flush(); out.fd.sync()
+                                        }
+                                    } finally {
+                                        grayMask.recycle()
                                     }
-                                    tmpMaskFile.renameTo(maskFile)
-                                    activeLayerFiles.add(maskFileName)
-                                    put("maskFile", maskFileName)
-                                } catch (_: Exception) {}
+                                    if (!commitTmpFile(tmpMaskFile, maskFile)) throw java.io.IOException("Mask file commit failed")
+                                    if (currentHash != null) savedMaskHashes[hashKey] = currentHash else savedMaskHashes.remove(hashKey)
+                                }
+                                activeLayerFiles.add(maskFileName)
+                                put("maskFile", maskFileName)
+                                put("maskFormat", "gray")
                             }
                         }
                     }
@@ -283,14 +396,96 @@ class ProjectRepository(private val context: Context) {
             if (!manifestCommitted) throw java.io.IOException("Project manifest commit failed")
 
             // CRITICAL: Cleanup orphaned files ONLY AFTER new manifest has been successfully committed
+            val now = System.currentTimeMillis()
             projDir.listFiles()?.forEach { file ->
-                if ((file.name.startsWith("layer_") || file.name.startsWith("mask_")) && !file.name.endsWith(".tmp") && !activeLayerFiles.contains(file.name)) {
-                    file.delete()
-                } else if (file.name.endsWith(".tmp") && System.currentTimeMillis() - file.lastModified() > 60000) {
+                val name = file.name
+                val isLayerAsset = (name.startsWith("layer_") || name.startsWith("mask_") || name.startsWith("source_")) && !name.endsWith(".tmp")
+                if (isLayerAsset && name !in activeLayerFiles && name !in protectedFileNames) {
+                    // Source assets may be written by an in-flight destructive edit that is not yet
+                    // referenced by any layer; only delete them once they are clearly stale.
+                    if (!name.startsWith("source_") || now - file.lastModified() > 60000) {
+                        file.delete()
+                    }
+                } else if (name.endsWith(".tmp") && now - file.lastModified() > 60000) {
                     file.delete()
                 }
             }
             true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+
+    /**
+     * Persists the active selection next to the project (selection.png, gray = selected) so it
+     * survives closing the app. An empty selection removes the file. Unchanged masks are skipped.
+     */
+    suspend fun saveSelection(projectId: String, mask: Bitmap?): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val dir = File(projectsDir, projectId)
+            if (!dir.exists()) return@withContext false
+            val file = File(dir, "selection.png")
+            val key = "$projectId/__selection__"
+            if (mask == null || mask.isRecycled || !com.example.engine.SelectionEngine.hasSelection(mask)) {
+                if (file.exists()) file.delete()
+                savedMaskHashes.remove(key)
+                return@withContext true
+            }
+            val hash = maskHash(mask)
+            if (hash != null && savedMaskHashes[key] == hash && file.exists()) return@withContext true
+            val tmp = File(dir, "selection.png.tmp")
+            val gray = encodeMaskAsGray(mask)
+            try {
+                FileOutputStream(tmp).use { out ->
+                    if (!gray.compress(Bitmap.CompressFormat.PNG, 100, out)) throw java.io.IOException("Selection encoding failed")
+                    out.flush(); out.fd.sync()
+                }
+            } finally {
+                gray.recycle()
+            }
+            val ok = commitTmpFile(tmp, file)
+            if (ok && hash != null) savedMaskHashes[key] = hash
+            ok
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+
+    /** Loads the saved selection if it matches the canvas size, otherwise null. */
+    suspend fun loadSelection(projectId: String, width: Int, height: Int): Bitmap? = withContext(Dispatchers.IO) {
+        try {
+            val file = File(File(projectsDir, projectId), "selection.png")
+            if (!file.exists()) return@withContext null
+            val mask = decodeMask(file, storedAsGray = true) ?: return@withContext null
+            if (mask.width != width || mask.height != height) {
+                mask.recycle()
+                return@withContext null
+            }
+            maskHash(mask)?.let { savedMaskHashes["$projectId/__selection__"] = it }
+            mask
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** Renames a project that is not open, rewriting only its manifest (no layer re-encoding). */
+    suspend fun renameProject(projectId: String, newName: String): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val dir = File(projectsDir, projectId)
+            val manifest = File(dir, "project.json")
+            if (!manifest.exists()) return@withContext false
+            val obj = JSONObject(manifest.readText())
+            obj.put("name", newName)
+            obj.put("updatedAt", System.currentTimeMillis())
+            val tmp = File(dir, "project.json.tmp")
+            FileOutputStream(tmp).use { out ->
+                out.write(obj.toString(2).toByteArray(Charsets.UTF_8))
+                out.flush()
+                out.fd.sync()
+            }
+            commitTmpFile(tmp, manifest)
         } catch (e: Exception) {
             e.printStackTrace()
             false
@@ -549,7 +744,12 @@ class ProjectRepository(private val context: Context) {
                     val maskFile = File(projDir, maskFileName)
                     if (maskFile.exists()) {
                         try {
-                            maskBmp = BitmapFactory.decodeFile(maskFile.absolutePath)
+                            val isGray = layerObj.optString("maskFormat", "") == "gray"
+                            maskBmp = decodeMask(maskFile, storedAsGray = isGray)
+                            // Only the current gray PNG format is reusable as-is on the next save.
+                            if (isGray && maskFileName.endsWith(".png")) {
+                                maskBmp?.let { m -> maskHash(m)?.let { savedMaskHashes["${proj.id}/$layerId"] = it } }
+                            }
                         } catch (_: Exception) {}
                     }
                 }
@@ -566,6 +766,10 @@ class ProjectRepository(private val context: Context) {
                         alignment = safeValueOf(textObj.optString("alignment", ""), TextAlignment.CENTER),
                         shadowColorHex = textObj.optInt("shadowColorHex", 0x80000000.toInt()),
                         shadowRadiusDp = textObj.optDouble("shadowRadiusDp", 0.0).toFloat(),
+                        shadowDxDp = textObj.optDouble("shadowDxDp", 4.0).toFloat(),
+                        shadowDyDp = textObj.optDouble("shadowDyDp", 6.0).toFloat(),
+                        outerGlowColorHex = textObj.optInt("outerGlowColorHex", 0xFF00E5FF.toInt()),
+                        outerGlowRadiusDp = textObj.optDouble("outerGlowRadiusDp", 0.0).toFloat(),
                         lineSpacingMultiplier = textObj.optDouble("lineSpacingMultiplier", 1.0).toFloat(),
                         letterSpacingEm = textObj.optDouble("letterSpacingEm", 0.0).toFloat(),
                         maxLineWidthPercent = textObj.optDouble("maxLineWidthPercent", 80.0).toFloat()
@@ -573,6 +777,7 @@ class ProjectRepository(private val context: Context) {
                 } else TextLayerConfig()
 
                 val adjObj = layerObj.optJSONObject("adjustments")
+                val defaults = ColorAdjustments()
                 val colorAdjustments = if (adjObj != null) {
                     ColorAdjustments(
                         brightness = adjObj.optDouble("brightness", 0.0).toFloat(),
@@ -584,7 +789,21 @@ class ProjectRepository(private val context: Context) {
                         highlights = adjObj.optDouble("highlights", 0.0).toFloat(),
                         shadows = adjObj.optDouble("shadows", 0.0).toFloat(),
                         sharpness = adjObj.optDouble("sharpness", 0.0).toFloat(),
-                        vignette = adjObj.optDouble("vignette", 0.0).toFloat()
+                        vignette = adjObj.optDouble("vignette", 0.0).toFloat(),
+                        curvesRgb = jsonToPoints(adjObj.optJSONArray("curvesRgb")) ?: defaults.curvesRgb,
+                        curvesRed = jsonToPoints(adjObj.optJSONArray("curvesRed")) ?: defaults.curvesRed,
+                        curvesGreen = jsonToPoints(adjObj.optJSONArray("curvesGreen")) ?: defaults.curvesGreen,
+                        curvesBlue = jsonToPoints(adjObj.optJSONArray("curvesBlue")) ?: defaults.curvesBlue,
+                        hueShift = adjObj.optDouble("hueShift", 0.0).toFloat(),
+                        hslSaturation = adjObj.optDouble("hslSaturation", 0.0).toFloat(),
+                        hslLightness = adjObj.optDouble("hslLightness", 0.0).toFloat(),
+                        hslColorRange = adjObj.optString("hslColorRange", defaults.hslColorRange),
+                        replaceColorEnabled = adjObj.optBoolean("replaceColorEnabled", false),
+                        replaceSourceColorHex = adjObj.optInt("replaceSourceColorHex", defaults.replaceSourceColorHex),
+                        replaceTolerance = adjObj.optDouble("replaceTolerance", defaults.replaceTolerance.toDouble()).toFloat(),
+                        replaceTargetHue = adjObj.optDouble("replaceTargetHue", defaults.replaceTargetHue.toDouble()).toFloat(),
+                        replaceTargetSaturation = adjObj.optDouble("replaceTargetSaturation", 0.0).toFloat(),
+                        replaceTargetLightness = adjObj.optDouble("replaceTargetLightness", 0.0).toFloat()
                     )
                 } else ColorAdjustments()
 
@@ -596,7 +815,9 @@ class ProjectRepository(private val context: Context) {
                     maskBitmap = maskBmp,
                     isMaskEnabled = isMaskEnabled,
                     isEditingMask = isEditingMask,
-                    opacity = layerObj.optDouble("opacity", 1.0).toFloat(),
+                    maskDensity = layerObj.optDouble("maskDensity", 1.0).toFloat().coerceIn(0f, 1f),
+                    maskFeather = layerObj.optDouble("maskFeather", 0.0).toFloat().coerceAtLeast(0f),
+                    opacity =layerObj.optDouble("opacity", 1.0).toFloat(),
                     isVisible = layerObj.optBoolean("isVisible", true),
                     isLocked = layerObj.optBoolean("isLocked", false),
                     blendMode = safeValueOf(layerObj.optString("blendMode", ""), BlendModeType.NORMAL),
@@ -607,6 +828,7 @@ class ProjectRepository(private val context: Context) {
                     rotation = layerObj.optDouble("rotation", 0.0).toFloat(),
                     colorFillHex = layerObj.optInt("colorFillHex", 0xFF12131C.toInt()),
                     filter = safeValueOf(layerObj.optString("filter", ""), FilterType.NONE),
+                    filterIntensity = layerObj.optDouble("filterIntensity", 1.0).toFloat().coerceIn(0f, 1f),
                     textConfig = textCfg,
                     adjustments = colorAdjustments,
                     isBitmapDirty = false,

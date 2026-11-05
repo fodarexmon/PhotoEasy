@@ -66,6 +66,8 @@ fun FiltersPanel(
     onApplyProEffect: ((ProFilterType, Float, Float) -> Unit)? = null,
     hasActiveSelection: Boolean = false,
     onClearSelection: (() -> Unit)? = null,
+    /** Longest side (px) of the image the Pro effect is applied to; 0 = unknown (no scaling). */
+    fullResMaxDimension: Int = 0,
     modifier: Modifier = Modifier
 ) {
     var activeTab by remember { mutableStateOf(FilterPanelTab.PRESETS) }
@@ -106,13 +108,19 @@ fun FiltersPanel(
     }
 
     // Generate Pro Effect live preview
-    LaunchedEffect(selectedProEffect, param1, param2, sourceBitmap) {
+    LaunchedEffect(selectedProEffect, param1, param2, sourceBitmap, fullResMaxDimension) {
         val src = sourceBitmap ?: return@LaunchedEffect
         proLoading = true
         delay(120) // Debounce
         val preview = withContext(Dispatchers.Default) {
             val thumb = ImageProcessor.scaleBitmapToMaxDimension(src, 240)
-            val result = ImageProcessor.applyProEffect(thumb, selectedProEffect, param1, param2)
+            // The effect is applied to the full-resolution image with the same pixel radius, so the
+            // thumbnail must use a proportionally smaller radius or it looks far stronger than the result.
+            val ratio = if (fullResMaxDimension > 0) {
+                maxOf(thumb.width, thumb.height).toFloat() / fullResMaxDimension.toFloat()
+            } else 1f
+            val (p1, p2) = ImageProcessor.scaleProEffectParams(selectedProEffect, param1, param2, ratio)
+            val result = ImageProcessor.applyProEffect(thumb, selectedProEffect, p1, p2)
             if (result !== thumb && !thumb.isRecycled) thumb.recycle()
             result
         }
@@ -148,11 +156,11 @@ fun FiltersPanel(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f, fill = false)) {
                         Icon(Icons.Default.SelectAll, contentDescription = null, tint = CyanAccent, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            text = stringResource(R.string.status_selection_active_scoped),
+                            text = stringResource(R.string.status_selection_filters_scope),
                             color = Color.White,
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium

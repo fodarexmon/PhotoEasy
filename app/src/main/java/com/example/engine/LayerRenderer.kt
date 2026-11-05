@@ -21,6 +21,7 @@ import com.example.data.model.BlendModeType
 import com.example.data.model.Layer
 import com.example.data.model.LayerType
 import com.example.data.model.TextAlignment
+import com.example.data.model.TextLayerConfig
 import java.io.File
 import kotlin.coroutines.coroutineContext
 import kotlin.math.max
@@ -119,6 +120,9 @@ object LayerRenderer {
                             }
 
                             coroutineContext.ensureActive()
+                            // A masked adjustment layer only affects the revealed area; the hidden
+                            // area becomes transparent and the composite below shows through unchanged.
+                            applyLayerMask(Canvas(adjustedComposite), layer, adjustedComposite.width, adjustedComposite.height)
                             paint.alpha = (layer.opacity * 255).toInt().coerceIn(0, 255)
                             applyBlendMode(paint, layer.blendMode)
                             canvas.drawBitmap(adjustedComposite, 0f, 0f, paint)
@@ -319,55 +323,8 @@ object LayerRenderer {
                     // Compute true unscaled document dimensions to construct layout strictly in document coordinate space
                     val docWidth = if (scaleRatio > 0f) (canvasWidth / scaleRatio) else canvasWidth.toFloat()
 
-                    val basePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                        // Document-space font size (scaled relative to 500px reference document width)
-                        textSize = cfg.fontSizeSp * (docWidth / 500f).coerceAtLeast(1f)
-                        color = cfg.colorHex
-                        style = Paint.Style.FILL
-                        letterSpacing = cfg.letterSpacingEm
-
-                        // Font selection
-                        val fontItem = AvailableFonts.find { it.name.equals(cfg.fontName, ignoreCase = true) }
-                        if (fontItem?.fontResId != null) {
-                            try {
-                                typeface = ResourcesCompat.getFont(context, fontItem.fontResId)
-                            } catch (e: Exception) {
-                                typeface = Typeface.DEFAULT
-                            }
-                        } else {
-                            typeface = Typeface.DEFAULT
-                        }
-                    }
-
-                    val docMaxLayoutWidth = (docWidth * (cfg.maxLineWidthPercent / 100f)).toInt().coerceAtLeast(50)
-
-                    val layoutAlign = when (cfg.alignment) {
-                        TextAlignment.LEFT -> Layout.Alignment.ALIGN_NORMAL
-                        TextAlignment.CENTER -> Layout.Alignment.ALIGN_CENTER
-                        TextAlignment.RIGHT -> Layout.Alignment.ALIGN_OPPOSITE
-                    }
-
-                    fun buildLayout(paint: TextPaint): StaticLayout {
-                        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                            StaticLayout.Builder.obtain(cfg.text, 0, cfg.text.length, paint, docMaxLayoutWidth)
-                                .setAlignment(layoutAlign)
-                                .setLineSpacing(0f, cfg.lineSpacingMultiplier)
-                                .setIncludePad(true)
-                                .setTextDirection(TextDirectionHeuristics.FIRSTSTRONG_LTR)
-                                .build()
-                        } else {
-                            @Suppress("DEPRECATION")
-                            StaticLayout(
-                                cfg.text,
-                                paint,
-                                docMaxLayoutWidth,
-                                layoutAlign,
-                                cfg.lineSpacingMultiplier,
-                                0f,
-                                true
-                            )
-                        }
-                    }
+                    val basePaint = buildTextPaint(context, cfg, docWidth)
+                    fun buildLayout(paint: TextPaint): StaticLayout = buildTextLayout(cfg, paint, docWidth)
 
                     val mainLayout = buildLayout(basePaint)
                     val layoutWidth = mainLayout.width.toFloat()
@@ -443,51 +400,8 @@ object LayerRenderer {
             }
 
             // Apply Layer Mask if present and enabled (Photoshop-standard DST_IN compositing)
-            val maskBmp = layer.maskBitmap
-            if (maskBmp != null && layer.isMaskEnabled && !maskBmp.isRecycled) {
-                coroutineContext.ensureActive()
-                var effectiveMask = maskBmp
-                var tempAllocated: Bitmap? = null
-
-                if (layer.maskFeather > 0.5f) {
-                    tempAllocated = ImageProcessor.applyGaussianBlur(effectiveMask, layer.maskFeather)
-                    effectiveMask = tempAllocated
-                }
-
-                if (layer.maskDensity < 0.99f) {
-                    val modMask = effectiveMask.copy(Bitmap.Config.ARGB_8888, true)
-                    val mc = Canvas(modMask)
-                    val whiteOverlay = Paint().apply {
-                        color = Color.WHITE
-                        alpha = ((1f - layer.maskDensity) * 255).toInt().coerceIn(0, 255)
-                    }
-                    mc.drawRect(0f, 0f, modMask.width.toFloat(), modMask.height.toFloat(), whiteOverlay)
-                    if (tempAllocated != null && !tempAllocated.isRecycled) tempAllocated.recycle()
-                    tempAllocated = modMask
-                    effectiveMask = modMask
-                }
-
-                try {
-                    val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
-                        xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
-                    }
-                    if (effectiveMask.width == output.width && effectiveMask.height == output.height) {
-                        canvas.drawBitmap(effectiveMask, 0f, 0f, maskPaint)
-                    } else {
-                        val maskMatrix = Matrix().apply {
-                            postScale(
-                                output.width.toFloat() / effectiveMask.width.coerceAtLeast(1).toFloat(),
-                                output.height.toFloat() / effectiveMask.height.coerceAtLeast(1).toFloat()
-                            )
-                        }
-                        canvas.drawBitmap(effectiveMask, maskMatrix, maskPaint)
-                    }
-                } finally {
-                    if (tempAllocated != null && !tempAllocated.isRecycled) {
-                        tempAllocated.recycle()
-                    }
-                }
-            }
+            coroutineContext.ensureActive()
+            applyLayerMask(canvas, layer, output.width, output.height)
         } catch (e: CancellationException) {
             if (!output.isRecycled) {
                 output.recycle()
@@ -496,6 +410,120 @@ object LayerRenderer {
         }
 
         return output
+    }
+
+    private fun buildTextPaint(context: Context, cfg: TextLayerConfig, docWidth: Float): TextPaint =
+        TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+            // Document-space font size (scaled relative to 500px reference document width)
+            textSize = cfg.fontSizeSp * (docWidth / 500f).coerceAtLeast(1f)
+            color = cfg.colorHex
+            style = Paint.Style.FILL
+            letterSpacing = cfg.letterSpacingEm
+
+            // Font selection
+            val fontItem = AvailableFonts.find { it.name.equals(cfg.fontName, ignoreCase = true) }
+            typeface = if (fontItem?.fontResId != null) {
+                try {
+                    ResourcesCompat.getFont(context, fontItem.fontResId) ?: Typeface.DEFAULT
+                } catch (e: Exception) {
+                    Typeface.DEFAULT
+                }
+            } else {
+                Typeface.DEFAULT
+            }
+        }
+
+    private fun buildTextLayout(cfg: TextLayerConfig, paint: TextPaint, docWidth: Float): StaticLayout {
+        val docMaxLayoutWidth = (docWidth * (cfg.maxLineWidthPercent / 100f)).toInt().coerceAtLeast(50)
+        val layoutAlign = when (cfg.alignment) {
+            TextAlignment.LEFT -> Layout.Alignment.ALIGN_NORMAL
+            TextAlignment.CENTER -> Layout.Alignment.ALIGN_CENTER
+            TextAlignment.RIGHT -> Layout.Alignment.ALIGN_OPPOSITE
+        }
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            StaticLayout.Builder.obtain(cfg.text, 0, cfg.text.length, paint, docMaxLayoutWidth)
+                .setAlignment(layoutAlign)
+                .setLineSpacing(0f, cfg.lineSpacingMultiplier)
+                .setIncludePad(true)
+                .setTextDirection(TextDirectionHeuristics.FIRSTSTRONG_LTR)
+                .build()
+        } else {
+            @Suppress("DEPRECATION")
+            StaticLayout(cfg.text, paint, docMaxLayoutWidth, layoutAlign, cfg.lineSpacingMultiplier, 0f, true)
+        }
+    }
+
+    /**
+     * Unscaled document-space size (width, height) of a text layer's layout box, i.e. the rectangle
+     * the renderer centres on the layer position before applying scale and rotation.
+     */
+    fun measureTextLayer(context: Context, layer: Layer, docWidth: Float): Pair<Float, Float> {
+        val cfg = layer.textConfig
+        val layout = buildTextLayout(cfg, buildTextPaint(context, cfg, docWidth), docWidth)
+        return layout.width.toFloat().coerceAtLeast(1f) to layout.height.toFloat().coerceAtLeast(1f)
+    }
+
+    /**
+     * Renders the mask exactly as the compositor applies it (feather + density) into a
+     * [width] x [height] ARGB bitmap whose alpha channel is the effective mask.
+     */
+    fun renderEffectiveMask(layer: Layer, width: Int, height: Int): Bitmap? {
+        val mask = layer.maskBitmap ?: return null
+        if (mask.isRecycled) return null
+        val out = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        out.eraseColor(Color.WHITE)
+        applyLayerMask(Canvas(out), layer.copy(isMaskEnabled = true), width, height)
+        return out
+    }
+
+    /**
+     * Multiplies the canvas content by the layer mask (DST_IN). Layer masks live in DOCUMENT space:
+     * the mask covers the whole canvas and is stretched to the render target size.
+     */
+    private fun applyLayerMask(canvas: Canvas, layer: Layer, targetWidth: Int, targetHeight: Int) {
+        val maskBmp = layer.maskBitmap
+        if (maskBmp == null || !layer.isMaskEnabled || maskBmp.isRecycled) return
+        var effectiveMask = maskBmp
+        var tempAllocated: Bitmap? = null
+
+        if (layer.maskFeather > 0.5f) {
+            tempAllocated = ImageProcessor.applyGaussianBlur(effectiveMask, layer.maskFeather)
+            effectiveMask = tempAllocated
+        }
+
+        if (layer.maskDensity < 0.99f) {
+            val modMask = effectiveMask.copy(Bitmap.Config.ARGB_8888, true)
+            val mc = Canvas(modMask)
+            val whiteOverlay = Paint().apply {
+                color = Color.WHITE
+                alpha = ((1f - layer.maskDensity) * 255).toInt().coerceIn(0, 255)
+            }
+            mc.drawRect(0f, 0f, modMask.width.toFloat(), modMask.height.toFloat(), whiteOverlay)
+            if (tempAllocated != null && !tempAllocated.isRecycled) tempAllocated.recycle()
+            tempAllocated = modMask
+            effectiveMask = modMask
+        }
+
+        try {
+            val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+            }
+            if (effectiveMask.width == targetWidth && effectiveMask.height == targetHeight) {
+                canvas.drawBitmap(effectiveMask, 0f, 0f, maskPaint)
+            } else {
+                val maskMatrix = Matrix().apply {
+                    postScale(
+                        targetWidth.toFloat() / effectiveMask.width.coerceAtLeast(1).toFloat(),
+                        targetHeight.toFloat() / effectiveMask.height.coerceAtLeast(1).toFloat()
+                    )
+                }
+                canvas.drawBitmap(effectiveMask, maskMatrix, maskPaint)
+            }
+        } finally {
+            if (tempAllocated != null && !tempAllocated.isRecycled) {
+                tempAllocated.recycle()
+            }
+        }
     }
 
     private fun applyBlendMode(paint: Paint, mode: BlendModeType) {

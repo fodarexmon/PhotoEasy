@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.os.Build
 import android.content.pm.PackageManager
 import androidx.appcompat.app.AppCompatActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
@@ -66,6 +67,9 @@ class MainActivity : AppCompatActivity() {
                         Screen.HOME -> {
                             HomeScreen(
                                 projects = uiState.projects,
+                                isProcessing = uiState.isProcessing,
+                                statusMessage = uiState.statusMessage,
+                                onClearStatusMessage = { viewModel.clearStatusMessage() },
                                 recoveryProjectId = uiState.recoveryProjectId,
                                 onOpenProject = { viewModel.openProject(it) },
                                 onRestoreSession = { viewModel.restoreRecoverySession() },
@@ -78,6 +82,7 @@ class MainActivity : AppCompatActivity() {
                                 },
                                 onOpenSampleProject = { viewModel.openSampleProject() },
                                 onDeleteProject = { viewModel.deleteProject(it) },
+                                onRenameProject = { id, name -> viewModel.renameProject(id, name) },
                                 onOpenSettings = { viewModel.navigateTo(Screen.SETTINGS) }
                             )
                         }
@@ -183,6 +188,47 @@ class MainActivity : AppCompatActivity() {
                                     onRedoSelection = { viewModel.redoSelection() },
                                     onSaveProject = { viewModel.saveCurrentProject() },
                                     onExportConfirm = { isPng, quality -> exportImageSafely(isPng, quality) },
+                                    // Live strokes: the selection / mask updates while the finger moves.
+                                    onStrokeSegment = { points, radius, phase ->
+                                        val activeLayer = uiState.currentProject?.layers?.getOrNull(uiState.selectedLayerIndex)
+                                        when {
+                                            uiState.activeTool == ActiveTool.LAYERS && activeLayer?.isEditingMask == true ->
+                                                viewModel.paintMaskSegment(points, radius, isReveal = !uiState.isMaskEditingBlack, phase = phase)
+                                            uiState.activeTool == ActiveTool.SELECTION && uiState.activeSelectionTool == SelectionToolType.QUICK_SELECTION ->
+                                                viewModel.quickSelectionSegment(points, radius, phase)
+                                            else -> viewModel.brushSelectionSegment(points, radius, phase)
+                                        }
+                                    },
+                                    selectionRevision = uiState.selectionRevision,
+                                    onMagicWandDrag = { x, y, tol, phase -> viewModel.magicWandDrag(x, y, tol, phase) },
+                                    editableShape = uiState.editableShape,
+                                    shapeFromCenter = uiState.shapeFromCenter,
+                                    shapeLockSquare = uiState.shapeLockSquare,
+                                    onToggleShapeFromCenter = { viewModel.setShapeFromCenter(it) },
+                                    onToggleShapeLockSquare = { viewModel.setShapeLockSquare(it) },
+                                    onShapeCreated = { rect, isEllipse -> viewModel.applyShapeSelection(rect, isEllipse) },
+                                    onShapeEdited = { rect -> viewModel.editShapeSelection(rect) },
+                                    onMoveSelection = { dx, dy -> viewModel.moveSelection(dx, dy) },
+                                    isQuickMaskView = uiState.isQuickMaskView,
+                                    onToggleQuickMask = { viewModel.toggleQuickMaskView() },
+                                    onTemporarySubtract = { held ->
+                                        viewModel.setSelectionModeOverride(if (held) com.example.data.model.SelectionMode.SUBTRACT else null)
+                                    },
+                                    modifierOp = uiState.selectionModifierOp,
+                                    modifierAmount = uiState.selectionModifierAmount,
+                                    onModifierPreview = { op, amount -> viewModel.previewSelectionModifier(op, amount) },
+                                    onModifierCommit = { viewModel.endSelectionModifier() },
+                                    isQuickAutoEnhance = uiState.isQuickSelectionAutoEnhance,
+                                    onToggleQuickAutoEnhance = { viewModel.setQuickSelectionAutoEnhance(it) },
+                                    isQuickSampleAll = uiState.isQuickSelectionSampleAll,
+                                    onToggleQuickSampleAll = { viewModel.setQuickSelectionSampleAll(it) },
+                                    refinePreview = uiState.refinePreview,
+                                    refinePreviewMode = uiState.refinePreviewMode,
+                                    onRefinePreviewModeChange = { viewModel.setRefinePreviewMode(it) },
+                                    onRequestRefinePreview = { viewModel.requestRefinePreview(it) },
+                                    exportSuccessUri = uiState.exportSuccessUri,
+                                    onExportResultConsumed = { viewModel.consumeExportResult() },
+                                    onRenameProject = { name -> viewModel.renameProject(proj.id, name) },
                                     onUndo = { viewModel.undo() },
                                     onRedo = { viewModel.redo() },
                                     onClearStatusMessage = { viewModel.clearStatusMessage() },
@@ -229,6 +275,8 @@ class MainActivity : AppCompatActivity() {
                         }
 
                         Screen.SETTINGS -> {
+                            // System back returns to the project list instead of closing the app.
+                            BackHandler { viewModel.navigateTo(Screen.HOME) }
                             SettingsScreen(
                                 currentLanguage = uiState.currentLanguage,
                                 onLanguageChange = { viewModel.setLanguage(it) },

@@ -202,7 +202,7 @@ fun CanvasResizeDialog(
                 if (!validation.isValid) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = validation.errorMessage ?: stringResource(R.string.canvas_invalid_dimensions),
+                        text = validation.errorResId?.let { stringResource(it, *validation.errorArgs.toTypedArray()) } ?: stringResource(R.string.canvas_invalid_dimensions),
                         color = MaterialTheme.colorScheme.error,
                         fontSize = 11.sp
                     )

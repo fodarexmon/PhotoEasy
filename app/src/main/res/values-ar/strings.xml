@@ -223,10 +223,10 @@
     <string name="canvas_width">العرض</string>
 
     <!-- Autosave & Unsaved Dialog -->
-    <string name="unsaved_title">تغييرات غير محفوظة</string>
-    <string name="unsaved_desc">لديك تعديلات غير محفوظة في المشروع. هل تريد حفظ التغييرات قبل الخروج؟</string>
-    <string name="unsaved_save_exit">حفظ والخروج</string>
-    <string name="unsaved_discard">تجاهل التعديلات</string>
+    <string name="unsaved_title">تعذّر حفظ التغييرات</string>
+    <string name="unsaved_desc">تعذّر حفظ آخر تعديلاتك (ربما المساحة ممتلئة). هل تريد المحاولة مجدداً أم الخروج بدونها؟</string>
+    <string name="unsaved_save_exit">حاول مجدداً</string>
+    <string name="unsaved_discard">الخروج دون حفظ</string>
     <string name="restore_session_title">تم استعادة جلسة غير محفوظة</string>
     <string name="restore_session_desc">توجد جلسة عمل سابقة لم يتم إغلاقها بشكل عادي.</string>
     <string name="restore_session_btn">استعادة الجلسة</string>
@@ -413,6 +413,40 @@
     <string name="status_layer_mask_added">تمت إضافة قناع الطبقة</string>
     <string name="status_layer_mask_inverted">تم عكس قناع الطبقة</string>
     <string name="status_layer_mask_applied">تم تطبيق القناع على الطبقة بنجاح</string>
+    <string name="select_move_selection">تحريك</string>
+    <string name="select_move_hint">اسحب لتحريك حدود التحديد. الصورة نفسها لا تتحرك.</string>
+    <string name="select_shape_hint">اسحب للرسم. بعدها اسحب زاوية لتغيير الحجم أو الداخل للتحريك.</string>
+    <string name="select_shape_from_center">من المركز</string>
+    <string name="select_shape_square">مربع</string>
+    <string name="select_shape_circle">دائرة</string>
+    <string name="select_polygon_hint">انقر لإضافة نقاط، واسحب أي نقطة لتعديلها، وانقر مرتين أو على النقطة الأولى للإغلاق.</string>
+    <string name="select_wand_drag_hint">انقر للتحديد. اضغط واسحب أفقياً لتغيير حد التسامح مباشرة.</string>
+    <string name="select_quick_mask_view">القناع السريع</string>
+    <string name="select_hold_subtract">اضغط مطوّلاً للطرح من التحديد</string>
+    <string name="status_wand_no_layer">لا توجد طبقة صورة تحت هذه النقطة.</string>
+    <string name="status_subject_selected_basic">تم تحديد الموضوع (وضع أساسي: التحديد بالذكاء الاصطناعي غير متاح على هذا الجهاز بعد)</string>
+    <string name="refine_preview">معاينة التحديد بعد التحسين</string>
+    <string name="refine_view_overlay">طبقة حمراء</string>
+    <string name="refine_view_black">على أسود</string>
+    <string name="refine_view_white">على أبيض</string>
+    <string name="refine_view_mask">القناع</string>
+    <string name="refine_decontaminate_amount">مقدار إزالة الهالات</string>
+    <string name="canvas_error_numeric">يرجى إدخال أبعاد رقمية صحيحة.</string>
+    <string name="canvas_error_min">أصغر بُعد مسموح للوحة هو %1$d بكسل.</string>
+    <string name="canvas_error_max">أكبر بُعد مسموح للوحة هو %1$d بكسل.</string>
+    <string name="canvas_error_megapixels">اللوحة تتجاوز حد %1$d ميغابكسل (%2$d × %3$d = %4$s ميغابكسل).</string>
+    <string name="polygon_points_count">%1$d نقطة</string>
+    <string name="curves_point_in_out">الدخل: %1$d  |  الخرج: %2$d</string>
+    <string name="refine_global_adjustments">التعديلات العامة</string>
+    <string name="cd_mask_linked">القناع مرتبط بالطبقة</string>
+    <string name="status_effect_failed">تعذّر تطبيق التأثير</string>
+    <string name="action_rename">إعادة تسمية</string>
+    <string name="rename_project_title">إعادة تسمية المشروع</string>
+    <string name="status_project_renamed">تمت إعادة تسمية المشروع</string>
+    <string name="status_exporting">جارٍ تصدير الصورة…</string>
+    <string name="status_project_open_failed">تعذّر فتح هذا المشروع. ربما حُذف أو تلف.</string>
+    <string name="status_layer_mask_apply_failed">تعذّر تطبيق قناع الطبقة</string>
+    <string name="status_processing_failed_memory">الذاكرة غير كافية لهذه العملية. جرّب صورة أصغر.</string>
     <string name="status_layer_mask_deleted">تمت إزالة قناع الطبقة</string>
 
     <!-- Filter Intensity -->
@@ -504,7 +538,8 @@
     <string name="replace_tolerance">نطاق التسامح (Fuzziness)</string>
     <string name="replace_target_color">اللون البديل الجديد</string>
     <string name="replace_enabled">تفعيل استبدال اللون</string>
-    <string name="status_selection_active_scoped">التحديد نشط • التأثير محصور في التحديد</string>
+    <string name="status_selection_adjust_whole_layer">التحديد نشط • التعديلات تُطبَّق على الطبقة كاملة. لحصرها أضف طبقة تعديل وأنشئ لها قناعاً من التحديد.</string>
+    <string name="status_selection_filters_scope">التحديد نشط • التأثيرات الاحترافية تُطبَّق داخل التحديد، أما الفلاتر الجاهزة فعلى الطبقة كاملة.</string>
 
     <!-- مقارنة قبل وبعد -->
     <string name="compare_title">مقارنة قبل وبعد</string>

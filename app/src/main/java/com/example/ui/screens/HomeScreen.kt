@@ -33,6 +33,17 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import coil.request.CachePolicy
+import coil.request.ImageRequest
+import java.io.File
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Lock
@@ -91,6 +102,9 @@ import androidx.activity.result.PickVisualMediaRequest
 @Composable
 fun HomeScreen(
     projects: List<ProjectSummary>,
+    isProcessing: Boolean = false,
+    statusMessage: String? = null,
+    onClearStatusMessage: () -> Unit = {},
     recoveryProjectId: String? = null,
     onOpenProject: (ProjectSummary) -> Unit,
     onRestoreSession: (String) -> Unit = {},
@@ -99,10 +113,21 @@ fun HomeScreen(
     onImportImageUri: (Uri) -> Unit,
     onOpenSampleProject: () -> Unit = {},
     onDeleteProject: (String) -> Unit,
+    onRenameProject: (id: String, newName: String) -> Unit = { _, _ -> },
     onOpenSettings: () -> Unit
 ) {
+    var pendingRenameProject by remember { mutableStateOf<ProjectSummary?>(null) }
     var showNewCanvasDialog by remember { mutableStateOf(false) }
     var pendingDeleteProject by remember { mutableStateOf<ProjectSummary?>(null) }
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // Results (e.g. "import failed") are shown here; progress text is shown by the overlay below.
+    LaunchedEffect(statusMessage, isProcessing) {
+        if (statusMessage != null && !isProcessing) {
+            snackbarHostState.showSnackbar(statusMessage)
+            onClearStatusMessage()
+        }
+    }
 
     val getContentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -178,6 +203,7 @@ fun HomeScreen(
                 }
             }
         },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         containerColor = StudioBackground
     ) { innerPadding ->
         Box(
@@ -231,7 +257,8 @@ fun HomeScreen(
                                     Text(stringResource(R.string.restore_session_btn), fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                 }
                                 IconButton(onClick = onDismissRecoverySession) {
-                                    Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.action_close), tint = Color.Gray)
+                                    // Close (not a trash can): dismissing the banner does not delete the project.
+                                    Icon(Icons.Default.Close, contentDescription = stringResource(R.string.action_close), tint = Color.Gray)
                                 }
                             }
                         }
@@ -349,17 +376,53 @@ fun HomeScreen(
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                         modifier = Modifier.weight(1f)
                     ) {
-                        items(projects) { proj ->
+                        items(projects, key = { it.id }) { proj ->
                             ProjectCard(
                                 project = proj,
                                 onClick = { onOpenProject(proj) },
-                                onDeleteClick = { pendingDeleteProject = proj }
+                                onDeleteClick = { pendingDeleteProject = proj },
+                                onRenameClick = { pendingRenameProject = proj }
                             )
                         }
                     }
                 }
             }
+
+            // Import / open / sample creation run in the background: show progress and block
+            // repeated taps that would start the same operation twice.
+            if (isProcessing && statusMessage != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    awaitPointerEvent().changes.forEach { it.consume() }
+                                }
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CircularProgressIndicator(color = IndigoPrimary)
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(text = statusMessage, color = Color.White, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
         }
+    }
+
+    pendingRenameProject?.let { project ->
+        RenameProjectDialog(
+            initialName = project.name,
+            onDismiss = { pendingRenameProject = null },
+            onConfirm = { newName ->
+                pendingRenameProject = null
+                onRenameProject(project.id, newName)
+            }
+        )
     }
 
     pendingDeleteProject?.let { project ->
@@ -394,7 +457,8 @@ fun HomeScreen(
 private fun ProjectCard(
     project: ProjectSummary,
     onClick: () -> Unit,
-    onDeleteClick: () -> Unit
+    onDeleteClick: () -> Unit,
+    onRenameClick: () -> Unit = {}
 ) {
     var showMenu by remember { mutableStateOf(false) }
 
@@ -415,8 +479,18 @@ private fun ProjectCard(
                 contentAlignment = Alignment.Center
             ) {
                 if (project.thumbnailPath != null) {
+                    val context = LocalContext.current
+                    // The thumbnail file keeps the same path after every save; keying the cache on the
+                    // update time makes Coil load the new image instead of a stale cached one.
+                    val thumbRequest = remember(project.thumbnailPath, project.updatedAt) {
+                        ImageRequest.Builder(context)
+                            .data(File(project.thumbnailPath))
+                            .memoryCacheKey("${project.thumbnailPath}#${project.updatedAt}")
+                            .diskCachePolicy(CachePolicy.DISABLED)
+                            .build()
+                    }
                     Image(
-                        painter = rememberAsyncImagePainter(project.thumbnailPath),
+                        painter = rememberAsyncImagePainter(thumbRequest),
                         contentDescription = project.name,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
@@ -463,6 +537,14 @@ private fun ProjectCard(
                         onDismissRequest = { showMenu = false }
                     ) {
                         DropdownMenuItem(
+                            text = { Text(stringResource(R.string.action_rename)) },
+                            leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                            onClick = {
+                                showMenu = false
+                                onRenameClick()
+                            }
+                        )
+                        DropdownMenuItem(
                             text = { Text(stringResource(R.string.action_delete), color = Color.Red) },
                             leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = Color.Red) },
                             onClick = {
@@ -475,6 +557,40 @@ private fun ProjectCard(
             }
         }
     }
+}
+
+/** Shared by the project list and the editor's overflow menu. */
+@Composable
+fun RenameProjectDialog(
+    initialName: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var name by remember { mutableStateOf(initialName) }
+    val trimmed = name.trim()
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.rename_project_title)) },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { if (it.length <= 80) name = it },
+                label = { Text(stringResource(R.string.canvas_name)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().testTag("field_rename_project")
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = { onConfirm(trimmed) },
+                enabled = trimmed.isNotEmpty(),
+                colors = ButtonDefaults.buttonColors(containerColor = IndigoPrimary)
+            ) { Text(stringResource(R.string.action_rename)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) }
+        }
+    )
 }
 
 @Composable
@@ -619,7 +735,7 @@ private fun NewCanvasDialog(
                 if (!validation.isValid) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = validation.errorMessage ?: stringResource(R.string.canvas_invalid_dimensions),
+                        text = validation.errorResId?.let { stringResource(it, *validation.errorArgs.toTypedArray()) } ?: stringResource(R.string.canvas_invalid_dimensions),
                         color = MaterialTheme.colorScheme.error,
                         fontSize = 11.sp
                     )

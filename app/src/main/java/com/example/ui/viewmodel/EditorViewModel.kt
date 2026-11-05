@@ -47,7 +47,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlin.math.min
 import kotlin.math.max
 import kotlinx.coroutines.withContext
@@ -114,8 +117,37 @@ data class EditorUiState(
     val showMaskRubyOverlay: Boolean = false,
     val maskBrushSizeDp: Float = 24f,
     val isRefineEdgeDialogOpen: Boolean = false,
-    val isMagneticSnapEnabled: Boolean = false
+    val isMagneticSnapEnabled: Boolean = false,
+    /** Last rectangle/ellipse selection; still editable with handles until another selection edit. */
+    val editableShape: EditableShape? = null,
+    /** Draw shapes from their centre / constrained to a square or circle. */
+    val shapeFromCenter: Boolean = false,
+    val shapeLockSquare: Boolean = false,
+    /** Temporary mode while the on-canvas "hold to subtract" button is pressed. */
+    val selectionModeOverride: SelectionMode? = null,
+    /** Show unselected areas under a red overlay (Quick Mask) instead of marching ants only. */
+    val isQuickMaskView: Boolean = false,
+    val selectionModifierOp: SelectionModifierOp = SelectionModifierOp.FEATHER,
+    val selectionModifierAmount: Float = 0f,
+    /** Live preview image of the Refine Edge dialog and how it is displayed. */
+    val refinePreview: Bitmap? = null,
+    val refinePreviewMode: RefinePreviewMode = RefinePreviewMode.OVERLAY
 )
+
+data class EditableShape(
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float,
+    val isEllipse: Boolean
+)
+
+enum class SelectionModifierOp { FEATHER, GROW, SHRINK, SMOOTH }
+
+/** Phase of a live on-canvas stroke (selection brush, quick selection, mask painting, wand drag). */
+enum class StrokePhase { START, MOVE, END }
+
+enum class RefinePreviewMode { OVERLAY, ON_BLACK, ON_WHITE, MASK }
 
 enum class InpaintSelectionMode {
     BRUSH,
@@ -139,58 +171,64 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private var autosaveJob: Job? = null
     private var pendingTransactionWasDirty: Boolean = false
 
-    // Lightweight selection-only history. Keep one undo + one redo mask to avoid
-    // mixing selection edits with document history or retaining many 12MP masks.
-    private var selectionUndoMask: Bitmap? = null
-    private var selectionRedoMask: Bitmap? = null
+    // Selection-only history (independent of document undo). Compressed, multi-level.
+    private val selectionHistory = com.example.engine.SelectionHistory()
 
-    private fun clearSelectionHistory() {
-        selectionUndoMask?.let { if (!it.isRecycled) it.recycle() }
-        selectionRedoMask?.let { if (!it.isRecycled) it.recycle() }
-        selectionUndoMask = null
-        selectionRedoMask = null
-        _uiState.value = _uiState.value.copy(canUndoSelection = false, canRedoSelection = false)
+    private fun updateSelectionHistoryFlags() {
+        _uiState.value = _uiState.value.copy(
+            canUndoSelection = selectionHistory.canUndo,
+            canRedoSelection = selectionHistory.canRedo
+        )
     }
 
-    private fun rememberSelectionState() {
+    private fun clearSelectionHistory() {
+        selectionHistory.clear()
+        updateSelectionHistoryFlags()
+    }
+
+    /**
+     * Records the CURRENT selection as an undo step. Published masks are never mutated in place
+     * (copy-on-write), so the reference can safely be compressed on a background thread.
+     */
+    private suspend fun rememberSelectionState() {
         val mask = _uiState.value.selectionMask ?: return
-        selectionUndoMask?.let { if (!it.isRecycled) it.recycle() }
-        selectionUndoMask = mask.copy(Bitmap.Config.ALPHA_8, true)
-        selectionRedoMask?.let { if (!it.isRecycled) it.recycle() }
-        selectionRedoMask = null
-        _uiState.value = _uiState.value.copy(canUndoSelection = true, canRedoSelection = false)
+        if (mask.isRecycled) return
+        withContext(Dispatchers.Default) { selectionHistory.push(mask) }
+        updateSelectionHistoryFlags()
     }
 
     fun undoSelection() {
-        val undo = selectionUndoMask ?: return
-        val current = _uiState.value.selectionMask ?: return
-        selectionRedoMask?.let { if (!it.isRecycled) it.recycle() }
-        selectionRedoMask = current.copy(Bitmap.Config.ALPHA_8, true)
-        _uiState.value = _uiState.value.copy(
-            selectionMask = undo.copy(Bitmap.Config.ALPHA_8, true),
-            selectionRevision = _uiState.value.selectionRevision + 1,
-            renderRevision = _uiState.value.renderRevision + 1,
-            canUndoSelection = false,
-            canRedoSelection = true
-        )
-        if (!undo.isRecycled) undo.recycle()
-        selectionUndoMask = null
+        viewModelScope.launch {
+            selectionMutex.withLock {
+                endTransientSelectionSessions()
+                val current = _uiState.value.selectionMask ?: return@withLock
+                val restored = withContext(Dispatchers.Default) { selectionHistory.undo(current) } ?: return@withLock
+                publishSelection(restored)
+                updateSelectionHistoryFlags()
+            }
+        }
     }
 
     fun redoSelection() {
-        val redo = selectionRedoMask ?: return
-        val current = _uiState.value.selectionMask ?: return
-        selectionUndoMask?.let { if (!it.isRecycled) it.recycle() }
-        selectionUndoMask = current.copy(Bitmap.Config.ALPHA_8, true)
+        viewModelScope.launch {
+            selectionMutex.withLock {
+                endTransientSelectionSessions()
+                val current = _uiState.value.selectionMask ?: return@withLock
+                val restored = withContext(Dispatchers.Default) { selectionHistory.redo(current) } ?: return@withLock
+                publishSelection(restored)
+                updateSelectionHistoryFlags()
+            }
+        }
+    }
+
+    /** Publishes a new selection mask object and invalidates everything that depends on it. */
+    private fun publishSelection(mask: Bitmap, keepEditableShape: Boolean = false) {
         _uiState.value = _uiState.value.copy(
-            selectionMask = redo.copy(Bitmap.Config.ALPHA_8, true),
+            selectionMask = mask,
             selectionRevision = _uiState.value.selectionRevision + 1,
             renderRevision = _uiState.value.renderRevision + 1,
-            canUndoSelection = true,
-            canRedoSelection = false
+            editableShape = if (keepEditableShape) _uiState.value.editableShape else null
         )
-        if (!redo.isRecycled) redo.recycle()
-        selectionRedoMask = null
     }
 
     init {
@@ -240,7 +278,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
             val proj = _uiState.value.currentProject
             if (proj != null && _uiState.value.isProjectDirty) {
-                val success = repository.saveProject(proj)
+                val success = persistProject(proj)
                 if (success) {
                     _uiState.value = _uiState.value.copy(isProjectDirty = false)
                 }
@@ -260,8 +298,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun handleBackNavigation() {
-        if (_uiState.value.isProjectDirty) {
-            _uiState.value = _uiState.value.copy(isUnsavedChangesDialogOpen = true)
+        if (_uiState.value.isProcessing) return
+        // The project autosaves continuously, so "discard" could never really discard. Leaving the
+        // editor therefore flushes the last pending changes; the dialog only appears if that fails.
+        if (_uiState.value.isProjectDirty || pendingTransactionSnapshot != null) {
+            if (pendingTransactionSnapshot != null) saveHistoryState()
+            saveAndExitEditor()
         } else {
             exitEditor()
         }
@@ -281,15 +323,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (proj != null) {
             viewModelScope.launch {
                 _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_saving_changes))
-                val success = repository.saveProject(proj)
+                val success = persistProject(proj)
                 if (success) {
                     dismissUnsavedDialog()
                     exitEditor()
                 } else {
+                    // Offer: try again, or leave without the unsaved changes.
                     _uiState.value = _uiState.value.copy(
                         isProcessing = false,
                         isProjectDirty = true,
-                        isUnsavedChangesDialogOpen = false,
+                        isUnsavedChangesDialogOpen = true,
                         statusMessage = tr(R.string.status_save_failed_storage)
                     )
                 }
@@ -302,13 +345,40 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun exitEditor() {
         autosaveJob?.cancel()
+        // Keep the selection with the project (selection edits alone do not mark it dirty).
+        val leavingProject = _uiState.value.currentProject
+        val leavingSelection = _uiState.value.selectionMask
+        if (leavingProject != null) {
+            viewModelScope.launch { repository.saveSelection(leavingProject.id, leavingSelection) }
+        }
+        endTransientSelectionSessions()
         prefs.edit().remove("last_opened_project_id").apply()
+        // Release editor-only memory (history snapshots can hold many bitmaps).
+        undoStack.clear()
+        redoStack.clear()
+        pendingTransactionSnapshot = null
+        pendingTransactionWasDirty = false
+        clearSelectionHistory()
         _uiState.value = _uiState.value.copy(
             currentProject = null,
             currentScreen = Screen.HOME,
             isProjectDirty = false,
-            isUnsavedChangesDialogOpen = false
+            isUnsavedChangesDialogOpen = false,
+            // Reset transient editor state so nothing leaks into the next project
+            // (e.g. a stuck "Saving…" overlay after Save & Exit).
+            isProcessing = false,
+            statusMessage = null,
+            activeTool = ActiveTool.NONE,
+            selectionMask = null,
+            isPerspectiveModeActive = false,
+            selectedAspectRatio = null,
+            isResizeDialogOpen = false,
+            isRefineEdgeDialogOpen = false,
+            canUndo = false,
+            canRedo = false
         )
+        // The project list must reflect new projects, renamed timestamps and fresh thumbnails.
+        loadProjects()
     }
 
     fun navigateTo(screen: Screen) {
@@ -335,14 +405,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun loadProjects() {
+        // Runs in the background without touching isProcessing: it is triggered while other
+        // operations (import, save & exit) may still own the progress state.
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isProcessing = true)
             val list = repository.getProjectSummaries()
-
-            _uiState.value = _uiState.value.copy(
-                projects = list,
-                isProcessing = false
-            )
+            _uiState.value = _uiState.value.copy(projects = list)
         }
     }
 
@@ -378,8 +445,19 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val project = repository.getProjectById(projectId)
             if (project != null) {
                 openProject(project)
+                _uiState.value = _uiState.value.copy(isProcessing = false)
+            } else {
+                // Missing/corrupt project (e.g. a stale recovery entry): tell the user and forget it.
+                if (prefs.getString("last_opened_project_id", null) == projectId) {
+                    prefs.edit().remove("last_opened_project_id").apply()
+                }
+                _uiState.value = _uiState.value.copy(
+                    isProcessing = false,
+                    recoveryProjectId = if (_uiState.value.recoveryProjectId == projectId) null else _uiState.value.recoveryProjectId,
+                    statusMessage = tr(R.string.status_project_open_failed)
+                )
+                loadProjects()
             }
-            _uiState.value = _uiState.value.copy(isProcessing = false)
         }
     }
 
@@ -400,8 +478,17 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             canRedo = false,
             isProjectDirty = false,
             isUnsavedChangesDialogOpen = false,
-            selectionMask = SelectionEngine.createBlankMask(project.width, project.height)
+            isProcessing = false,
+            statusMessage = null,
+            selectionMask = SelectionEngine.createBlankMask(project.width, project.height),
+            editableShape = null,
+            selectionModeOverride = null
         )
+        // Restore the selection saved with the project, if any.
+        viewModelScope.launch {
+            val saved = repository.loadSelection(project.id, project.width, project.height) ?: return@launch
+            if (_uiState.value.currentProject?.id == project.id) publishSelection(saved)
+        }
     }
 
     fun saveCurrentProject() {
@@ -409,7 +496,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         autosaveJob?.cancel()
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_saving_project))
-            val success = repository.saveProject(proj)
+            val success = persistProject(proj)
             _uiState.value = _uiState.value.copy(
                 isProcessing = false,
                 isProjectDirty = if (success) false else _uiState.value.isProjectDirty,
@@ -424,6 +511,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun deleteProject(projectId: String) {
         viewModelScope.launch {
             repository.deleteProject(projectId)
+            if (_uiState.value.recoveryProjectId == projectId || prefs.getString("last_opened_project_id", null) == projectId) {
+                prefs.edit().remove("last_opened_project_id").apply()
+                _uiState.value = _uiState.value.copy(recoveryProjectId = null)
+            }
             if (_uiState.value.currentProject?.id == projectId) {
                 _uiState.value = _uiState.value.copy(currentProject = null, currentScreen = Screen.HOME)
             }
@@ -491,23 +582,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         saveHistoryState()
     }
 
-    fun rollbackHistoryTransaction() {
-        val snapshot = pendingTransactionSnapshot
-        if (snapshot != null) {
-            val proj = _uiState.value.currentProject ?: return
-            proj.width = snapshot.width
-            proj.height = snapshot.height
-            proj.layers.clear()
-            proj.layers.addAll(snapshot.layers)
-            proj.markDirty()
-            pendingTransactionSnapshot = null
-            _uiState.value = _uiState.value.copy(
-                currentProject = proj.copy(layers = ArrayList(proj.layers)),
-                renderRevision = proj.renderRevision
-            )
-        }
-    }
-
     // History stack for Undo / Redo with Memory-Budget Management
     private val undoStack = Stack<ProjectSnapshot>()
     private val redoStack = Stack<ProjectSnapshot>()
@@ -564,6 +638,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun undo() {
         val proj = _uiState.value.currentProject ?: return
+        val prevLayerId = proj.layers.getOrNull(_uiState.value.selectedLayerIndex)?.id
 
         if (pendingTransactionSnapshot != null) {
             val snapshot = pendingTransactionSnapshot!!
@@ -575,11 +650,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             proj.layers.addAll(snapshot.layers)
             proj.markDirty()
 
-            val newMask = SelectionEngine.createBlankMask(proj.width, proj.height)
+            val (keptLayerIndex, newMask) = selectionAfterHistoryChange(prevLayerId, proj)
             _uiState.value = _uiState.value.copy(
                 currentProject = proj.copy(layers = ArrayList(proj.layers)),
                 renderRevision = proj.renderRevision,
-                selectedLayerIndex = (proj.layers.size - 1).coerceAtLeast(-1),
+                selectedLayerIndex = keptLayerIndex,
                 selectionMask = newMask
             )
             updateHistoryFlags()
@@ -603,12 +678,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         proj.layers.addAll(previousSnapshot.layers)
         proj.markDirty()
 
-        val newMask = SelectionEngine.createBlankMask(proj.width, proj.height)
+        val (keptLayerIndex, newMask) = selectionAfterHistoryChange(prevLayerId, proj)
 
         _uiState.value = _uiState.value.copy(
             currentProject = proj.copy(layers = ArrayList(proj.layers)),
             renderRevision = proj.renderRevision,
-            selectedLayerIndex = (proj.layers.size - 1).coerceAtLeast(-1),
+            selectedLayerIndex = keptLayerIndex,
             selectionMask = newMask
         )
         updateHistoryFlags()
@@ -618,6 +693,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun redo() {
         if (redoStack.isEmpty()) return
         val proj = _uiState.value.currentProject ?: return
+        val prevLayerId = proj.layers.getOrNull(_uiState.value.selectedLayerIndex)?.id
         val currentSnapshot = ProjectSnapshot(
             width = proj.width,
             height = proj.height,
@@ -633,16 +709,73 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         proj.layers.addAll(nextSnapshot.layers)
         proj.markDirty()
 
-        val newMask = SelectionEngine.createBlankMask(proj.width, proj.height)
+        val (keptLayerIndex, newMask) = selectionAfterHistoryChange(prevLayerId, proj)
 
         _uiState.value = _uiState.value.copy(
             currentProject = proj.copy(layers = ArrayList(proj.layers)),
             renderRevision = proj.renderRevision,
-            selectedLayerIndex = (proj.layers.size - 1).coerceAtLeast(-1),
+            selectedLayerIndex = keptLayerIndex,
             selectionMask = newMask
         )
         updateHistoryFlags()
         markDirty()
+    }
+
+    /**
+     * Restores the snapshot pushed by the most recent [saveHistoryState] without creating a redo
+     * entry. Used when a multi-layer operation fails halfway and must leave no partial changes.
+     */
+    private fun rollbackToLastHistoryState() {
+        val proj = _uiState.value.currentProject ?: return
+        if (undoStack.isEmpty()) return
+        val snapshot = undoStack.pop()
+        proj.width = snapshot.width
+        proj.height = snapshot.height
+        proj.layers.clear()
+        proj.layers.addAll(snapshot.layers)
+        proj.markDirty()
+        _uiState.value = _uiState.value.copy(
+            currentProject = proj.copy(layers = ArrayList(proj.layers)),
+            renderRevision = proj.renderRevision
+        )
+        updateHistoryFlags()
+    }
+
+    /** Source asset files still referenced by undo/redo history must survive orphan cleanup. */
+    private fun historyProtectedFileNames(): Set<String> {
+        val names = mutableSetOf<String>()
+        fun collect(snapshot: ProjectSnapshot?) {
+            snapshot?.layers?.forEach { l -> l.sourceAssetPath?.let { names.add(File(it).name) } }
+        }
+        undoStack.forEach { collect(it) }
+        redoStack.forEach { collect(it) }
+        collect(pendingTransactionSnapshot)
+        return names
+    }
+
+    private suspend fun persistProject(proj: Project): Boolean {
+        val ok = repository.saveProject(proj, historyProtectedFileNames())
+        // The active selection is kept with the project so it survives closing the app.
+        if (ok && _uiState.value.currentProject?.id == proj.id) {
+            repository.saveSelection(proj.id, _uiState.value.selectionMask)
+        }
+        return ok
+    }
+
+    /**
+     * After undo/redo keep the user's context: the same layer (matched by id) stays selected and
+     * the current selection survives when the canvas size did not change.
+     */
+    private fun selectionAfterHistoryChange(prevLayerId: String?, proj: Project): Pair<Int, Bitmap> {
+        val byId = if (prevLayerId != null) proj.layers.indexOfFirst { it.id == prevLayerId } else -1
+        val index = if (byId >= 0) byId else (proj.layers.size - 1).coerceAtLeast(-1)
+        val current = _uiState.value.selectionMask
+        val mask = if (current != null && !current.isRecycled && current.width == proj.width && current.height == proj.height) {
+            current
+        } else {
+            SelectionEngine.createBlankMask(proj.width, proj.height)
+        }
+        return index to mask
     }
 
     private fun updateHistoryFlags() {
@@ -669,22 +802,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     // --- Layer Operations ---
-    fun addImageLayer(bitmap: Bitmap, name: String = "") {
-        val proj = _uiState.value.currentProject ?: return
-        saveHistoryState()
-
-        val layer = Layer(
-            id = java.util.UUID.randomUUID().toString(),
-            name = name.ifBlank { tr(R.string.layer_name_image) },
-            type = LayerType.IMAGE,
-            bitmap = bitmap,
-            contentWidth = bitmap.width.toFloat(),
-            contentHeight = bitmap.height.toFloat()
-        )
-        proj.layers.add(layer)
-        commitProjectMutation(selectedLayerIndex = proj.layers.size - 1)
-    }
-
     fun addImageFromUri(uri: Uri) {
         val proj = _uiState.value.currentProject ?: return
         viewModelScope.launch {
@@ -1043,7 +1160,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     bottomLayer.scaleY = 1f
                     bottomLayer.rotation = 0f
                     bottomLayer.filter = FilterType.NONE
+                    bottomLayer.filterIntensity = 1f
                     bottomLayer.adjustments = ColorAdjustments()
+                    // Both layers' masks are already baked into the merged pixels.
+                    bottomLayer.maskBitmap = null
+                    bottomLayer.isEditingMask = false
+                    bottomLayer.isMaskEnabled = true
+                    bottomLayer.maskDensity = 1f
+                    bottomLayer.maskFeather = 0f
 
                     proj.layers.removeAt(idx)
                     commitProjectMutation(
@@ -1084,6 +1208,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         proj.width = newWidth
         proj.height = newHeight
 
+        // Content stays top-left anchored when not scaled (see position offsets below).
+        val maskMatrix = if (scaleContent) Matrix().apply { postScale(scaleX, scaleY) } else Matrix()
         if (scaleContent) {
             for (layer in proj.layers) {
                 layer.positionX *= scaleX
@@ -1095,6 +1221,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             for (layer in proj.layers) {
                 layer.positionX += (oldW - newWidth.toFloat()) / 2f
                 layer.positionY += (oldH - newHeight.toFloat()) / 2f
+            }
+        }
+        for (layer in proj.layers) {
+            layer.maskBitmap?.let { m ->
+                if (!m.isRecycled) {
+                    layer.maskBitmap = remapDocumentMask(m, oldW.toInt(), oldH.toInt(), newWidth, newHeight, maskMatrix)
+                }
             }
         }
 
@@ -1247,45 +1380,73 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 statusMessage = tr(R.string.status_applying_perspective)
             )
 
+            var historySaved = false
             try {
                 saveHistoryState()
+                historySaved = true
+
+                // Homography that maps the chosen quad (document space) onto the output rectangle.
+                // Used to keep vector (text) layers where the warped pixels end up.
+                val quadToRect = Matrix().apply {
+                    setPolyToPoly(
+                        floatArrayOf(corners[0].x, corners[0].y, corners[1].x, corners[1].y, corners[2].x, corners[2].y, corners[3].x, corners[3].y), 0,
+                        floatArrayOf(0f, 0f, targetW.toFloat(), 0f, targetW.toFloat(), targetH.toFloat(), 0f, targetH.toFloat()), 0,
+                        4
+                    )
+                }
 
                 // Apply Perspective Crop to all layers in the project
                 for (layer in proj.layers) {
+                    if (layer.type == LayerType.TEXT) {
+                        // Text stays editable: move its anchor through the homography and scale by the local stretch.
+                        val cx = oldW / 2f + layer.positionX
+                        val cy = oldH / 2f + layer.positionY
+                        val probe = floatArrayOf(cx, cy, cx + 50f, cy, cx, cy + 50f)
+                        quadToRect.mapPoints(probe)
+                        val sx = kotlin.math.hypot((probe[2] - probe[0]).toDouble(), (probe[3] - probe[1]).toDouble()).toFloat() / 50f
+                        val sy = kotlin.math.hypot((probe[4] - probe[0]).toDouble(), (probe[5] - probe[1]).toDouble()).toFloat() / 50f
+                        layer.positionX = probe[0] - targetW / 2f
+                        layer.positionY = probe[1] - targetH / 2f
+                        if (sx.isFinite() && sx > 0f) layer.scaleX *= sx
+                        if (sy.isFinite() && sy > 0f) layer.scaleY *= sy
+                        continue
+                    }
+
                     val srcBmp = loadAuthoritativeLayerBitmap(layer) ?: continue
-                    val canvasLayerBmp = if (layer.positionX == 0f && layer.positionY == 0f &&
-                        layer.scaleX == 1f && layer.scaleY == 1f && layer.rotation == 0f &&
-                        srcBmp.width == oldW && srcBmp.height == oldH
-                    ) {
-                        srcBmp
-                    } else {
+                    // The authoritative bitmap may be larger than the preview proxy; the work layer
+                    // keeps the same document footprint so the matrix scales it correctly.
+                    val workLayer = workLayerFor(layer, srcBmp)
+                    val canvasLayerBmp = withContext(Dispatchers.Default) {
                         val fullCanvas = Bitmap.createBitmap(oldW, oldH, Bitmap.Config.ARGB_8888)
-                        val canvas = Canvas(fullCanvas)
-                        val matrix = SelectionEngine.getLayerMatrix(layer, oldW, oldH)
-                        canvas.drawBitmap(srcBmp, matrix, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+                        val matrix = SelectionEngine.getLayerMatrix(workLayer, oldW, oldH)
+                        Canvas(fullCanvas).drawBitmap(srcBmp, matrix, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
                         fullCanvas
                     }
+                    if (srcBmp !== layer.bitmap && !srcBmp.isRecycled) srcBmp.recycle()
 
                     val warpedBmp = withContext(Dispatchers.Default) {
                         ImageProcessor.transformPerspective(canvasLayerBmp, corners, targetW, targetH)
                     }
-
-                    if (canvasLayerBmp !== srcBmp && !canvasLayerBmp.isRecycled) {
-                        canvasLayerBmp.recycle()
-                    }
+                    if (warpedBmp !== canvasLayerBmp && !canvasLayerBmp.isRecycled) canvasLayerBmp.recycle()
 
                     val oldMask = layer.maskBitmap
                     if (oldMask != null && !oldMask.isRecycled) {
                         val warpedMask = withContext(Dispatchers.Default) {
-                            ImageProcessor.transformPerspectiveAlpha(oldMask, corners, targetW, targetH)
+                            // Corners are document coordinates, so the mask must be document-sized.
+                            val docMask = documentSizedMask(oldMask, oldW, oldH)
+                            try {
+                                ImageProcessor.transformPerspectiveAlpha(docMask, corners, targetW, targetH)
+                            } finally {
+                                if (docMask !== oldMask && !docMask.isRecycled) docMask.recycle()
+                            }
                         }
-                        if (oldMask !== warpedMask && !oldMask.isRecycled) {
-                            oldMask.recycle()
-                        }
+                        // The history snapshot holds its own mask copy; the live one is just replaced.
                         layer.maskBitmap = warpedMask
                     }
 
-                    commitDestructiveBitmap(proj, layer, warpedBmp, targetW.toFloat(), targetH.toFloat(), "perspective_crop")
+                    val committed = commitDestructiveBitmap(proj, layer, warpedBmp, targetW.toFloat(), targetH.toFloat(), "perspective_crop")
+                    if (warpedBmp !== layer.bitmap && !warpedBmp.isRecycled) warpedBmp.recycle()
+                    if (!committed) throw java.io.IOException("Failed to persist perspective-corrected layer")
                     layer.positionX = 0f
                     layer.positionY = 0f
                     layer.scaleX = 1f
@@ -1309,10 +1470,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                         )
                     }
                 )
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (e is OutOfMemoryError) System.gc()
+                // Some layers may already be warped: roll the whole document back to the snapshot.
+                if (historySaved) rollbackToLastHistoryState()
                 _uiState.value = _uiState.value.copy(
                     isProcessing = false,
-                    statusMessage = tr(R.string.status_perspective_failed)
+                    statusMessage = tr(if (e is OutOfMemoryError) R.string.status_processing_failed_memory else R.string.status_perspective_failed)
                 )
             }
         }
@@ -1354,9 +1519,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         saveHistoryState()
         proj.width = nw
         proj.height = nh
+        val cropMatrix = Matrix().apply { postTranslate(-l.toFloat(), -t.toFloat()) }
         proj.layers.forEach {
             it.positionX += (oldW - nw) / 2f - l
             it.positionY += (oldH - nh) / 2f - t
+            // Document-space masks must be cropped with the canvas to stay aligned with their layer.
+            it.maskBitmap?.let { m ->
+                if (!m.isRecycled) it.maskBitmap = remapDocumentMask(m, oldW, oldH, nw, nh, cropMatrix)
+            }
         }
         commitProjectMutation(
             statusMessage = tr(R.string.status_canvas_cropped),
@@ -1501,7 +1671,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             var out: Bitmap? = null
             try {
                 src = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Image unavailable")
-                val workLayer = layer.copy(bitmap = src!!)
+                // workLayerFor keeps the layer's document footprint, so the mask lands on exactly the
+                // pixels the user painted over even when the full-res source is larger than the preview.
+                val workLayer = workLayerFor(layer, src!!)
                 local = withContext(Dispatchers.Default) {
                     SelectionEngine.mapDocumentMaskToLayerLocal(mask, workLayer, proj.width, proj.height)
                 }
@@ -1525,6 +1697,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     transformState = { it.copy(selectionMask = SelectionEngine.createBlankMask(proj.width, proj.height), isProcessing = false) }
                 )
                 clearSelectionHistory()
+            } catch (e: OutOfMemoryError) {
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_processing_failed_memory))
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_object_remove_failed))
             } finally {
@@ -1557,21 +1732,31 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.value = _uiState.value.copy(isMagicWandContiguous = contiguous)
     }
 
-    fun applyBrushStroke(points: List<PointF>, isEraser: Boolean = false, docRadius: Float? = null) {
-        val mask = _uiState.value.selectionMask ?: return
-        rememberSelectionState()
-        val radius = docRadius ?: _uiState.value.brushSizeDp
-        val mode = _uiState.value.selectionMode
-        viewModelScope.launch(Dispatchers.Default) {
-            SelectionEngine.drawBrushStroke(mask, points, radius, isEraser, mode)
-            withContext(Dispatchers.Main) {
-                _uiState.value = _uiState.value.copy(
-                    selectionMask = mask,
-                    selectionRevision = _uiState.value.selectionRevision + 1,
-                    renderRevision = _uiState.value.renderRevision + 1
-                )
-            }
-        }
+    /**
+     * Serialises every selection edit and applies it copy-on-write: the published mask bitmap is
+     * never mutated in place (except the private working copy of a live brush stroke), so the
+     * canvas, the renderer and the undo history always read a consistent mask.
+     */
+    private val selectionMutex = Mutex()
+
+    /** Mode actually used by selection tools: the hold-to-subtract button overrides the chosen mode. */
+    private fun effectiveSelectionMode(): SelectionMode =
+        _uiState.value.selectionModeOverride ?: _uiState.value.selectionMode
+
+    fun setSelectionModeOverride(mode: SelectionMode?) {
+        _uiState.value = _uiState.value.copy(selectionModeOverride = mode)
+    }
+
+    fun toggleQuickMaskView() {
+        _uiState.value = _uiState.value.copy(isQuickMaskView = !_uiState.value.isQuickMaskView)
+    }
+
+    fun setShapeFromCenter(enabled: Boolean) {
+        _uiState.value = _uiState.value.copy(shapeFromCenter = enabled)
+    }
+
+    fun setShapeLockSquare(enabled: Boolean) {
+        _uiState.value = _uiState.value.copy(shapeLockSquare = enabled)
     }
 
     fun setQuickSelectionAutoEnhance(enable: Boolean) {
@@ -1582,59 +1767,487 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.value = _uiState.value.copy(isQuickSelectionSampleAll = enable)
     }
 
+    // Transient sessions: an editable shape, a live modifier slider and a live magic-wand drag all
+    // recompute from the mask that existed when they started. Any other selection edit ends them.
+    private var shapeBaseMask: Bitmap? = null
+    private var shapeMode: SelectionMode = SelectionMode.ADD
+    private var modifierBaseMask: Bitmap? = null
+    private var modifierJob: Job? = null
+    private var wandSession: WandSession? = null
+    private var wandJob: Job? = null
+
+    private class WandSession(
+        val base: Bitmap,
+        val layer: Layer,
+        val x: Int,
+        val y: Int,
+        val mode: SelectionMode,
+        val contiguous: Boolean
+    )
+
+    /** [current] = the coroutine calling this, which must not cancel itself. */
+    private fun endTransientSelectionSessions(current: Job? = null) {
+        shapeBaseMask = null
+        modifierBaseMask = null
+        if (modifierJob !== current) {
+            modifierJob?.cancel()
+            modifierJob = null
+        }
+        wandSession = null
+        if (wandJob !== current) {
+            wandJob?.cancel()
+            wandJob = null
+        }
+        if (_uiState.value.editableShape != null) {
+            _uiState.value = _uiState.value.copy(editableShape = null)
+        }
+    }
+
+    private fun mutateSelectionAsync(
+        @StringRes progressRes: Int? = null,
+        @StringRes failureRes: Int? = null,
+        block: suspend (Bitmap) -> Unit
+    ) {
+        viewModelScope.launch {
+            selectionMutex.withLock {
+                endTransientSelectionSessions()
+                val base = _uiState.value.selectionMask ?: return@withLock
+                if (base.isRecycled) return@withLock
+                rememberSelectionState()
+                if (progressRes != null) {
+                    _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(progressRes))
+                }
+                try {
+                    val working = withContext(Dispatchers.Default) {
+                        base.copy(Bitmap.Config.ALPHA_8, true).also { block(it) }
+                    }
+                    publishSelection(working)
+                    if (progressRes != null) {
+                        _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = null)
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: OutOfMemoryError) {
+                    System.gc()
+                    _uiState.value = _uiState.value.copy(
+                        isProcessing = if (progressRes != null) false else _uiState.value.isProcessing,
+                        statusMessage = tr(R.string.status_processing_failed_memory)
+                    )
+                } catch (e: Exception) {
+                    _uiState.value = _uiState.value.copy(
+                        isProcessing = if (progressRes != null) false else _uiState.value.isProcessing,
+                        statusMessage = tr(failureRes ?: R.string.status_selection_failed)
+                    )
+                }
+            }
+        }
+    }
+
+    /** Publishes a mask derived from the current one (e.g. clear, move) in order with queued edits. */
+    private fun replaceSelectionAsync(newMask: (Bitmap?) -> Bitmap) {
+        viewModelScope.launch {
+            selectionMutex.withLock {
+                endTransientSelectionSessions()
+                rememberSelectionState()
+                val current = _uiState.value.selectionMask
+                val next = withContext(Dispatchers.Default) { newMask(current) }
+                publishSelection(next)
+            }
+        }
+    }
+
+    /**
+     * Document-space image used for colour sampling (quick selection). It is rendered at a bounded
+     * preview size; callers map document coordinates by the size ratio.
+     */
+    private suspend fun renderDocumentSamplingImage(proj: Project, layer: Layer?, maxDim: Int = 1536): Bitmap {
+        val ratio = min(1f, maxDim.toFloat() / max(proj.width, proj.height).toFloat())
+        if (layer != null && layer.type == LayerType.IMAGE && layer.bitmap != null) {
+            val tw = (proj.width * ratio).toInt().coerceAtLeast(1)
+            val th = (proj.height * ratio).toInt().coerceAtLeast(1)
+            LayerRenderer.renderSingleLayerToBitmap(getApplication(), layer, tw, th, ratio)?.let { return it }
+        }
+        return LayerRenderer.renderCompositeCanvas(
+            getApplication(), proj.layers, proj.width, proj.height,
+            includeBackground = true, maxPreviewDimension = maxDim
+        )
+    }
+
+    fun applyBrushStroke(points: List<PointF>, isEraser: Boolean = false, docRadius: Float? = null) {
+        if (_uiState.value.selectionMask == null || points.isEmpty()) return
+        val radius = docRadius ?: _uiState.value.brushSizeDp
+        val mode = effectiveSelectionMode()
+        mutateSelectionAsync { mask ->
+            SelectionEngine.drawBrushStroke(mask, points, radius, isEraser, mode)
+        }
+    }
+
     fun applyQuickSelection(points: List<PointF>, isEraser: Boolean = false, docRadius: Float? = null) {
         val proj = _uiState.value.currentProject ?: return
-        val mask = _uiState.value.selectionMask ?: return
-        rememberSelectionState()
+        if (_uiState.value.selectionMask == null || points.isEmpty()) return
         val radius = docRadius ?: _uiState.value.brushSizeDp
-        val mode = if (isEraser) SelectionMode.SUBTRACT else _uiState.value.selectionMode
+        val mode = if (isEraser) SelectionMode.SUBTRACT else effectiveSelectionMode()
         val tolerance = _uiState.value.magicWandTolerance
         val autoEnhance = _uiState.value.isQuickSelectionAutoEnhance
         val sampleAll = _uiState.value.isQuickSelectionSampleAll
+        val activeLayer = if (sampleAll) null else proj.layers.getOrNull(_uiState.value.selectedLayerIndex)
 
-        viewModelScope.launch(Dispatchers.Default) {
-            val srcBmp = if (sampleAll) {
-                LayerRenderer.renderCompositeCanvas(
-                    getApplication(),
-                    proj.layers,
-                    proj.width,
-                    proj.height,
-                    includeBackground = true
+        mutateSelectionAsync { mask ->
+            // The mask is in document space, so colours must be sampled from a document-space
+            // image (the active layer as rendered on the canvas, or the full composite).
+            val srcBmp = renderDocumentSamplingImage(proj, activeLayer)
+            try {
+                SelectionEngine.quickSelection(
+                    mask = mask,
+                    points = points,
+                    brushRadius = radius,
+                    sourceBitmap = srcBmp,
+                    mode = mode,
+                    tolerance = tolerance,
+                    autoEnhance = autoEnhance
                 )
-            } else {
-                val idx = _uiState.value.selectedLayerIndex
-                val activeLayer = proj.layers.getOrNull(idx)
-                activeLayer?.let { loadAuthoritativeLayerBitmap(it) }
-                    ?: LayerRenderer.renderCompositeCanvas(
-                        getApplication(),
-                        proj.layers,
-                        proj.width,
-                        proj.height,
-                        includeBackground = true
-                    )
+            } finally {
+                if (!srcBmp.isRecycled) srcBmp.recycle()
             }
+        }
+    }
 
-            SelectionEngine.quickSelection(
-                mask = mask,
-                points = points,
-                brushRadius = radius,
-                sourceBitmap = srcBmp,
-                mode = mode,
-                tolerance = tolerance,
-                autoEnhance = autoEnhance
+    // --- Live strokes: the selection updates WHILE the finger moves -----------------------------
+
+
+    /** Working copy owned by the current live brush stroke (published as the selection mask). */
+    private var liveBrushMask: Bitmap? = null
+    /** Points collected when a stroke cannot be applied incrementally (INTERSECT, or a busy queue). */
+    private val deferredStrokePoints = ArrayList<PointF>()
+    private var strokeIsDeferred = false
+    private var liveStrokeMode: SelectionMode = SelectionMode.ADD
+    private var liveQuickSampling: Bitmap? = null
+    private val liveQuickMutex = Mutex()
+
+    /**
+     * Selection brush (Quick Brush tool and Object-Removal brush). Each segment is painted straight
+     * into a private working copy of the mask, so the marching ants / red overlay follow the finger.
+     */
+    fun brushSelectionSegment(points: List<PointF>, docRadius: Float, phase: StrokePhase) {
+        if (phase == StrokePhase.START) {
+            liveStrokeMode = effectiveSelectionMode()
+            deferredStrokePoints.clear()
+            strokeIsDeferred = liveStrokeMode == SelectionMode.INTERSECT || selectionMutex.isLocked
+            if (!strokeIsDeferred) {
+                endTransientSelectionSessions()
+                val base = _uiState.value.selectionMask ?: return
+                // The published base is immutable, so it can be compressed for undo in the background.
+                viewModelScope.launch(Dispatchers.Default) {
+                    selectionHistory.push(base)
+                    withContext(Dispatchers.Main) { updateSelectionHistoryFlags() }
+                }
+                val working = base.copy(Bitmap.Config.ALPHA_8, true)
+                if (liveStrokeMode == SelectionMode.REPLACE) working.eraseColor(Color.TRANSPARENT)
+                liveBrushMask = working
+                publishSelection(working)
+            }
+        }
+        if (strokeIsDeferred) {
+            deferredStrokePoints.addAll(points)
+            if (phase == StrokePhase.END) {
+                val all = deferredStrokePoints.toList()
+                deferredStrokePoints.clear()
+                strokeIsDeferred = false
+                if (all.isNotEmpty()) applyBrushStroke(all, docRadius = docRadius)
+            }
+            return
+        }
+        val working = liveBrushMask ?: return
+        if (points.isNotEmpty()) {
+            val segmentMode = if (liveStrokeMode == SelectionMode.REPLACE) SelectionMode.ADD else liveStrokeMode
+            SelectionEngine.drawBrushStroke(working, points, docRadius, isEraser = false, mode = segmentMode)
+            _uiState.value = _uiState.value.copy(
+                selectionRevision = _uiState.value.selectionRevision + 1,
+                renderRevision = _uiState.value.renderRevision + 1
             )
+        }
+        if (phase == StrokePhase.END) liveBrushMask = null
+    }
 
-            if (sampleAll && !srcBmp.isRecycled) {
-                srcBmp.recycle()
+    /**
+     * Quick Selection with live feedback: segments are processed in order on a background thread
+     * against a sampling image rendered once per stroke.
+     */
+    fun quickSelectionSegment(points: List<PointF>, docRadius: Float, phase: StrokePhase) {
+        val proj = _uiState.value.currentProject ?: return
+        if (phase == StrokePhase.START) {
+            liveStrokeMode = effectiveSelectionMode()
+            deferredStrokePoints.clear()
+            strokeIsDeferred = liveStrokeMode == SelectionMode.INTERSECT || selectionMutex.isLocked
+            if (!strokeIsDeferred) {
+                endTransientSelectionSessions()
+                val base = _uiState.value.selectionMask ?: return
+                viewModelScope.launch(Dispatchers.Default) {
+                    selectionHistory.push(base)
+                    withContext(Dispatchers.Main) { updateSelectionHistoryFlags() }
+                }
+                val working = base.copy(Bitmap.Config.ALPHA_8, true)
+                if (liveStrokeMode == SelectionMode.REPLACE) working.eraseColor(Color.TRANSPARENT)
+                liveBrushMask = working
+                publishSelection(working)
             }
+        }
+        if (strokeIsDeferred) {
+            deferredStrokePoints.addAll(points)
+            if (phase == StrokePhase.END) {
+                val all = deferredStrokePoints.toList()
+                deferredStrokePoints.clear()
+                strokeIsDeferred = false
+                if (all.isNotEmpty()) applyQuickSelection(all, docRadius = docRadius)
+            }
+            return
+        }
+        val working = liveBrushMask ?: return
+        if (phase == StrokePhase.END) liveBrushMask = null
+        val segmentMode = if (liveStrokeMode == SelectionMode.REPLACE) SelectionMode.ADD else liveStrokeMode
+        val tolerance = _uiState.value.magicWandTolerance
+        val autoEnhance = _uiState.value.isQuickSelectionAutoEnhance
+        val sampleAll = _uiState.value.isQuickSelectionSampleAll
+        val activeLayer = if (sampleAll) null else proj.layers.getOrNull(_uiState.value.selectedLayerIndex)
+        val isStart = phase == StrokePhase.START
+        val isEnd = phase == StrokePhase.END
+        val segment = points.toList()
+        viewModelScope.launch {
+            liveQuickMutex.withLock {
+                try {
+                    if (isStart || liveQuickSampling == null) {
+                        liveQuickSampling?.let { if (!it.isRecycled) it.recycle() }
+                        liveQuickSampling = renderDocumentSamplingImage(proj, activeLayer)
+                    }
+                    val sampling = liveQuickSampling
+                    if (sampling != null && segment.isNotEmpty()) {
+                        withContext(Dispatchers.Default) {
+                            SelectionEngine.quickSelection(
+                                mask = working,
+                                points = segment,
+                                brushRadius = docRadius,
+                                sourceBitmap = sampling,
+                                mode = segmentMode,
+                                tolerance = tolerance,
+                                autoEnhance = autoEnhance
+                            )
+                        }
+                        if (_uiState.value.selectionMask === working) {
+                            _uiState.value = _uiState.value.copy(
+                                selectionRevision = _uiState.value.selectionRevision + 1,
+                                renderRevision = _uiState.value.renderRevision + 1
+                            )
+                        }
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    if (e is OutOfMemoryError) System.gc()
+                } finally {
+                    if (isEnd) {
+                        liveQuickSampling?.let { if (!it.isRecycled) it.recycle() }
+                        liveQuickSampling = null
+                    }
+                }
+            }
+        }
+    }
 
-            withContext(Dispatchers.Main) {
-                _uiState.value = _uiState.value.copy(
-                    selectionMask = mask,
-                    selectionRevision = _uiState.value.selectionRevision + 1,
-                    renderRevision = _uiState.value.renderRevision + 1
-                )
+    /** Layer-mask painting with live feedback; one undo step per stroke. */
+    fun paintMaskSegment(points: List<PointF>, docRadius: Float, isReveal: Boolean, phase: StrokePhase) {
+        if (points.isEmpty()) return
+        paintOnLayerMask(points, docRadius, isReveal, recordHistory = phase == StrokePhase.START)
+    }
+
+    // --- Editable rectangle / ellipse ---------------------------------------------------------
+
+    fun applyShapeSelection(rect: android.graphics.RectF, isEllipse: Boolean) {
+        if (rect.width() < 1f || rect.height() < 1f) return
+        val mode = effectiveSelectionMode()
+        val r = android.graphics.RectF(rect)
+        viewModelScope.launch {
+            selectionMutex.withLock {
+                endTransientSelectionSessions()
+                val base = _uiState.value.selectionMask ?: return@withLock
+                rememberSelectionState()
+                val working = withContext(Dispatchers.Default) {
+                    base.copy(Bitmap.Config.ALPHA_8, true).also { fillShape(it, r, isEllipse, mode) }
+                }
+                shapeBaseMask = base
+                shapeMode = mode
+                publishSelection(working)
+                _uiState.value = _uiState.value.copy(editableShape = EditableShape(r.left, r.top, r.right, r.bottom, isEllipse))
             }
+        }
+    }
+
+    /** Re-applies the last shape with new bounds (handles dragged) without adding another undo step. */
+    fun editShapeSelection(rect: android.graphics.RectF) {
+        if (rect.width() < 1f || rect.height() < 1f) return
+        val r = android.graphics.RectF(rect)
+        viewModelScope.launch {
+            selectionMutex.withLock {
+                val base = shapeBaseMask ?: return@withLock
+                val shape = _uiState.value.editableShape ?: return@withLock
+                val working = withContext(Dispatchers.Default) {
+                    base.copy(Bitmap.Config.ALPHA_8, true).also { fillShape(it, r, shape.isEllipse, shapeMode) }
+                }
+                publishSelection(working, keepEditableShape = true)
+                _uiState.value = _uiState.value.copy(editableShape = shape.copy(left = r.left, top = r.top, right = r.right, bottom = r.bottom))
+            }
+        }
+    }
+
+    fun finishShapeEditing() {
+        shapeBaseMask = null
+        _uiState.value = _uiState.value.copy(editableShape = null)
+    }
+
+    private fun fillShape(mask: Bitmap, r: android.graphics.RectF, isEllipse: Boolean, mode: SelectionMode) {
+        val a = PointF(r.left, r.top)
+        val b = PointF(r.right, r.bottom)
+        if (isEllipse) SelectionEngine.fillEllipseSelection(mask, a, b, mode) else SelectionEngine.fillRectangleSelection(mask, a, b, mode)
+    }
+
+    // --- Move the selection outline ----------------------------------------------------------
+
+    fun moveSelection(dx: Float, dy: Float) {
+        if (_uiState.value.selectionMask == null || (dx == 0f && dy == 0f)) return
+        replaceSelectionAsync { current ->
+            val m = current ?: SelectionEngine.createBlankMask(1, 1)
+            SelectionEngine.translateMask(m, dx, dy)
+        }
+    }
+
+    // --- Live modifier sliders (feather / grow / shrink / smooth) -----------------------------
+
+    fun previewSelectionModifier(op: SelectionModifierOp, amount: Float) {
+        _uiState.value = _uiState.value.copy(selectionModifierOp = op, selectionModifierAmount = amount)
+        // Choosing an operation (amount 0) must not create an empty undo step.
+        if (modifierBaseMask == null && amount < 0.5f) {
+            modifierJob?.cancel()
+            return
+        }
+        modifierJob?.cancel()
+        modifierJob = viewModelScope.launch {
+            delay(50) // coalesce slider ticks
+            selectionMutex.withLock {
+                if (modifierBaseMask == null) {
+                    endTransientSelectionSessions(current = currentCoroutineContext()[Job])
+                    val base = _uiState.value.selectionMask ?: return@withLock
+                    rememberSelectionState()
+                    modifierBaseMask = base
+                }
+                val base = modifierBaseMask ?: return@withLock
+                val working = withContext(Dispatchers.Default) {
+                    base.copy(Bitmap.Config.ALPHA_8, true).also { m ->
+                        val px = amount.coerceAtLeast(0f)
+                        if (px >= 0.5f) when (op) {
+                            SelectionModifierOp.FEATHER -> SelectionEngine.featherMask(m, px)
+                            SelectionModifierOp.GROW -> SelectionEngine.growMask(m, px.toInt().coerceAtLeast(1))
+                            SelectionModifierOp.SHRINK -> SelectionEngine.shrinkMask(m, px.toInt().coerceAtLeast(1))
+                            SelectionModifierOp.SMOOTH -> SelectionEngine.smoothMask(m, px.toInt().coerceIn(1, 12))
+                        }
+                    }
+                }
+                if (modifierBaseMask === base) publishSelection(working)
+            }
+        }
+    }
+
+    /** Slider released: the previewed result becomes the selection (one undo step for the drag). */
+    fun endSelectionModifier() {
+        val pending = modifierJob
+        viewModelScope.launch {
+            pending?.join()
+            modifierBaseMask = null
+            // The slider returns to 0: the next drag modifies the new selection from scratch.
+            _uiState.value = _uiState.value.copy(selectionModifierAmount = 0f)
+        }
+    }
+
+    // --- Magic wand with drag-to-adjust tolerance --------------------------------------------
+
+    /** Resolves the layer under a document point the same way a wand tap does. */
+    private fun wandTargetLayer(proj: Project, touchX: Int, touchY: Int): Layer? {
+        val idx = _uiState.value.selectedLayerIndex
+        var targetLayer = if (idx in proj.layers.indices) proj.layers[idx] else null
+        if (targetLayer == null || targetLayer.bitmap == null ||
+            SelectionEngine.mapCanvasToLayerLocal(touchX.toFloat(), touchY.toFloat(), targetLayer, proj.width, proj.height) == null
+        ) {
+            val hit = proj.layers.findLast { l ->
+                l.isVisible && l.bitmap != null &&
+                    SelectionEngine.mapCanvasToLayerLocal(touchX.toFloat(), touchY.toFloat(), l, proj.width, proj.height) != null
+            }
+            if (hit != null) {
+                targetLayer = hit
+                _uiState.value = _uiState.value.copy(selectedLayerIndex = proj.layers.indexOf(hit))
+            } else {
+                targetLayer = null
+            }
+        }
+        return targetLayer?.takeIf { it.bitmap != null }
+    }
+
+    /**
+     * Press on the image and drag sideways to change the tolerance: the selection is recomputed
+     * live from the press point. [phase] END stores the tolerance and ends the session.
+     */
+    fun magicWandDrag(touchX: Int, touchY: Int, tolerance: Int, phase: StrokePhase) {
+        val proj = _uiState.value.currentProject ?: return
+        val tol = tolerance.coerceIn(0, 100)
+        if (phase == StrokePhase.START) {
+            val layer = wandTargetLayer(proj, touchX, touchY)
+            if (layer == null) {
+                _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_wand_no_layer))
+                return
+            }
+            val mode = effectiveSelectionMode()
+            val contiguous = _uiState.value.isMagicWandContiguous
+            wandJob?.cancel()
+            wandJob = viewModelScope.launch {
+                selectionMutex.withLock {
+                    endTransientSelectionSessions(current = currentCoroutineContext()[Job])
+                    val base = _uiState.value.selectionMask ?: return@withLock
+                    rememberSelectionState()
+                    wandSession = WandSession(base, layer, touchX, touchY, mode, contiguous)
+                }
+                runWandSession(tol)
+            }
+            return
+        }
+        _uiState.value = _uiState.value.copy(magicWandTolerance = tol)
+        val previous = wandJob
+        wandJob = viewModelScope.launch {
+            // Cancel a stale preview, but never the START job before it has created the session.
+            if (phase == StrokePhase.MOVE && wandSession != null) previous?.cancel() else previous?.join()
+            if (phase == StrokePhase.MOVE) delay(40)
+            runWandSession(tol)
+            if (phase == StrokePhase.END) wandSession = null
+        }
+    }
+
+    private suspend fun runWandSession(tolerance: Int) {
+        val proj = _uiState.value.currentProject ?: return
+        selectionMutex.withLock {
+            val s = wandSession ?: return@withLock
+            val working = withContext(Dispatchers.Default) {
+                s.base.copy(Bitmap.Config.ALPHA_8, true).also { m ->
+                    SelectionEngine.magicWandSelect(
+                        layer = s.layer,
+                        canvasWidth = proj.width,
+                        canvasHeight = proj.height,
+                        docMask = m,
+                        docTouchX = s.x.toFloat(),
+                        docTouchY = s.y.toFloat(),
+                        tolerance = tolerance,
+                        contiguous = s.contiguous,
+                        mode = s.mode,
+                        antiAlias = true
+                    )
+                }
+            }
+            if (wandSession === s) publishSelection(working)
         }
     }
 
@@ -1658,9 +2271,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 selectionRevision = _uiState.value.selectionRevision + 1
             )
         } else {
-            val w = if (layer.bitmap != null && layer.bitmap!!.width > 0) layer.bitmap!!.width else proj.width
-            val h = if (layer.bitmap != null && layer.bitmap!!.height > 0) layer.bitmap!!.height else proj.height
-            val mask = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
+            // Layer masks live in document space (same size as the canvas), like selections.
+            val mask = Bitmap.createBitmap(proj.width, proj.height, Bitmap.Config.ALPHA_8)
             mask.eraseColor(Color.WHITE)
             layer.maskBitmap = mask
         }
@@ -1711,7 +2323,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (layer.maskBitmap == null) return
 
         saveHistoryState()
-        layer.maskBitmap?.recycle()
+        // Not recycled: a background preview render may still be reading it (the canvas shares
+        // live mask references instead of copying them every frame). GC reclaims it.
         layer.maskBitmap = null
         layer.isEditingMask = false
         commitProjectMutation(statusMessage = tr(R.string.status_layer_mask_deleted))
@@ -1722,34 +2335,86 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val layer = proj.layers.getOrNull(layerIndex) ?: return
         val mask = layer.maskBitmap ?: return
         val bmp = layer.bitmap ?: return
-        if (mask.isRecycled || bmp.isRecycled) return
-
-        saveHistoryState()
-        val result = Bitmap.createBitmap(bmp.width, bmp.height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(result)
-        canvas.drawBitmap(bmp, 0f, 0f, null)
-        val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
-        }
-        if (mask.width == bmp.width && mask.height == bmp.height) {
-            canvas.drawBitmap(mask, 0f, 0f, maskPaint)
-        } else {
-            val m = Matrix().apply {
-                postScale(bmp.width.toFloat() / mask.width, bmp.height.toFloat() / mask.height)
-            }
-            canvas.drawBitmap(mask, m, maskPaint)
+        if (mask.isRecycled || bmp.isRecycled || layer.type != LayerType.IMAGE) return
+        if (layer.isLocked) {
+            _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_layer_locked))
+            return
         }
 
         viewModelScope.launch {
-            commitDestructiveBitmap(proj, layer, result, bmp.width.toFloat(), bmp.height.toFloat(), "apply_mask")
-            layer.maskBitmap?.recycle()
-            layer.maskBitmap = null
-            layer.isEditingMask = false
-            commitProjectMutation(statusMessage = tr(R.string.status_layer_mask_applied))
+            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_processing))
+            var src: Bitmap? = null
+            var effectiveDocMask: Bitmap? = null
+            var localMask: Bitmap? = null
+            var result: Bitmap? = null
+            try {
+                // Bake from the full-quality source, not the preview proxy.
+                src = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Image unavailable")
+                val workLayer = workLayerFor(layer, src!!)
+                result = withContext(Dispatchers.Default) {
+                    // Exactly what the renderer shows (feather + density), in document space…
+                    effectiveDocMask = LayerRenderer.renderEffectiveMask(layer, proj.width, proj.height)
+                        ?: throw IllegalStateException("Mask unavailable")
+                    // …mapped onto the layer's own pixels through the layer transform.
+                    localMask = SelectionEngine.mapDocumentMaskToLayerLocal(effectiveDocMask!!, workLayer, proj.width, proj.height)
+                    val out = src!!.copy(Bitmap.Config.ARGB_8888, true)
+                    val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                        xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+                    }
+                    Canvas(out).drawBitmap(localMask!!, 0f, 0f, maskPaint)
+                    out
+                }
+                saveHistoryState()
+                if (!commitDestructiveBitmap(proj, layer, result!!, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "apply_mask")) {
+                    throw java.io.IOException("Failed to persist masked layer")
+                }
+                // The history snapshot owns its own mask copy; the live mask is simply dropped.
+                layer.maskBitmap = null
+                layer.isEditingMask = false
+                layer.maskDensity = 1f
+                layer.maskFeather = 0f
+                commitProjectMutation(
+                    statusMessage = tr(R.string.status_layer_mask_applied),
+                    transformState = { it.copy(isProcessing = false) }
+                )
+            } catch (e: OutOfMemoryError) {
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_processing_failed_memory))
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_layer_mask_apply_failed))
+            } finally {
+                val p = layer.bitmap
+                localMask?.let { if (!it.isRecycled) it.recycle() }
+                effectiveDocMask?.let { if (!it.isRecycled) it.recycle() }
+                result?.let { if (it !== p && !it.isRecycled) it.recycle() }
+                src?.let { if (it !== p && !it.isRecycled) it.recycle() }
+            }
         }
     }
 
-    fun paintOnLayerMask(points: List<PointF>, brushRadius: Float, isReveal: Boolean) {
+    /** Returns [mask] if it already matches the document size, otherwise a scaled ALPHA_8 copy (legacy masks). */
+    private fun documentSizedMask(mask: Bitmap, docW: Int, docH: Int): Bitmap {
+        if (mask.width == docW && mask.height == docH) return mask
+        val out = Bitmap.createBitmap(docW, docH, Bitmap.Config.ALPHA_8)
+        val m = Matrix().apply { postScale(docW.toFloat() / mask.width.coerceAtLeast(1), docH.toFloat() / mask.height.coerceAtLeast(1)) }
+        Canvas(out).drawBitmap(mask, m, Paint(Paint.FILTER_BITMAP_FLAG))
+        return out
+    }
+
+    /**
+     * Re-projects a document-space layer mask after the canvas geometry changes (crop / resize).
+     * [matrix] maps old document coordinates to new document coordinates.
+     */
+    private fun remapDocumentMask(mask: Bitmap, oldW: Int, oldH: Int, newW: Int, newH: Int, matrix: Matrix): Bitmap {
+        val src = documentSizedMask(mask, oldW, oldH)
+        val out = Bitmap.createBitmap(newW, newH, Bitmap.Config.ALPHA_8)
+        Canvas(out).drawBitmap(src, matrix, Paint(Paint.FILTER_BITMAP_FLAG))
+        if (src !== mask && !src.isRecycled) src.recycle()
+        return out
+    }
+
+    /** [recordHistory] = false for the follow-up segments of a live stroke (one undo step per stroke). */
+    fun paintOnLayerMask(points: List<PointF>, brushRadius: Float, isReveal: Boolean, recordHistory: Boolean = true) {
         val proj = _uiState.value.currentProject ?: return
         val idx = _uiState.value.selectedLayerIndex
         val layer = proj.layers.getOrNull(idx) ?: return
@@ -1760,94 +2425,67 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 eraseColor(Color.WHITE)
             }
         }
+        // Stroke points are in document coordinates; legacy masks of another size are normalised first.
+        layer.maskBitmap?.let { m ->
+            if (m.width != proj.width || m.height != proj.height) {
+                layer.maskBitmap = documentSizedMask(m, proj.width, proj.height)
+            }
+        }
         val mask = layer.maskBitmap ?: return
-        saveHistoryState()
+        if (recordHistory) saveHistoryState()
 
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeWidth = brushRadius * 2f
-            strokeCap = Paint.Cap.ROUND
-            strokeJoin = Paint.Join.ROUND
-            if (isReveal) {
-                color = Color.WHITE
-            } else {
-                xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
-            }
-        }
-
-        val canvas = Canvas(mask)
-        val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.FILL
-            if (isReveal) {
-                color = Color.WHITE
-            } else {
-                xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
-            }
-        }
-        for (p in points) {
-            canvas.drawCircle(p.x, p.y, brushRadius, fillPaint)
-        }
-        if (points.size > 1) {
-            val path = Path()
-            path.moveTo(points[0].x, points[0].y)
-            for (i in 1 until points.size) {
-                path.lineTo(points[i].x, points[i].y)
-            }
-            canvas.drawPath(path, paint)
-        }
-
-        // Ensure mask pixel buffer is synced for getPixel, test runners, and pixel inspectors
+        // Only the stroke's bounding box is read and written (not the whole document-sized mask),
+        // so long strokes on large canvases stay fast. Pixels are set directly, which also keeps
+        // the result identical across renderers and test runners.
         val w = mask.width
         val h = mask.height
-        val maskPixels = IntArray(w * h)
-        mask.getPixels(maskPixels, 0, w, 0, 0, w, h)
-        val rSq = brushRadius * brushRadius
-        val targetAlpha = if (isReveal) 255 else 0
-
+        var minPX = Float.MAX_VALUE; var minPY = Float.MAX_VALUE
+        var maxPX = -Float.MAX_VALUE; var maxPY = -Float.MAX_VALUE
         for (p in points) {
-            val minX = (p.x - brushRadius).toInt().coerceIn(0, w - 1)
-            val maxX = (p.x + brushRadius).toInt().coerceIn(0, w - 1)
-            val minY = (p.y - brushRadius).toInt().coerceIn(0, h - 1)
-            val maxY = (p.y + brushRadius).toInt().coerceIn(0, h - 1)
+            if (p.x < minPX) minPX = p.x
+            if (p.y < minPY) minPY = p.y
+            if (p.x > maxPX) maxPX = p.x
+            if (p.y > maxPY) maxPY = p.y
+        }
+        val left = (minPX - brushRadius).toInt().coerceIn(0, w - 1)
+        val top = (minPY - brushRadius).toInt().coerceIn(0, h - 1)
+        val right = (maxPX + brushRadius).toInt().coerceIn(0, w - 1)
+        val bottom = (maxPY + brushRadius).toInt().coerceIn(0, h - 1)
+        val regionW = right - left + 1
+        val regionH = bottom - top + 1
+        if (regionW <= 0 || regionH <= 0) return
+        val maskPixels = IntArray(regionW * regionH)
+        mask.getPixels(maskPixels, 0, regionW, left, top, regionW, regionH)
+        val rSq = brushRadius * brushRadius
+        val targetPixel = ((if (isReveal) 255 else 0) shl 24) or 0x00FFFFFF
+
+        fun stamp(cx: Float, cy: Float) {
+            val minX = (cx - brushRadius).toInt().coerceIn(left, right)
+            val maxX = (cx + brushRadius).toInt().coerceIn(left, right)
+            val minY = (cy - brushRadius).toInt().coerceIn(top, bottom)
+            val maxY = (cy + brushRadius).toInt().coerceIn(top, bottom)
             for (y in minY..maxY) {
-                val dy = y - p.y
-                val row = y * w
+                val dy = y - cy
+                val row = (y - top) * regionW
                 for (x in minX..maxX) {
-                    val dx = x - p.x
-                    if (dx * dx + dy * dy <= rSq) {
-                        maskPixels[row + x] = (targetAlpha shl 24) or 0x00FFFFFF
-                    }
+                    val dx = x - cx
+                    if (dx * dx + dy * dy <= rSq) maskPixels[row + (x - left)] = targetPixel
                 }
             }
         }
-        if (points.size > 1) {
-            for (i in 0 until points.size - 1) {
-                val p1 = points[i]
-                val p2 = points[i + 1]
-                val dist = kotlin.math.hypot(p2.x - p1.x, p2.y - p1.y)
-                val steps = kotlin.math.max(1, (dist / (brushRadius * 0.5f)).toInt())
-                for (s in 1 until steps) {
-                    val t = s.toFloat() / steps
-                    val px = p1.x + t * (p2.x - p1.x)
-                    val py = p1.y + t * (p2.y - p1.y)
-                    val minX = (px - brushRadius).toInt().coerceIn(0, w - 1)
-                    val maxX = (px + brushRadius).toInt().coerceIn(0, w - 1)
-                    val minY = (py - brushRadius).toInt().coerceIn(0, h - 1)
-                    val maxY = (py + brushRadius).toInt().coerceIn(0, h - 1)
-                    for (y in minY..maxY) {
-                        val dy = y - py
-                        val row = y * w
-                        for (x in minX..maxX) {
-                            val dx = x - px
-                            if (dx * dx + dy * dy <= rSq) {
-                                maskPixels[row + x] = (targetAlpha shl 24) or 0x00FFFFFF
-                            }
-                        }
-                    }
-                }
+
+        for (p in points) stamp(p.x, p.y)
+        for (i in 0 until points.size - 1) {
+            val p1 = points[i]
+            val p2 = points[i + 1]
+            val dist = kotlin.math.hypot(p2.x - p1.x, p2.y - p1.y)
+            val steps = kotlin.math.max(1, (dist / (brushRadius * 0.5f).coerceAtLeast(0.5f)).toInt())
+            for (s in 1 until steps) {
+                val t = s.toFloat() / steps
+                stamp(p1.x + t * (p2.x - p1.x), p1.y + t * (p2.y - p1.y))
             }
         }
-        mask.setPixels(maskPixels, 0, w, 0, 0, w, h)
+        mask.setPixels(maskPixels, 0, regionW, left, top, regionW, regionH)
 
         commitProjectMutation()
     }
@@ -1855,25 +2493,32 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun setLayerMaskDensity(density: Float, layerIndex: Int = _uiState.value.selectedLayerIndex) {
         val proj = _uiState.value.currentProject ?: return
         val layer = proj.layers.getOrNull(layerIndex) ?: return
-        if (layer.maskBitmap == null) return
+        if (layer.maskBitmap == null || layer.isLocked) return
+        // Slider drag = one undoable transaction (committed on release) + autosave.
+        if (pendingTransactionSnapshot == null) beginHistoryTransaction()
         layer.maskDensity = density.coerceIn(0f, 1f)
         proj.markDirty()
         _uiState.value = _uiState.value.copy(
+            currentProject = proj.copy(layers = ArrayList(proj.layers)),
             renderRevision = proj.renderRevision,
             isProjectDirty = true
         )
+        scheduleAutosave()
     }
 
     fun setLayerMaskFeather(feather: Float, layerIndex: Int = _uiState.value.selectedLayerIndex) {
         val proj = _uiState.value.currentProject ?: return
         val layer = proj.layers.getOrNull(layerIndex) ?: return
-        if (layer.maskBitmap == null) return
+        if (layer.maskBitmap == null || layer.isLocked) return
+        if (pendingTransactionSnapshot == null) beginHistoryTransaction()
         layer.maskFeather = feather.coerceIn(0f, 50f)
         proj.markDirty()
         _uiState.value = _uiState.value.copy(
+            currentProject = proj.copy(layers = ArrayList(proj.layers)),
             renderRevision = proj.renderRevision,
             isProjectDirty = true
         )
+        scheduleAutosave()
     }
 
     fun revealAllLayerMask(layerIndex: Int = _uiState.value.selectedLayerIndex) {
@@ -1905,35 +2550,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setMaskBrushSize(sizeDp: Float) {
         _uiState.value = _uiState.value.copy(maskBrushSizeDp = sizeDp.coerceIn(2f, 120f))
-    }
-
-    fun setCurvesPoints(channel: String, points: List<PointF>) {
-        updateSelectedLayerTransient { layer ->
-            val adj = layer.adjustments
-            val updated = when (channel.uppercase()) {
-                "RED" -> adj.copy(curvesRed = points)
-                "GREEN" -> adj.copy(curvesGreen = points)
-                "BLUE" -> adj.copy(curvesBlue = points)
-                else -> adj.copy(curvesRgb = points)
-            }
-            layer.adjustments = updated
-        }
-    }
-
-    fun applyCurvePreset(channel: String, presetName: String) {
-        val points = when (presetName.lowercase()) {
-            "s_curve" -> listOf(PointF(0f, 0f), PointF(64f, 46f), PointF(192f, 209f), PointF(255f, 255f))
-            "lift_shadows" -> listOf(PointF(0f, 38f), PointF(128f, 148f), PointF(255f, 255f))
-            "deep_blacks" -> listOf(PointF(20f, 0f), PointF(128f, 107f), PointF(255f, 255f))
-            else -> listOf(PointF(0f, 0f), PointF(255f, 255f))
-        }
-        saveHistoryState()
-        setCurvesPoints(channel, points)
-        commitProjectMutation()
-    }
-
-    fun resetCurveChannel(channel: String) {
-        applyCurvePreset(channel, "linear")
     }
 
     fun applyProFilter(effect: ProFilterType, param1: Float, param2: Float = 0f) {
@@ -1974,252 +2590,103 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     statusMessage = tr(R.string.status_effect_applied),
                     transformState = { it.copy(isProcessing = false) }
                 )
+            } catch (e: OutOfMemoryError) {
+                System.gc()
+                _uiState.value = _uiState.value.copy(
+                    isProcessing = false,
+                    statusMessage = tr(R.string.status_processing_failed_memory)
+                )
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     isProcessing = false,
-                    statusMessage = e.message ?: "Effect failed"
+                    statusMessage = tr(R.string.status_effect_failed)
                 )
             }
         }
     }
 
+    /** Lasso points arrive already snapped to edges (the canvas snaps them live when enabled). */
     fun applyLassoSelection(points: List<PointF>) {
-        val mask = _uiState.value.selectionMask ?: return
-        val proj = _uiState.value.currentProject ?: return
-        rememberSelectionState()
-        val mode = _uiState.value.selectionMode
-        val snapEnabled = _uiState.value.isMagneticSnapEnabled
-        viewModelScope.launch(Dispatchers.Default) {
-            val processedPoints = if (snapEnabled && points.size > 2) {
-                val activeBmp = proj.layers.getOrNull(_uiState.value.selectedLayerIndex)?.bitmap
-                if (activeBmp != null && !activeBmp.isRecycled) {
-                    points.map { pt ->
-                        SelectionEngine.snapPointToEdge(pt, activeBmp, searchRadius = 16)
-                    }
-                } else points
-            } else points
-            SelectionEngine.fillLassoPath(mask, processedPoints, mode)
-            withContext(Dispatchers.Main) {
-                _uiState.value = _uiState.value.copy(
-                    selectionMask = mask,
-                    selectionRevision = _uiState.value.selectionRevision + 1,
-                    renderRevision = _uiState.value.renderRevision + 1
-                )
-            }
-        }
+        if (_uiState.value.selectionMask == null || points.size < 3) return
+        val mode = effectiveSelectionMode()
+        mutateSelectionAsync { mask -> SelectionEngine.fillLassoPath(mask, points, mode) }
     }
 
     fun applyPolygonSelection(points: List<PointF>) {
-        val mask = _uiState.value.selectionMask ?: return
-        val proj = _uiState.value.currentProject ?: return
-        rememberSelectionState()
-        val mode = _uiState.value.selectionMode
-        val snapEnabled = _uiState.value.isMagneticSnapEnabled
-        viewModelScope.launch(Dispatchers.Default) {
-            val processedPoints = if (snapEnabled && points.size > 2) {
-                val activeBmp = proj.layers.getOrNull(_uiState.value.selectedLayerIndex)?.bitmap
-                if (activeBmp != null && !activeBmp.isRecycled) {
-                    points.map { pt ->
-                        SelectionEngine.snapPointToEdge(pt, activeBmp, searchRadius = 16)
-                    }
-                } else points
-            } else points
-            SelectionEngine.fillPolygonPoints(mask, processedPoints, mode)
-            withContext(Dispatchers.Main) {
-                _uiState.value = _uiState.value.copy(
-                    selectionMask = mask,
-                    selectionRevision = _uiState.value.selectionRevision + 1,
-                    renderRevision = _uiState.value.renderRevision + 1
-                )
-            }
-        }
+        if (_uiState.value.selectionMask == null || points.size < 3) return
+        val mode = effectiveSelectionMode()
+        mutateSelectionAsync { mask -> SelectionEngine.fillPolygonPoints(mask, points, mode) }
     }
 
     fun applyRectangleSelection(start: PointF, end: PointF) {
-        val mask = _uiState.value.selectionMask ?: return
-        rememberSelectionState()
-        SelectionEngine.fillRectangleSelection(mask, start, end, _uiState.value.selectionMode)
-        _uiState.value = _uiState.value.copy(
-            selectionMask = mask,
-            selectionRevision = _uiState.value.selectionRevision + 1,
-            renderRevision = _uiState.value.renderRevision + 1
-        )
+        applyShapeSelection(android.graphics.RectF(minOf(start.x, end.x), minOf(start.y, end.y), maxOf(start.x, end.x), maxOf(start.y, end.y)), isEllipse = false)
     }
 
     fun applyEllipseSelection(start: PointF, end: PointF) {
-        val mask = _uiState.value.selectionMask ?: return
-        rememberSelectionState()
-        SelectionEngine.fillEllipseSelection(mask, start, end, _uiState.value.selectionMode)
-        _uiState.value = _uiState.value.copy(
-            selectionMask = mask,
-            selectionRevision = _uiState.value.selectionRevision + 1,
-            renderRevision = _uiState.value.renderRevision + 1
-        )
+        applyShapeSelection(android.graphics.RectF(minOf(start.x, end.x), minOf(start.y, end.y), maxOf(start.x, end.x), maxOf(start.y, end.y)), isEllipse = true)
     }
 
     fun applyMagicWand(touchX: Int, touchY: Int) {
         val proj = _uiState.value.currentProject ?: return
-        val mask = _uiState.value.selectionMask ?: return
+        if (_uiState.value.selectionMask == null) return
         val tolerance = _uiState.value.magicWandTolerance
-        val mode = _uiState.value.selectionMode
+        val mode = effectiveSelectionMode()
         val isContiguous = _uiState.value.isMagicWandContiguous
-
-        // Smart layer targeting: use active layer if it contains the tap, or auto-detect layer under tap
-        val idx = _uiState.value.selectedLayerIndex
-        var targetLayer = if (idx in proj.layers.indices) proj.layers[idx] else null
-        if (targetLayer == null || targetLayer.bitmap == null ||
-            SelectionEngine.mapCanvasToLayerLocal(touchX.toFloat(), touchY.toFloat(), targetLayer, proj.width, proj.height) == null
-        ) {
-            val hit = proj.layers.findLast { l ->
-                l.isVisible && l.bitmap != null &&
-                SelectionEngine.mapCanvasToLayerLocal(touchX.toFloat(), touchY.toFloat(), l, proj.width, proj.height) != null
-            }
-            if (hit != null) {
-                targetLayer = hit
-                _uiState.value = _uiState.value.copy(selectedLayerIndex = proj.layers.indexOf(hit))
-            }
+        val wandLayer = wandTargetLayer(proj, touchX, touchY)
+        if (wandLayer == null) {
+            // Tapped outside every image layer: say so instead of silently doing nothing.
+            _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_wand_no_layer))
+            return
         }
-        if (targetLayer == null || targetLayer.bitmap == null) return
 
-        rememberSelectionState()
-
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_selecting_area))
-            try {
-                withContext(Dispatchers.Default) {
-                    SelectionEngine.magicWandSelect(
-                        layer = targetLayer,
-                        canvasWidth = proj.width,
-                        canvasHeight = proj.height,
-                        docMask = mask,
-                        docTouchX = touchX.toFloat(),
-                        docTouchY = touchY.toFloat(),
-                        tolerance = tolerance,
-                        contiguous = isContiguous,
-                        mode = mode,
-                        antiAlias = true
-                    )
-                }
-                _uiState.value = _uiState.value.copy(
-                    selectionMask = mask,
-                    selectionRevision = _uiState.value.selectionRevision + 1,
-                    renderRevision = _uiState.value.renderRevision + 1,
-                    isProcessing = false,
-                    statusMessage = null
-                )
-            } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_selection_failed))
-            }
+        mutateSelectionAsync(R.string.status_selecting_area, R.string.status_selection_failed) { mask ->
+            SelectionEngine.magicWandSelect(
+                layer = wandLayer,
+                canvasWidth = proj.width,
+                canvasHeight = proj.height,
+                docMask = mask,
+                docTouchX = touchX.toFloat(),
+                docTouchY = touchY.toFloat(),
+                tolerance = tolerance,
+                contiguous = isContiguous,
+                mode = mode,
+                antiAlias = true
+            )
         }
     }
 
     fun featherSelection(radiusPx: Float = 8f) {
-        val mask = _uiState.value.selectionMask ?: return
-        rememberSelectionState()
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_feathering))
-            try {
-                withContext(Dispatchers.Default) {
-                    SelectionEngine.featherMask(mask, radiusPx)
-                }
-                _uiState.value = _uiState.value.copy(
-                    selectionMask = mask,
-                    selectionRevision = _uiState.value.selectionRevision + 1,
-                    renderRevision = _uiState.value.renderRevision + 1,
-                    isProcessing = false,
-                    statusMessage = null
-                )
-            } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_feather_failed))
-            }
+        if (_uiState.value.selectionMask == null) return
+        mutateSelectionAsync(R.string.status_feathering, R.string.status_feather_failed) { mask ->
+            SelectionEngine.featherMask(mask, radiusPx)
         }
     }
 
     fun growSelection(radiusPx: Int = 5) {
-        val mask = _uiState.value.selectionMask ?: return
-        rememberSelectionState()
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_expanding_selection))
-            try {
-                withContext(Dispatchers.Default) {
-                    SelectionEngine.growMask(mask, radiusPx)
-                }
-                _uiState.value = _uiState.value.copy(
-                    selectionMask = mask,
-                    selectionRevision = _uiState.value.selectionRevision + 1,
-                    renderRevision = _uiState.value.renderRevision + 1,
-                    isProcessing = false,
-                    statusMessage = null
-                )
-            } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_expand_failed))
-            }
+        if (_uiState.value.selectionMask == null) return
+        mutateSelectionAsync(R.string.status_expanding_selection, R.string.status_expand_failed) { mask ->
+            SelectionEngine.growMask(mask, radiusPx)
         }
     }
 
     fun shrinkSelection(radiusPx: Int = 5) {
-        val mask = _uiState.value.selectionMask ?: return
-        rememberSelectionState()
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_contracting_selection))
-            try {
-                withContext(Dispatchers.Default) {
-                    SelectionEngine.shrinkMask(mask, radiusPx)
-                }
-                _uiState.value = _uiState.value.copy(
-                    selectionMask = mask,
-                    selectionRevision = _uiState.value.selectionRevision + 1,
-                    renderRevision = _uiState.value.renderRevision + 1,
-                    isProcessing = false,
-                    statusMessage = null
-                )
-            } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_contract_failed))
-            }
+        if (_uiState.value.selectionMask == null) return
+        mutateSelectionAsync(R.string.status_contracting_selection, R.string.status_contract_failed) { mask ->
+            SelectionEngine.shrinkMask(mask, radiusPx)
         }
     }
 
     fun smoothSelection(radiusPx: Int = 3) {
-        val mask = _uiState.value.selectionMask ?: return
-        rememberSelectionState()
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_smoothing_selection))
-            try {
-                withContext(Dispatchers.Default) {
-                    SelectionEngine.smoothMask(mask, radiusPx)
-                }
-                _uiState.value = _uiState.value.copy(
-                    selectionMask = mask,
-                    selectionRevision = _uiState.value.selectionRevision + 1,
-                    renderRevision = _uiState.value.renderRevision + 1,
-                    isProcessing = false,
-                    statusMessage = null
-                )
-            } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_smooth_failed))
-            }
+        if (_uiState.value.selectionMask == null) return
+        mutateSelectionAsync(R.string.status_smoothing_selection, R.string.status_smooth_failed) { mask ->
+            SelectionEngine.smoothMask(mask, radiusPx)
         }
     }
 
     fun refineSelectionEdge(contrastFactor: Float = 2.0f) {
-        val mask = _uiState.value.selectionMask ?: return
-        rememberSelectionState()
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_refining_selection))
-            try {
-                withContext(Dispatchers.Default) {
-                    SelectionEngine.refineMaskEdges(mask, contrastFactor)
-                }
-                _uiState.value = _uiState.value.copy(
-                    selectionMask = mask,
-                    selectionRevision = _uiState.value.selectionRevision + 1,
-                    renderRevision = _uiState.value.renderRevision + 1,
-                    isProcessing = false,
-                    statusMessage = null
-                )
-            } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_refine_failed))
-            }
+        if (_uiState.value.selectionMask == null) return
+        mutateSelectionAsync(R.string.status_refining_selection, R.string.status_refine_failed) { mask ->
+            SelectionEngine.refineMaskEdges(mask, contrastFactor)
         }
     }
 
@@ -2228,7 +2695,111 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun closeRefineEdgeDialog() {
+        clearRefinePreview()
         _uiState.value = _uiState.value.copy(isRefineEdgeDialogOpen = false)
+    }
+
+    private var refinePreviewJob: Job? = null
+
+    fun clearRefinePreview() {
+        refinePreviewJob?.cancel()
+        refinePreviewJob = null
+        _uiState.value = _uiState.value.copy(refinePreview = null)
+    }
+
+    fun setRefinePreviewMode(mode: RefinePreviewMode) {
+        _uiState.value = _uiState.value.copy(refinePreviewMode = mode)
+    }
+
+    /**
+     * Live preview for the Refine Edge dialog: the selected area of the active layer is cropped,
+     * downscaled (≤ 480 px) and refined with the dialog's settings, so every slider change is
+     * visible within a fraction of a second. Pixel radii are scaled to the preview size so the
+     * preview matches the full-resolution result.
+     */
+    fun requestRefinePreview(config: RefineEdgeConfig) {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.getOrNull(_uiState.value.selectedLayerIndex) ?: return
+        val proxy = layer.bitmap ?: return
+        val docMask = _uiState.value.selectionMask ?: return
+        refinePreviewJob?.cancel()
+        refinePreviewJob = viewModelScope.launch {
+            delay(180) // debounce slider drags
+            val preview = try {
+                withContext(Dispatchers.Default) { buildRefinePreview(proj, layer, proxy, docMask, config, _uiState.value.refinePreviewMode) }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                null
+            }
+            _uiState.value = _uiState.value.copy(refinePreview = preview)
+        }
+    }
+
+    private fun buildRefinePreview(
+        proj: Project,
+        layer: Layer,
+        proxy: Bitmap,
+        docMask: Bitmap,
+        config: RefineEdgeConfig,
+        mode: RefinePreviewMode
+    ): Bitmap? {
+        val local = SelectionEngine.mapDocumentMaskToLayerLocal(docMask, layer, proj.width, proj.height)
+        try {
+            val bounds = SelectionEngine.selectionBounds(local) ?: return null
+            val margin = (max(bounds.width(), bounds.height()) * 0.15f).toInt() + 8
+            val crop = android.graphics.Rect(
+                (bounds.left - margin).coerceAtLeast(0),
+                (bounds.top - margin).coerceAtLeast(0),
+                (bounds.right + margin).coerceAtMost(proxy.width),
+                (bounds.bottom + margin).coerceAtMost(proxy.height)
+            )
+            if (crop.width() < 2 || crop.height() < 2) return null
+            val ratio = min(1f, 480f / max(crop.width(), crop.height()))
+            val pw = (crop.width() * ratio).toInt().coerceAtLeast(2)
+            val ph = (crop.height() * ratio).toInt().coerceAtLeast(2)
+            val srcCrop = Bitmap.createBitmap(proxy, crop.left, crop.top, crop.width(), crop.height())
+            val srcSmall = Bitmap.createScaledBitmap(srcCrop, pw, ph, true)
+            val maskCrop = Bitmap.createBitmap(local, crop.left, crop.top, crop.width(), crop.height())
+            val maskSmall = Bitmap.createScaledBitmap(maskCrop, pw, ph, true)
+
+            // The real refine runs on the full-resolution source: scale pixel radii accordingly.
+            val fullMax = max(layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight()).coerceAtLeast(1f)
+            val scaleToPreview = (max(pw, ph).toFloat() / max(crop.width(), crop.height())) * (max(proxy.width, proxy.height) / fullMax)
+            val previewConfig = config.copy(
+                radiusPx = (config.radiusPx * scaleToPreview).toInt().coerceAtLeast(1),
+                smoothPx = (config.smoothPx * scaleToPreview).toInt(),
+                featherPx = config.featherPx * scaleToPreview
+            )
+            val result = RefineEdgeEngine.refineEdges(srcSmall, maskSmall, previewConfig)
+            val shown = result.decontaminatedSource ?: srcSmall
+            val src = IntArray(pw * ph)
+            val alpha = IntArray(pw * ph)
+            shown.getPixels(src, 0, pw, 0, 0, pw, ph)
+            result.refinedMask.getPixels(alpha, 0, pw, 0, 0, pw, ph)
+            val out = IntArray(pw * ph)
+            for (i in out.indices) {
+                val a = ((alpha[i] ushr 24) and 0xFF) / 255f
+                val p = src[i]
+                val r = (p shr 16) and 0xFF; val g = (p shr 8) and 0xFF; val b = p and 0xFF
+                out[i] = when (mode) {
+                    RefinePreviewMode.ON_BLACK -> Color.rgb((r * a).toInt(), (g * a).toInt(), (b * a).toInt())
+                    RefinePreviewMode.ON_WHITE -> Color.rgb((r * a + 255 * (1 - a)).toInt(), (g * a + 255 * (1 - a)).toInt(), (b * a + 255 * (1 - a)).toInt())
+                    RefinePreviewMode.MASK -> { val v = (a * 255).toInt(); Color.rgb(v, v, v) }
+                    RefinePreviewMode.OVERLAY -> {
+                        val k = 0.55f * (1 - a)
+                        Color.rgb((r * (1 - k) + 230 * k).toInt(), (g * (1 - k) + 30 * k).toInt(), (b * (1 - k) + 60 * k).toInt())
+                    }
+                }
+            }
+            val bmp = Bitmap.createBitmap(pw, ph, Bitmap.Config.ARGB_8888)
+            bmp.setPixels(out, 0, pw, 0, 0, pw, ph)
+            listOf(srcCrop, srcSmall, maskCrop, maskSmall, result.refinedMask).forEach { if (it !== proxy && !it.isRecycled) it.recycle() }
+            result.decontaminatedSource?.let { if (!it.isRecycled) it.recycle() }
+            return bmp
+        } finally {
+            if (!local.isRecycled) local.recycle()
+        }
     }
 
     fun toggleMagneticSnap() {
@@ -2240,30 +2811,78 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val idx = _uiState.value.selectedLayerIndex
         if (idx !in proj.layers.indices) return
         val layer = proj.layers[idx]
-        rememberSelectionState()
 
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.select_subject_desc))
             var src: Bitmap? = null
+            var work: Bitmap? = null
             try {
                 src = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Layer image unavailable")
-                val subjectMask = withContext(Dispatchers.Default) {
-                    SelectionEngine.selectSubject(src!!)
+                // Segmentation does not need full resolution; a bounded working copy keeps it fast and
+                // avoids OOM. The layer transform maps the result back into document space at any size.
+                work = withContext(Dispatchers.Default) { ImageProcessor.scaleBitmapToMaxDimension(src!!, 1024) }
+                val workLayer = workLayerFor(layer, work!!)
+                // 1) On-device ML Kit subject segmentation (real subject masks: people, pets, objects).
+                // 2) Fallback: the built-in colour-saliency estimate when ML Kit is unavailable
+                //    (no Google Play services, or its model is still downloading).
+                val aiMask = com.example.engine.AiSubjectSegmenter.foregroundMask(work!!)
+                val usedAi = aiMask != null
+                val docMask = withContext(Dispatchers.Default) {
+                    val localSubject = aiMask ?: SelectionEngine.selectSubject(work!!)
+                    try {
+                        layerLocalMaskToDocument(localSubject, workLayer, proj, base = null)
+                    } finally {
+                        if (!localSubject.isRecycled) localSubject.recycle()
+                    }
+                }
+                selectionMutex.withLock {
+                    endTransientSelectionSessions()
+                    rememberSelectionState()
+                    publishSelection(docMask)
                 }
                 _uiState.value = _uiState.value.copy(
-                    selectionMask = subjectMask,
-                    selectionRevision = _uiState.value.selectionRevision + 1,
-                    renderRevision = _uiState.value.renderRevision + 1,
                     isProcessing = false,
-                    statusMessage = tr(R.string.status_subject_selected)
+                    statusMessage = tr(if (usedAi) R.string.status_subject_selected else R.string.status_subject_selected_basic)
                 )
+            } catch (e: OutOfMemoryError) {
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_selection_failed))
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_selection_failed))
             } finally {
                 val p = layer.bitmap
+                work?.let { if (it !== p && !it.isRecycled) it.recycle() }
                 src?.let { if (it !== p && !it.isRecycled) it.recycle() }
             }
         }
+    }
+
+    /**
+     * A copy of [layer] whose bitmap is [bitmap] but whose document-space footprint is unchanged, so
+     * [SelectionEngine.getLayerMatrix] maps [bitmap]'s pixels exactly where the real layer renders.
+     */
+    private fun workLayerFor(layer: Layer, bitmap: Bitmap): Layer = layer.copy(
+        bitmap = bitmap,
+        contentWidth = layer.intrinsicDocumentWidth(),
+        contentHeight = layer.intrinsicDocumentHeight()
+    )
+
+    /**
+     * Draws a layer-local mask (sized like [workLayer].bitmap) into a document-sized ALPHA_8 selection
+     * mask. Pixels outside the layer footprint keep the value from [base] (or are empty when null).
+     */
+    private fun layerLocalMaskToDocument(localMask: Bitmap, workLayer: Layer, proj: Project, base: Bitmap?): Bitmap {
+        val doc = if (base != null && !base.isRecycled && base.width == proj.width && base.height == proj.height) {
+            base.copy(Bitmap.Config.ALPHA_8, true)
+        } else {
+            SelectionEngine.createBlankMask(proj.width, proj.height)
+        }
+        val matrix = SelectionEngine.getLayerMatrix(workLayer, proj.width, proj.height)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+            xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC)
+        }
+        Canvas(doc).drawBitmap(localMask, matrix, paint)
+        return doc
     }
 
     fun applyRefineEdgeMatting(config: RefineEdgeConfig) {
@@ -2272,38 +2891,62 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (idx !in proj.layers.indices) return
         val layer = proj.layers[idx]
         val currentMask = _uiState.value.selectionMask ?: return
-        rememberSelectionState()
 
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.refine_hair_desc))
             var src: Bitmap? = null
             try {
                 src = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Layer image unavailable")
+                val workLayer = workLayerFor(layer, src!!)
+                // Matting runs in layer-local pixel space: the document selection is mapped onto the
+                // layer's source pixels and the refined result is mapped back into document space.
                 val result = withContext(Dispatchers.Default) {
-                    SelectionEngine.refineEdgesWithMatting(src!!, currentMask, config)
+                    val localMask = SelectionEngine.mapDocumentMaskToLayerLocal(currentMask, workLayer, proj.width, proj.height)
+                    try {
+                        SelectionEngine.refineEdgesWithMatting(src!!, localMask, config)
+                    } finally {
+                        if (!localMask.isRecycled) localMask.recycle()
+                    }
+                }
+                val refinedDocMask = withContext(Dispatchers.Default) {
+                    try {
+                        layerLocalMaskToDocument(result.refinedMask, workLayer, proj, base = currentMask)
+                    } finally {
+                        if (!result.refinedMask.isRecycled) result.refinedMask.recycle()
+                    }
                 }
 
-                // If decontamination was applied, update layer bitmap with cleaned fringes
-                if (result.decontaminatedSource != null) {
+                // Decontamination only runs when the user explicitly enabled it in the dialog.
+                val decontaminated = result.decontaminatedSource
+                if (decontaminated != null) {
                     saveHistoryState()
-                    commitDestructiveBitmap(
+                    val committed = commitDestructiveBitmap(
                         proj,
                         layer,
-                        result.decontaminatedSource,
+                        decontaminated,
                         layer.intrinsicDocumentWidth(),
                         layer.intrinsicDocumentHeight(),
                         "refine_decontaminate"
                     )
+                    if (decontaminated !== layer.bitmap && !decontaminated.isRecycled) decontaminated.recycle()
+                    if (!committed) throw java.io.IOException("Failed to persist decontaminated layer")
+                    commitProjectMutation()
                 }
 
+                selectionMutex.withLock {
+                    endTransientSelectionSessions()
+                    rememberSelectionState()
+                    publishSelection(refinedDocMask)
+                }
+                clearRefinePreview()
                 _uiState.value = _uiState.value.copy(
-                    selectionMask = result.refinedMask,
-                    selectionRevision = _uiState.value.selectionRevision + 1,
-                    renderRevision = _uiState.value.renderRevision + 1,
                     isRefineEdgeDialogOpen = false,
                     isProcessing = false,
                     statusMessage = tr(R.string.status_matting_complete)
                 )
+            } catch (e: OutOfMemoryError) {
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_matting_failed))
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_matting_failed))
             } finally {
@@ -2314,55 +2957,29 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun invertSelection() {
-        val mask = _uiState.value.selectionMask ?: return
-        rememberSelectionState()
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_inverting_selection))
-            try {
-                withContext(Dispatchers.Default) {
-                    SelectionEngine.invertMask(mask)
-                }
-                _uiState.value = _uiState.value.copy(
-                    selectionMask = mask,
-                    selectionRevision = _uiState.value.selectionRevision + 1,
-                    renderRevision = _uiState.value.renderRevision + 1,
-                    isProcessing = false,
-                    statusMessage = null
-                )
-            } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_invert_failed))
-            }
+        if (_uiState.value.selectionMask == null) return
+        mutateSelectionAsync(R.string.status_inverting_selection, R.string.status_invert_failed) { mask ->
+            SelectionEngine.invertMask(mask)
         }
     }
 
     fun selectAll() {
-        rememberSelectionState()
-        _uiState.value.selectionMask?.let {
-            SelectionEngine.selectAll(it)
-            _uiState.value = _uiState.value.copy(
-                selectionMask = it,
-                selectionRevision = _uiState.value.selectionRevision + 1,
-                renderRevision = _uiState.value.renderRevision + 1
-            )
-        }
+        if (_uiState.value.selectionMask == null) return
+        mutateSelectionAsync { mask -> SelectionEngine.selectAll(mask) }
     }
 
     fun clearSelection() {
         val proj = _uiState.value.currentProject ?: return
-        rememberSelectionState()
-        val newBlankMask = SelectionEngine.createBlankMask(proj.width, proj.height)
-        _uiState.value = _uiState.value.copy(
-            selectionMask = newBlankMask,
-            selectionRevision = _uiState.value.selectionRevision + 1,
-            renderRevision = _uiState.value.renderRevision + 1
-        )
+        val w = proj.width
+        val h = proj.height
+        replaceSelectionAsync { SelectionEngine.createBlankMask(w, h) }
     }
 
     fun copySelectionToNewLayer() {
         val proj=_uiState.value.currentProject?:return;val idx=_uiState.value.selectedLayerIndex;if(idx !in proj.layers.indices)return;val layer=proj.layers[idx];val mask=_uiState.value.selectionMask?:return
         if(layer.type!=LayerType.IMAGE||!SelectionEngine.hasSelection(mask)){_uiState.value=_uiState.value.copy(statusMessage=tr(R.string.status_nothing_selected));return}
         viewModelScope.launch{_uiState.value=_uiState.value.copy(isProcessing=true,statusMessage=tr(R.string.status_copying_selection));var src:Bitmap?=null;var local:Bitmap?=null;var copy:Bitmap?=null
-            try{src=loadAuthoritativeLayerBitmap(layer)?:throw IllegalStateException("Image unavailable");val work=layer.copy(bitmap=src!!);local=withContext(Dispatchers.Default){SelectionEngine.mapDocumentMaskToLayerLocal(mask,work,proj.width,proj.height)};copy=withContext(Dispatchers.Default){SelectionEngine.copySelectedToNewBitmap(src!!,local!!)}?:throw IllegalStateException("No pixels selected")
+            try{src=loadAuthoritativeLayerBitmap(layer)?:throw IllegalStateException("Image unavailable");val work=workLayerFor(layer,src!!);local=withContext(Dispatchers.Default){SelectionEngine.mapDocumentMaskToLayerLocal(mask,work,proj.width,proj.height)};copy=withContext(Dispatchers.Default){SelectionEngine.copySelectedToNewBitmap(src!!,local!!)}?:throw IllegalStateException("No pixels selected")
                 val n=Layer(id=java.util.UUID.randomUUID().toString(),name=tr(R.string.layer_name_selection),type=LayerType.IMAGE,positionX=layer.positionX,positionY=layer.positionY,scaleX=layer.scaleX,scaleY=layer.scaleY,rotation=layer.rotation,opacity=layer.opacity,blendMode=layer.blendMode,filter=layer.filter,adjustments=layer.adjustments.copy(),contentWidth=layer.intrinsicDocumentWidth(),contentHeight=layer.intrinsicDocumentHeight())
                 if(!commitDestructiveBitmap(proj,n,copy!!,n.contentWidth,n.contentHeight,"selection"))throw java.io.IOException("Save failed");saveHistoryState();proj.layers.add(idx+1,n);commitProjectMutation(selectedLayerIndex=idx+1,statusMessage=tr(R.string.status_copied_new_layer),transformState={it.copy(selectionMask=SelectionEngine.createBlankMask(proj.width,proj.height),isProcessing=false)}); clearSelectionHistory()}
             catch(e:Exception){_uiState.value=_uiState.value.copy(isProcessing=false,statusMessage=tr(R.string.status_copy_failed))}
@@ -2373,32 +2990,69 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     // --- Exporting ---
     fun exportImage(isPng: Boolean, quality: Int) {
         val proj = _uiState.value.currentProject ?: return
+        if (_uiState.value.isProcessing) return
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isProcessing = true)
+            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_exporting), exportSuccessUri = null)
+            var compositeBmp: Bitmap? = null
+            try {
+                compositeBmp = withContext(Dispatchers.Default) {
+                    LayerRenderer.renderCompositeCanvas(
+                        getApplication(),
+                        proj.layers,
+                        proj.width,
+                        proj.height,
+                        backgroundColor = if (isPng) null else android.graphics.Color.WHITE,
+                        maxPreviewDimension = null
+                    )
+                }
 
-            val compositeBmp = withContext(Dispatchers.Default) {
-                LayerRenderer.renderCompositeCanvas(
-                    getApplication(),
-                    proj.layers,
-                    proj.width,
-                    proj.height,
-                    backgroundColor = if (isPng) null else android.graphics.Color.WHITE,
-                    maxPreviewDimension = null
+                // File names: keep letters/digits (any script), dash and underscore only.
+                val safeName = proj.name.trim()
+                    .replace(Regex("[^\\p{L}\\p{N}_-]+"), "_")
+                    .trim('_')
+                    .ifEmpty { "PhotoEasy" }
+                    .take(60)
+                val exportUri = repository.exportToGallery(compositeBmp!!, safeName, isPng, quality)
+
+                // Success is announced by the editor's "Exported • Share" snackbar (driven by exportSuccessUri).
+                _uiState.value = _uiState.value.copy(
+                    isProcessing = false,
+                    exportSuccessUri = exportUri,
+                    statusMessage = if (exportUri != null) null else tr(R.string.export_failed)
                 )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: OutOfMemoryError) {
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_processing_failed_memory))
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.export_failed))
+            } finally {
+                compositeBmp?.let { if (!it.isRecycled) it.recycle() }
             }
+        }
+    }
 
-            val exportUri = repository.exportToGallery(
-                compositeBmp,
-                proj.name.replace(" ", "_"),
-                isPng,
-                quality
-            )
+    fun consumeExportResult() {
+        _uiState.value = _uiState.value.copy(exportSuccessUri = null)
+    }
 
+    /** Renames the open project (persisted by autosave) or a closed one (manifest-only rewrite). */
+    fun renameProject(projectId: String, newName: String) {
+        val name = newName.trim().take(80)
+        if (name.isEmpty()) return
+        val current = _uiState.value.currentProject
+        if (current != null && current.id == projectId) {
+            current.name = name
+            commitProjectMutation(statusMessage = tr(R.string.status_project_renamed))
+            return
+        }
+        viewModelScope.launch {
+            val ok = repository.renameProject(projectId, name)
             _uiState.value = _uiState.value.copy(
-                isProcessing = false,
-                exportSuccessUri = exportUri,
-                statusMessage = if (exportUri != null) tr(R.string.export_success) else tr(R.string.export_failed)
+                statusMessage = if (ok) tr(R.string.status_project_renamed) else tr(R.string.status_save_failed_storage)
             )
+            loadProjects()
         }
     }
 

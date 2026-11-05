@@ -223,10 +223,10 @@
     <string name="canvas_width">Width</string>
 
     <!-- Autosave & Unsaved Dialog -->
-    <string name="unsaved_title">Unsaved Changes</string>
-    <string name="unsaved_desc">You have unsaved changes in your project. Would you like to save before exiting?</string>
-    <string name="unsaved_save_exit">Save &amp; Exit</string>
-    <string name="unsaved_discard">Discard Changes</string>
+    <string name="unsaved_title">Couldn’t save changes</string>
+    <string name="unsaved_desc">Your latest changes couldn’t be saved (storage may be full). Try again, or leave without them?</string>
+    <string name="unsaved_save_exit">Try again</string>
+    <string name="unsaved_discard">Leave without saving</string>
     <string name="restore_session_title">Unsaved Session Recovered</string>
     <string name="restore_session_desc">You have an unsaved project session from your previous visit.</string>
     <string name="restore_session_btn">Restore Session</string>
@@ -413,6 +413,40 @@
     <string name="status_layer_mask_added">Layer mask added</string>
     <string name="status_layer_mask_inverted">Layer mask inverted</string>
     <string name="status_layer_mask_applied">Layer mask applied</string>
+    <string name="select_move_selection">Move</string>
+    <string name="select_move_hint">Drag to move the selection outline. The image itself does not move.</string>
+    <string name="select_shape_hint">Drag to draw. Afterwards drag a corner to resize or the inside to move it.</string>
+    <string name="select_shape_from_center">From centre</string>
+    <string name="select_shape_square">Square</string>
+    <string name="select_shape_circle">Circle</string>
+    <string name="select_polygon_hint">Tap to add points, drag a point to adjust it, double-tap or tap the first point to close.</string>
+    <string name="select_wand_drag_hint">Tap to select. Press and drag sideways to change the tolerance live.</string>
+    <string name="select_quick_mask_view">Quick mask</string>
+    <string name="select_hold_subtract">Hold to subtract from the selection</string>
+    <string name="status_wand_no_layer">There is no image layer under that point.</string>
+    <string name="status_subject_selected_basic">Subject selected (basic mode: AI segmentation is not available on this device yet)</string>
+    <string name="refine_preview">Refined selection preview</string>
+    <string name="refine_view_overlay">Overlay</string>
+    <string name="refine_view_black">On black</string>
+    <string name="refine_view_white">On white</string>
+    <string name="refine_view_mask">Mask</string>
+    <string name="refine_decontaminate_amount">Halo removal amount</string>
+    <string name="canvas_error_numeric">Please enter valid numeric dimensions.</string>
+    <string name="canvas_error_min">Minimum canvas dimension is %1$d px.</string>
+    <string name="canvas_error_max">Maximum canvas dimension is %1$d px.</string>
+    <string name="canvas_error_megapixels">Canvas exceeds the %1$d MP limit (%2$d × %3$d = %4$s MP).</string>
+    <string name="polygon_points_count">%1$d pts</string>
+    <string name="curves_point_in_out">In: %1$d  |  Out: %2$d</string>
+    <string name="refine_global_adjustments">Global adjustments</string>
+    <string name="cd_mask_linked">Mask linked to layer</string>
+    <string name="status_effect_failed">Couldn’t apply the effect</string>
+    <string name="action_rename">Rename</string>
+    <string name="rename_project_title">Rename project</string>
+    <string name="status_project_renamed">Project renamed</string>
+    <string name="status_exporting">Exporting image…</string>
+    <string name="status_project_open_failed">This project couldn’t be opened. It may have been deleted or damaged.</string>
+    <string name="status_layer_mask_apply_failed">Couldn’t apply the layer mask</string>
+    <string name="status_processing_failed_memory">Not enough memory for this operation. Try a smaller image.</string>
     <string name="status_layer_mask_deleted">Layer mask removed</string>
 
     <!-- Filter Intensity -->
@@ -504,7 +538,8 @@
     <string name="replace_tolerance">Fuzziness / Tolerance</string>
     <string name="replace_target_color">Replacement Color</string>
     <string name="replace_enabled">Active Replacement</string>
-    <string name="status_selection_active_scoped">Selection Active • Scoped to selection</string>
+    <string name="status_selection_adjust_whole_layer">Selection active • Adjustments apply to the whole layer. To limit them, add an adjustment layer and give it a mask from the selection.</string>
+    <string name="status_selection_filters_scope">Selection active • Pro effects apply inside the selection; filter presets apply to the whole layer.</string>
 
     <!-- Before & After Comparison -->
     <string name="compare_title">Before &amp; After</string>

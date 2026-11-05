@@ -62,6 +62,20 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.nativeCanvas
+import kotlinx.coroutines.coroutineScope
+import androidx.compose.animation.core.animate
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -112,6 +126,25 @@ import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.min
 import kotlin.math.sqrt
+
+/**
+ * Rectangle spanned by [a] (anchor) and [b] (finger) in document space. [fromCenter] treats [a]
+ * as the centre; [square] constrains to a square / circle.
+ */
+private fun constrainedShapeRect(a: PointF, b: PointF, fromCenter: Boolean, square: Boolean): RectF {
+    var dx = b.x - a.x
+    var dy = b.y - a.y
+    if (square) {
+        val m = maxOf(kotlin.math.abs(dx), kotlin.math.abs(dy))
+        dx = if (dx < 0) -m else m
+        dy = if (dy < 0) -m else m
+    }
+    return if (fromCenter) {
+        RectF(a.x - kotlin.math.abs(dx), a.y - kotlin.math.abs(dy), a.x + kotlin.math.abs(dx), a.y + kotlin.math.abs(dy))
+    } else {
+        RectF(minOf(a.x, a.x + dx), minOf(a.y, a.y + dy), maxOf(a.x, a.x + dx), maxOf(a.y, a.y + dy))
+    }
+}
 
 private enum class TransformHandle {
     NONE,
@@ -172,10 +205,74 @@ fun CanvasView(
     splitComparePosition: Float = 0.5f,
     onSplitComparePositionChange: ((Float) -> Unit)? = null,
     onToggleSplitCompare: (() -> Unit)? = null,
-    showMaskRubyOverlay: Boolean = false
+    showMaskRubyOverlay: Boolean = false,
+    maskBrushSizeDp: Float = 24f,
+    /** Live brush strokes (selection brush, quick selection, mask painting). Null = apply on finger up. */
+    onStrokeSegment: ((List<PointF>, Float, com.example.ui.viewmodel.StrokePhase) -> Unit)? = null,
+    selectionRevision: Long = 0L,
+    isMagneticSnap: Boolean = false,
+    magicWandTolerance: Int = 30,
+    onMagicWandDrag: ((Int, Int, Int, com.example.ui.viewmodel.StrokePhase) -> Unit)? = null,
+    editableShape: com.example.ui.viewmodel.EditableShape? = null,
+    shapeFromCenter: Boolean = false,
+    shapeLockSquare: Boolean = false,
+    onShapeCreated: ((RectF, Boolean) -> Unit)? = null,
+    onShapeEdited: ((RectF) -> Unit)? = null,
+    onMoveSelection: ((Float, Float) -> Unit)? = null,
+    isQuickMaskView: Boolean = false,
+    onTemporarySubtract: ((Boolean) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val canvasAccessibilityDescription = stringResource(R.string.cd_editor_canvas)
+
+    // Painting a layer mask uses its own brush size; every other brush tool uses the selection brush.
+    val isEditingSelectedMask = activeTool == ActiveTool.LAYERS &&
+        project.layers.getOrNull(selectedLayerIndex)?.isEditingMask == true
+    val effectiveBrushSizeDp = if (isEditingSelectedMask) maskBrushSizeDp else brushSizeDp
+    val selectedLayerType = project.layers.getOrNull(selectedLayerIndex)?.type
+
+    // Gesture handlers must not be restarted while a drag is in progress (that cancels the drag),
+    // so they read frequently-changing values through these always-current references instead
+    // of capturing them as pointerInput keys.
+    val latestProject by rememberUpdatedState(project)
+    val latestSelectedLayerIndex by rememberUpdatedState(selectedLayerIndex)
+    val latestPerspectiveCorners by rememberUpdatedState(perspectiveCorners)
+    val latestSplitComparePosition by rememberUpdatedState(splitComparePosition)
+    val latestBrushSizeDp by rememberUpdatedState(effectiveBrushSizeDp)
+    val latestOnBrushStrokeComplete by rememberUpdatedState(onBrushStrokeComplete)
+    val latestOnLassoComplete by rememberUpdatedState(onLassoComplete)
+    val latestOnRectangleSelection by rememberUpdatedState(onRectangleSelection)
+    val latestOnEllipseSelection by rememberUpdatedState(onEllipseSelection)
+    val latestOnPolygonComplete by rememberUpdatedState(onPolygonComplete)
+    val latestOnMagicWandTap by rememberUpdatedState(onMagicWandTap)
+    val latestOnUpdatePerspectiveCorner by rememberUpdatedState(onUpdatePerspectiveCorner)
+    val latestOnUpdatePerspectiveCorners by rememberUpdatedState(onUpdatePerspectiveCorners)
+    val latestOnUpdateLayerTransient by rememberUpdatedState(onUpdateLayerTransient)
+    val latestOnCommitHistoryState by rememberUpdatedState(onCommitHistoryState)
+    val latestOnApplyCropRect by rememberUpdatedState(onApplyCropRect)
+    val latestOnSplitComparePositionChange by rememberUpdatedState(onSplitComparePositionChange)
+    val latestOnStrokeSegment by rememberUpdatedState(onStrokeSegment)
+    val latestMagneticSnap by rememberUpdatedState(isMagneticSnap)
+    val latestMagicWandTolerance by rememberUpdatedState(magicWandTolerance)
+    val latestOnMagicWandDrag by rememberUpdatedState(onMagicWandDrag)
+    val latestEditableShape by rememberUpdatedState(editableShape)
+    val latestShapeFromCenter by rememberUpdatedState(shapeFromCenter)
+    val latestShapeLockSquare by rememberUpdatedState(shapeLockSquare)
+    val latestOnShapeCreated by rememberUpdatedState(onShapeCreated)
+    val latestOnShapeEdited by rememberUpdatedState(onShapeEdited)
+    val latestOnMoveSelection by rememberUpdatedState(onMoveSelection)
+    val haptic = LocalHapticFeedback.current
+
+    // Transient gesture visuals.
+    var wandBubble by remember { mutableStateOf<Pair<Offset, Int>?>(null) }
+    var moveDragStart by remember { mutableStateOf<PointF?>(null) }
+    var moveDelta by remember { mutableStateOf(Offset.Zero) }
+    var editingShapeRect by remember { mutableStateOf<RectF?>(null) }
+    // A finished move / shape edit is shown until the new mask arrives.
+    LaunchedEffect(selectionMask) {
+        moveDelta = Offset.Zero
+        editingShapeRect = null
+    }
 
     // Viewport size measurement for dynamic scale calculation
     var viewportWidth by remember { mutableFloatStateOf(0f) }
@@ -211,6 +308,49 @@ fun CanvasView(
     var offsetX by remember { mutableFloatStateOf(0f) }
     var offsetY by remember { mutableFloatStateOf(0f) }
 
+    // Viewport math. The document centre is drawn at viewportCentre + offset, scaled by `scale`.
+    val viewportScope = rememberCoroutineScope()
+    var focusAnimationJob by remember { mutableStateOf<Job?>(null) }
+    val viewportEdgeMarginPx = remember(density) { with(density) { 48.dp.toPx() } }
+
+    fun screenToDoc(screen: Offset, viewportCenter: Offset): Offset {
+        val p = latestProject
+        val s = scale.coerceAtLeast(0.0001f)
+        return Offset(
+            (screen.x - viewportCenter.x - offsetX) / s + p.width / 2f,
+            (screen.y - viewportCenter.y - offsetY) / s + p.height / 2f
+        )
+    }
+
+    /** Offset that puts document point [doc] exactly in the middle of the viewport at [atScale]. */
+    fun docToCenteredOffset(doc: Offset, atScale: Float): Offset {
+        val p = latestProject
+        return Offset(-(doc.x - p.width / 2f) * atScale, -(doc.y - p.height / 2f) * atScale)
+    }
+
+    /** Keeps at least a margin of the image on screen so a pinch can never throw it out of view. */
+    fun clampViewportOffset(o: Offset, atScale: Float): Offset {
+        val p = latestProject
+        val limitX = ((p.width * atScale) / 2f + viewportWidth / 2f - viewportEdgeMarginPx).coerceAtLeast(0f)
+        val limitY = ((p.height * atScale) / 2f + viewportHeight / 2f - viewportEdgeMarginPx).coerceAtLeast(0f)
+        return Offset(o.x.coerceIn(-limitX, limitX), o.y.coerceIn(-limitY, limitY))
+    }
+
+    /**
+     * Zoom buttons: keep whatever is in the middle of the screen in the middle. The offset is a
+     * screen-space distance, so it must scale with the zoom factor or the view drifts.
+     */
+    fun zoomAroundViewportCenter(factor: Float) {
+        focusAnimationJob?.cancel()
+        val oldScale = scale
+        val newScale = (oldScale * factor).coerceIn(minScale, maxScale)
+        val applied = if (oldScale > 0f) newScale / oldScale else 1f
+        scale = newScale
+        val clamped = clampViewportOffset(Offset(offsetX * applied, offsetY * applied), newScale)
+        offsetX = clamped.x
+        offsetY = clamped.y
+    }
+
     // While the user remains in Fit mode, keep the whole document visible when
     // contextual panels open/close or the window size changes.
     LaunchedEffect(fitScale, project.id, autoFit) {
@@ -234,9 +374,13 @@ fun CanvasView(
     )
 
     // Vector Contour boundary of the active selection mask for fast rendering
-    val selectionContourPath = remember(selectionMask, renderRevision) {
-        if (selectionMask != null && !selectionMask.isRecycled) {
-            SelectionPathTracer.traceSelectionContour(selectionMask)
+    // Every selection edit publishes a NEW mask bitmap (copy-on-write), so the mask reference alone
+    // keys the contour. Tracing runs off the main thread so slider drags never wait for it.
+    // selectionRevision also changes while a live stroke paints into the same mask object.
+    val selectionContourPath by produceState<android.graphics.Path?>(initialValue = null, selectionMask, selectionRevision) {
+        val mask = selectionMask
+        value = if (mask != null && !mask.isRecycled) {
+            withContext(Dispatchers.Default) { SelectionPathTracer.traceSelectionContour(mask) }
         } else {
             null
         }
@@ -244,6 +388,15 @@ fun CanvasView(
 
     // Touch points for selection gestures
     val currentPoints = remember { mutableStateListOf<PointF>() }
+    var isStrokeActive by remember { mutableStateOf(false) }
+    var previewClearJob by remember { mutableStateOf<Job?>(null) }
+
+    // Remove the live stroke preview as soon as the finished step is reflected on the canvas
+    // (a new selection mask, or a re-render after painting a layer mask) instead of leaving it
+    // on screen until the next stroke starts.
+    LaunchedEffect(selectionMask, renderRevision) {
+        if (!isStrokeActive && currentPoints.isNotEmpty()) currentPoints.clear()
+    }
     var shapeStart by remember { mutableStateOf<PointF?>(null) }
     var shapeEnd by remember { mutableStateOf<PointF?>(null) }
     val polygonPoints = remember { mutableStateListOf<PointF>() }
@@ -342,7 +495,7 @@ fun CanvasView(
         if (gen != renderGeneration.get()) return@LaunchedEffect
 
         val layersSnapshot = project.layers.mapIndexed { index, layer ->
-            layer.snapshotLayer().also { snapshot ->
+            layer.previewSnapshot().also { snapshot ->
                 if (showGeneralOriginal) {
                     snapshot.filter = com.example.data.model.FilterType.NONE
                     snapshot.adjustments = com.example.data.model.ColorAdjustments()
@@ -381,8 +534,10 @@ fun CanvasView(
                     maxPreviewDimension = previewMaxDimension,
                     targetBitmap = backBuffer,
                     generationId = gen,
-                    activeSelectionMask = selectionMask,
-                    selectedLayerId = project.layers.getOrNull(selectedLayerIndex)?.id
+                    // Non-destructive adjustments/filters are stored per layer and always apply to the
+                    // whole layer on save/export, so the preview must not scope them to the selection.
+                    activeSelectionMask = null,
+                    selectedLayerId = null
                 )
             }
 
@@ -395,7 +550,7 @@ fun CanvasView(
             // If split comparison is active, also render the unadjusted original image
             if (isSplitCompareActive) {
                 val originalLayersSnapshot = project.layers.map { layer ->
-                    layer.snapshotLayer().also { snapshot ->
+                    layer.previewSnapshot().also { snapshot ->
                         snapshot.filter = com.example.data.model.FilterType.NONE
                         snapshot.adjustments = com.example.data.model.ColorAdjustments()
                     }
@@ -421,15 +576,39 @@ fun CanvasView(
         }
     }
 
-    fun getLayerBounds(layer: Layer): Pair<Float, Float> {
+    /**
+     * Document-space corners (TL, TR, BR, BL as x,y pairs) of the box the renderer actually draws
+     * for [layer]. Text layers are measured with the same StaticLayout the renderer uses and are
+     * centred on their position; bitmap layers use the layer matrix.
+     */
+    fun layerCornersDoc(layer: Layer): FloatArray {
+        val p = latestProject
         val bmp = layer.bitmap
-        return if (bmp != null) {
-            Pair(bmp.width.toFloat(), bmp.height.toFloat())
+        val w: Float
+        val h: Float
+        val matrix: android.graphics.Matrix
+        if (bmp != null) {
+            w = bmp.width.toFloat()
+            h = bmp.height.toFloat()
+            matrix = SelectionEngine.getLayerMatrix(layer, p.width, p.height)
         } else {
-            val textLen = layer.textConfig.text.length.coerceAtLeast(1)
-            val fontSize = layer.textConfig.fontSizeSp
-            Pair((textLen * fontSize * 0.65f).coerceAtLeast(120f), (fontSize * 1.5f).coerceAtLeast(60f))
+            val size = if (layer.type == com.example.data.model.LayerType.TEXT) {
+                LayerRenderer.measureTextLayer(context, layer, p.width.toFloat())
+            } else {
+                p.width.toFloat() to p.height.toFloat()
+            }
+            w = size.first
+            h = size.second
+            matrix = android.graphics.Matrix().apply {
+                postTranslate(-w / 2f, -h / 2f)
+                postScale(layer.scaleX, layer.scaleY)
+                postRotate(layer.rotation)
+                postTranslate(p.width / 2f + layer.positionX, p.height / 2f + layer.positionY)
+            }
         }
+        val pts = floatArrayOf(0f, 0f, w, 0f, w, h, 0f, h)
+        matrix.mapPoints(pts)
+        return pts
     }
 
     Box(
@@ -444,34 +623,87 @@ fun CanvasView(
             .semantics { contentDescription = canvasAccessibilityDescription }
             .pointerInput(activeTool, minScale, maxScale, isSplitCompareActive) {
                 awaitEachGesture {
+                    // A new touch always wins over a running "centre the zoomed area" animation.
+                    focusAnimationJob?.cancel()
+                    var pinchFocusDoc: Offset? = null   // document point the user started pinching on
+                    var pinchStartScale = scale
                     do {
                         val event = awaitPointerEvent()
                         val pressed = event.changes.count { it.pressed }
-                        val oneFingerViewportPan = !isSplitCompareActive && (activeTool == ActiveTool.NONE ||
+                        // One finger pans the viewport only when the active tool has no one-finger
+                        // gesture of its own: painting a layer mask (Layers) and dragging a text
+                        // layer (Text) must receive the drag instead.
+                        val liveLayer = latestProject.layers.getOrNull(latestSelectedLayerIndex)
+                        val toolOwnsOneFinger = (activeTool == ActiveTool.LAYERS && liveLayer?.isEditingMask == true) ||
+                            (activeTool == ActiveTool.TEXT && liveLayer?.type == com.example.data.model.LayerType.TEXT)
+                        val oneFingerViewportPan = !isSplitCompareActive && !toolOwnsOneFinger && (activeTool == ActiveTool.NONE ||
                             activeTool == ActiveTool.ADJUST || activeTool == ActiveTool.FILTERS ||
                             activeTool == ActiveTool.LAYERS || activeTool == ActiveTool.TEXT)
                         if (pressed >= 2) multiTouchActive = true
                         val shouldTransformViewport = pressed >= 2 || (pressed == 1 && oneFingerViewportPan)
                         if (shouldTransformViewport) {
-                            val centroid = event.calculateCentroid()
-                            val pan = event.calculatePan()
-                            val zoom = if (pressed >= 2) event.calculateZoom() else 1f
-                            val oldScale = scale
-                            val newScale = (oldScale * zoom).coerceIn(minScale, maxScale)
-                            val appliedZoom = if (oldScale > 0f) newScale / oldScale else 1f
-                            val center = Offset(size.width / 2f, size.height / 2f)
-                            val oldOffset = Offset(offsetX, offsetY)
-                            val relativeToCenter = centroid - center - oldOffset
-                            val newOffset = oldOffset + pan + relativeToCenter * (1f - appliedZoom)
-                            scale = newScale
-                            offsetX = newOffset.x
-                            offsetY = newOffset.y
-                            autoFit = false
+                            // Only pointers that were down in BOTH the previous and the current event
+                            // are used. Compose's calculatePan/Zoom mix a finger that just landed or
+                            // lifted into one side of the comparison, which made the view jump.
+                            val stable = event.changes.filter { it.pressed && it.previousPressed }
+                            if (stable.isNotEmpty()) {
+                                var curX = 0f; var curY = 0f; var prevX = 0f; var prevY = 0f
+                                for (c in stable) {
+                                    curX += c.position.x; curY += c.position.y
+                                    prevX += c.previousPosition.x; prevY += c.previousPosition.y
+                                }
+                                val cnt = stable.size.toFloat()
+                                val curCentroid = Offset(curX / cnt, curY / cnt)
+                                val prevCentroid = Offset(prevX / cnt, prevY / cnt)
+
+                                var zoom = 1f
+                                if (stable.size >= 2) {
+                                    var curSpread = 0f; var prevSpread = 0f
+                                    for (c in stable) {
+                                        curSpread += (c.position - curCentroid).getDistance()
+                                        prevSpread += (c.previousPosition - prevCentroid).getDistance()
+                                    }
+                                    if (prevSpread > 1f && curSpread > 1f) zoom = curSpread / prevSpread
+                                }
+
+                                val center = Offset(size.width / 2f, size.height / 2f)
+                                if (stable.size >= 2 && pinchFocusDoc == null) {
+                                    pinchFocusDoc = screenToDoc(prevCentroid, center)
+                                    pinchStartScale = scale
+                                }
+
+                                val oldScale = scale
+                                val newScale = (oldScale * zoom).coerceIn(minScale, maxScale)
+                                val appliedZoom = if (oldScale > 0f) newScale / oldScale else 1f
+                                // Exact anchoring: the document point that was under the fingers stays
+                                // under the fingers (and follows them when they move).
+                                val oldOffset = Offset(offsetX, offsetY)
+                                val newOffset = curCentroid - center - (prevCentroid - center - oldOffset) * appliedZoom
+                                scale = newScale
+                                val clamped = clampViewportOffset(newOffset, newScale)
+                                offsetX = clamped.x
+                                offsetY = clamped.y
+                                autoFit = false
+                            }
                             activeTransformHandle = TransformHandle.NONE
                             event.changes.forEach { change -> if (change.pressed) change.consume() }
                         }
                     } while (event.changes.any { it.pressed })
                     multiTouchActive = false
+
+                    // After a zoom-in pinch, bring the area the user pinched on to the centre of the view.
+                    val focus = pinchFocusDoc
+                    if (focus != null && scale > pinchStartScale * 1.05f) {
+                        val target = clampViewportOffset(docToCenteredOffset(focus, scale), scale)
+                        val startX = offsetX
+                        val startY = offsetY
+                        focusAnimationJob = viewportScope.launch {
+                            animate(0f, 1f, animationSpec = tween(durationMillis = 260)) { t, _ ->
+                                offsetX = startX + (target.x - startX) * t
+                                offsetY = startY + (target.y - startY) * t
+                            }
+                        }
+                    }
                 }
             },
         contentAlignment = Alignment.Center
@@ -480,51 +712,76 @@ fun CanvasView(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(
+                    // Only values that select WHICH gesture detector runs are keys. Values that change
+                    // during a drag (zoom/pan, layer transform, perspective corners, render revision)
+                    // are read live; keying on them restarted the detector and cancelled the drag.
                     activeTool,
                     activeSelectionTool,
+                    inpaintSelectionMode,
                     isPerspectiveActive,
-                    perspectiveCorners,
-                    scale,
-                    offsetX,
-                    offsetY,
                     selectedLayerIndex,
-                    renderRevision,
+                    selectedLayerType,
+                    isEditingSelectedMask,
                     selectedAspectRatio,
                     multiTouchActive,
-                    isSplitCompareActive
+                    isSplitCompareActive,
+                    project.id
                 ) {
                     if (multiTouchActive) return@pointerInput
-                    val pW = project.width.toFloat().coerceAtLeast(1f)
-                    val pH = project.height.toFloat().coerceAtLeast(1f)
-                    val targetDrawW = (pW * scale).coerceAtLeast(1f)
-                    val targetDrawH = (pH * scale).coerceAtLeast(1f)
-                    val startX = (size.width - targetDrawW) / 2f + offsetX
-                    val startY = (size.height - targetDrawH) / 2f + offsetY
+                    // Viewport geometry is evaluated on every event so zoom/pan changes apply immediately.
+                    fun curDrawW() = (latestProject.width.toFloat().coerceAtLeast(1f) * scale).coerceAtLeast(1f)
+                    fun curDrawH() = (latestProject.height.toFloat().coerceAtLeast(1f) * scale).coerceAtLeast(1f)
+                    fun curStartX() = (size.width - curDrawW()) / 2f + offsetX
+                    fun curStartY() = (size.height - curDrawH()) / 2f + offsetY
+                    fun toDoc(o: Offset): PointF = PointF(
+                        ((o.x - (size.width / 2f) - offsetX) / scale) + (latestProject.width / 2f),
+                        ((o.y - (size.height / 2f) - offsetY) / scale) + (latestProject.height / 2f)
+                    )
+                    fun toScreen(p: PointF): Offset = Offset(
+                        curStartX() + (p.x / latestProject.width) * curDrawW(),
+                        curStartY() + (p.y / latestProject.height) * curDrawH()
+                    )
+                    fun clampDoc(p: PointF): PointF = PointF(
+                        p.x.coerceIn(0f, latestProject.width.toFloat()),
+                        p.y.coerceIn(0f, latestProject.height.toFloat())
+                    )
+                    /** Live magnetic snapping against the on-screen preview image (document proportional). */
+                    fun snapIfMagnetic(p: PointF): PointF {
+                        if (!latestMagneticSnap) return p
+                        val bmp = compositeBitmap ?: return p
+                        if (bmp.isRecycled) return p
+                        val rx = bmp.width / latestProject.width.toFloat()
+                        val ry = bmp.height / latestProject.height.toFloat()
+                        val radius = (with(density) { 14.dp.toPx() } / (scale * latestProject.width / bmp.width.toFloat()).coerceAtLeast(0.01f))
+                            .toInt().coerceIn(3, 24)
+                        val s = SelectionEngine.snapPointToEdge(PointF(p.x * rx, p.y * ry), bmp, searchRadius = radius)
+                        return PointF(s.x / rx, s.y / ry)
+                    }
 
                     if (isSplitCompareActive) {
                         detectDragGestures(
                             onDrag = { change, dragAmount ->
                                 change.consume()
-                                val dxFraction = dragAmount.x / targetDrawW
-                                val newRatio = (splitComparePosition + dxFraction).coerceIn(0.05f, 0.95f)
-                                onSplitComparePositionChange?.invoke(newRatio)
+                                val dxFraction = dragAmount.x / curDrawW()
+                                val newRatio = (latestSplitComparePosition + dxFraction).coerceIn(0.05f, 0.95f)
+                                latestOnSplitComparePositionChange?.invoke(newRatio)
                             }
                         )
-                    } else if (isPerspectiveActive && perspectiveCorners.size >= 4) {
+                    } else if (isPerspectiveActive && latestPerspectiveCorners.size >= 4) {
                         detectDragGestures(
                             onDragStart = { startOffset ->
                                 perspectiveDragStartTouch = startOffset
-                                perspectiveDragStartCorners = perspectiveCorners.map { PointF(it.x, it.y) }
+                                perspectiveDragStartCorners = latestPerspectiveCorners.map { PointF(it.x, it.y) }
 
-                                val c0 = perspectiveCorners[0]
-                                val c1 = perspectiveCorners[1]
-                                val c2 = perspectiveCorners[2]
-                                val c3 = perspectiveCorners[3]
+                                val c0 = latestPerspectiveCorners[0]
+                                val c1 = latestPerspectiveCorners[1]
+                                val c2 = latestPerspectiveCorners[2]
+                                val c3 = latestPerspectiveCorners[3]
 
-                                val sc0 = Offset(startX + ((c0.x / project.width) * targetDrawW), startY + ((c0.y / project.height) * targetDrawH))
-                                val sc1 = Offset(startX + ((c1.x / project.width) * targetDrawW), startY + ((c1.y / project.height) * targetDrawH))
-                                val sc2 = Offset(startX + ((c2.x / project.width) * targetDrawW), startY + ((c2.y / project.height) * targetDrawH))
-                                val sc3 = Offset(startX + ((c3.x / project.width) * targetDrawW), startY + ((c3.y / project.height) * targetDrawH))
+                                val sc0 = Offset(curStartX() + ((c0.x / latestProject.width) * curDrawW()), curStartY() + ((c0.y / latestProject.height) * curDrawH()))
+                                val sc1 = Offset(curStartX() + ((c1.x / latestProject.width) * curDrawW()), curStartY() + ((c1.y / latestProject.height) * curDrawH()))
+                                val sc2 = Offset(curStartX() + ((c2.x / latestProject.width) * curDrawW()), curStartY() + ((c2.y / latestProject.height) * curDrawH()))
+                                val sc3 = Offset(curStartX() + ((c3.x / latestProject.width) * curDrawW()), curStartY() + ((c3.y / latestProject.height) * curDrawH()))
 
                                 val cornerThreshold = 44.dp.toPx()
                                 val edgeThreshold = 36.dp.toPx()
@@ -571,11 +828,11 @@ fun CanvasView(
                             onDrag = { change, _ ->
                                 if (activePerspectiveHandle != -1 && perspectiveDragStartCorners.size >= 4) {
                                     change.consume()
-                                    val dxDoc = ((change.position.x - perspectiveDragStartTouch.x) / targetDrawW) * project.width
-                                    val dyDoc = ((change.position.y - perspectiveDragStartTouch.y) / targetDrawH) * project.height
+                                    val dxDoc = ((change.position.x - perspectiveDragStartTouch.x) / curDrawW()) * latestProject.width
+                                    val dyDoc = ((change.position.y - perspectiveDragStartTouch.y) / curDrawH()) * latestProject.height
 
-                                    val pw = project.width.toFloat()
-                                    val ph = project.height.toFloat()
+                                    val pw = latestProject.width.toFloat()
+                                    val ph = latestProject.height.toFloat()
                                     val newCorners = perspectiveDragStartCorners.map { PointF(it.x, it.y) }.toMutableList()
 
                                     when (activePerspectiveHandle) {
@@ -606,11 +863,12 @@ fun CanvasView(
                                         }
                                     }
 
-                                    if (onUpdatePerspectiveCorners != null) {
-                                        onUpdatePerspectiveCorners(newCorners)
+                                    val updateAll = latestOnUpdatePerspectiveCorners
+                                    if (updateAll != null) {
+                                        updateAll(newCorners)
                                     } else {
                                         for (i in newCorners.indices) {
-                                            onUpdatePerspectiveCorner(i, newCorners[i].x, newCorners[i].y)
+                                            latestOnUpdatePerspectiveCorner(i, newCorners[i].x, newCorners[i].y)
                                         }
                                     }
                                 }
@@ -627,12 +885,12 @@ fun CanvasView(
                                 cropDragStartTouch = startOffset
                                 cropDragStartRect = RectF(cropRectState)
 
-                                val pW = project.width.toFloat().coerceAtLeast(1f)
-                                val pH = project.height.toFloat().coerceAtLeast(1f)
-                                val scL = startX + (cropRectState.left / pW) * targetDrawW
-                                val scT = startY + (cropRectState.top / pH) * targetDrawH
-                                val scR = startX + (cropRectState.right / pW) * targetDrawW
-                                val scB = startY + (cropRectState.bottom / pH) * targetDrawH
+                                val pW = latestProject.width.toFloat().coerceAtLeast(1f)
+                                val pH = latestProject.height.toFloat().coerceAtLeast(1f)
+                                val scL = curStartX() + (cropRectState.left / pW) * curDrawW()
+                                val scT = curStartY() + (cropRectState.top / pH) * curDrawH()
+                                val scR = curStartX() + (cropRectState.right / pW) * curDrawW()
+                                val scB = curStartY() + (cropRectState.bottom / pH) * curDrawH()
 
                                 val hitThreshold = 36.dp.toPx()
 
@@ -652,10 +910,10 @@ fun CanvasView(
                             onDrag = { change, dragAmount ->
                                 if (activeCropHandle != CropHandle.NONE) {
                                     change.consume()
-                                    val pWidth = project.width.toFloat().coerceAtLeast(1f)
-                                    val pHeight = project.height.toFloat().coerceAtLeast(1f)
-                                    val dxDoc = (dragAmount.x / targetDrawW) * pWidth
-                                    val dyDoc = (dragAmount.y / targetDrawH) * pHeight
+                                    val pWidth = latestProject.width.toFloat().coerceAtLeast(1f)
+                                    val pHeight = latestProject.height.toFloat().coerceAtLeast(1f)
+                                    val dxDoc = (dragAmount.x / curDrawW()) * pWidth
+                                    val dyDoc = (dragAmount.y / curDrawH()) * pHeight
 
                                     if (dxDoc.isNaN() || dyDoc.isNaN() || dxDoc.isInfinite() || dyDoc.isInfinite()) {
                                         return@detectDragGestures
@@ -760,132 +1018,301 @@ fun CanvasView(
                             },
                             onDragEnd = {
                                 activeCropHandle = CropHandle.NONE
-                                onApplyCropRect?.invoke(cropRectState)
+                                latestOnApplyCropRect?.invoke(cropRectState)
                             }
                         )
-                    } else if (activeTool == ActiveTool.SELECTION || activeTool == ActiveTool.OBJECT_REMOVAL || (activeTool == ActiveTool.LAYERS && selectedLayerIndex in project.layers.indices && project.layers[selectedLayerIndex].isEditingMask)) {
+                    } else if (activeTool == ActiveTool.SELECTION || activeTool == ActiveTool.OBJECT_REMOVAL || (activeTool == ActiveTool.LAYERS && selectedLayerIndex in latestProject.layers.indices && latestProject.layers[selectedLayerIndex].isEditingMask)) {
                         if (activeSelectionTool == SelectionToolType.MAGIC_WAND && activeTool == ActiveTool.SELECTION) {
-                            detectTapGestures(
-                                onTap = { offset ->
-                                    val canvasX = ((offset.x - (size.width / 2f) - offsetX) / scale) + (project.width / 2f)
-                                    val canvasY = ((offset.y - (size.height / 2f) - offsetY) / scale) + (project.height / 2f)
-                                    if (canvasX in 0f..project.width.toFloat() && canvasY in 0f..project.height.toFloat()) {
-                                        onMagicWandTap(canvasX.toInt(), canvasY.toInt())
+                            // Tap = select at the current tolerance. Press and drag sideways = change the
+                            // tolerance live (right = more, left = less), like Procreate's selection tools.
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                val downDoc = toDoc(down.position)
+                                val insideDoc = downDoc.x in 0f..latestProject.width.toFloat() && downDoc.y in 0f..latestProject.height.toFloat()
+                                val startTolerance = latestMagicWandTolerance
+                                val slop = viewConfiguration.touchSlop
+                                val pxPerStep = with(density) { 3.dp.toPx() }
+                                var dragging = false
+                                var lastTolerance = startTolerance
+                                var released = false
+                                while (!released) {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                    if (event.changes.count { it.pressed } > 1) { wandBubble = null; return@awaitEachGesture }
+                                    if (!change.pressed) { released = true; break }
+                                    val dx = change.position.x - down.position.x
+                                    if (!dragging && abs(dx) > slop && insideDoc) {
+                                        dragging = true
+                                        latestOnMagicWandDrag?.invoke(downDoc.x.toInt(), downDoc.y.toInt(), startTolerance, com.example.ui.viewmodel.StrokePhase.START)
+                                    }
+                                    if (dragging) {
+                                        change.consume()
+                                        val tol = (startTolerance + (dx / pxPerStep).toInt()).coerceIn(0, 100)
+                                        wandBubble = change.position to tol
+                                        if (tol != lastTolerance) {
+                                            lastTolerance = tol
+                                            latestOnMagicWandDrag?.invoke(downDoc.x.toInt(), downDoc.y.toInt(), tol, com.example.ui.viewmodel.StrokePhase.MOVE)
+                                        }
                                     }
                                 }
-                            )
+                                wandBubble = null
+                                if (dragging) {
+                                    latestOnMagicWandDrag?.invoke(downDoc.x.toInt(), downDoc.y.toInt(), lastTolerance, com.example.ui.viewmodel.StrokePhase.END)
+                                } else if (released && insideDoc) {
+                                    latestOnMagicWandTap(downDoc.x.toInt(), downDoc.y.toInt())
+                                }
+                            }
                         } else if (activeSelectionTool == SelectionToolType.POLYGON && activeTool == ActiveTool.SELECTION) {
-                            detectTapGestures(
-                                onTap = { offset ->
-                                    val canvasX = ((offset.x - (size.width / 2f) - offsetX) / scale) + (project.width / 2f)
-                                    val canvasY = ((offset.y - (size.height / 2f) - offsetY) / scale) + (project.height / 2f)
-                                    if (canvasX in 0f..project.width.toFloat() && canvasY in 0f..project.height.toFloat()) {
-                                        if (polygonPoints.isNotEmpty()) {
-                                            val firstP = polygonPoints.first()
-                                            val firstScreenX = startX + ((firstP.x / project.width) * targetDrawW)
-                                            val firstScreenY = startY + ((firstP.y / project.height) * targetDrawH)
-                                            val dx = offset.x - firstScreenX
-                                            val dy = offset.y - firstScreenY
-                                            val closeThresholdPx = with(density) { 36.dp.toPx() }
-                                            if (polygonPoints.size >= 3 && (dx * dx + dy * dy) <= closeThresholdPx * closeThresholdPx) {
-                                                onPolygonComplete?.invoke(polygonPoints.toList())
+                            coroutineScope {
+                                // Taps add points; tapping the first point or double-tapping closes the shape.
+                                launch {
+                                    detectTapGestures(
+                                        onDoubleTap = {
+                                            if (polygonPoints.size >= 3) {
+                                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                latestOnPolygonComplete?.invoke(polygonPoints.toList())
                                                 polygonPoints.clear()
-                                                return@detectTapGestures
+                                            }
+                                        },
+                                        onTap = { offset ->
+                                            val doc = toDoc(offset)
+                                            if (doc.x in 0f..latestProject.width.toFloat() && doc.y in 0f..latestProject.height.toFloat()) {
+                                                if (polygonPoints.size >= 3) {
+                                                    val first = toScreen(polygonPoints.first())
+                                                    val closeThresholdPx = with(density) { 36.dp.toPx() }
+                                                    if ((offset - first).getDistance() <= closeThresholdPx) {
+                                                        haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                                        latestOnPolygonComplete?.invoke(polygonPoints.toList())
+                                                        polygonPoints.clear()
+                                                        return@detectTapGestures
+                                                    }
+                                                }
+                                                polygonPoints.add(snapIfMagnetic(doc))
                                             }
                                         }
-                                        polygonPoints.add(PointF(canvasX, canvasY))
-                                    }
+                                    )
                                 }
-                            )
-                        } else if (activeTool == ActiveTool.SELECTION && (activeSelectionTool == SelectionToolType.RECTANGLE || activeSelectionTool == SelectionToolType.ELLIPSE)) {
+                                // Drag an existing point to adjust it.
+                                launch {
+                                    var dragIndex = -1
+                                    detectDragGestures(
+                                        onDragStart = { offset ->
+                                            val grab = with(density) { 28.dp.toPx() }
+                                            dragIndex = polygonPoints.indices.minByOrNull { (toScreen(polygonPoints[it]) - offset).getDistance() }
+                                                ?.takeIf { (toScreen(polygonPoints[it]) - offset).getDistance() <= grab } ?: -1
+                                            if (dragIndex >= 0) {
+                                                liveTouchCursor = offset
+                                                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                            }
+                                        },
+                                        onDrag = { change, _ ->
+                                            if (dragIndex in polygonPoints.indices) {
+                                                change.consume()
+                                                liveTouchCursor = change.position
+                                                polygonPoints[dragIndex] = snapIfMagnetic(clampDoc(toDoc(change.position)))
+                                            }
+                                        },
+                                        onDragEnd = { dragIndex = -1; liveTouchCursor = null },
+                                        onDragCancel = { dragIndex = -1; liveTouchCursor = null }
+                                    )
+                                }
+                            }
+                        } else if (activeSelectionTool == SelectionToolType.MOVE_SELECTION && activeTool == ActiveTool.SELECTION) {
                             detectDragGestures(
-                                onDragStart = { offset -> val x=((offset.x-(size.width/2f)-offsetX)/scale)+(project.width/2f); val y=((offset.y-(size.height/2f)-offsetY)/scale)+(project.height/2f); shapeStart=PointF(x.coerceIn(0f,project.width.toFloat()),y.coerceIn(0f,project.height.toFloat())); shapeEnd=shapeStart },
-                                onDrag = { change,_ -> val x=((change.position.x-(size.width/2f)-offsetX)/scale)+(project.width/2f); val y=((change.position.y-(size.height/2f)-offsetY)/scale)+(project.height/2f); shapeEnd=PointF(x.coerceIn(0f,project.width.toFloat()),y.coerceIn(0f,project.height.toFloat())) },
-                                onDragEnd = { val a=shapeStart;val b=shapeEnd;if(a!=null&&b!=null){if(activeSelectionTool==SelectionToolType.RECTANGLE)onRectangleSelection?.invoke(a,b) else onEllipseSelection?.invoke(a,b)};shapeStart=null;shapeEnd=null }
+                                onDragStart = { offset -> moveDragStart = toDoc(offset); moveDelta = Offset.Zero },
+                                onDrag = { change, _ ->
+                                    change.consume()
+                                    val s = moveDragStart ?: return@detectDragGestures
+                                    val p = toDoc(change.position)
+                                    moveDelta = Offset(p.x - s.x, p.y - s.y)
+                                },
+                                onDragEnd = {
+                                    val d = moveDelta
+                                    moveDragStart = null
+                                    if (d != Offset.Zero) latestOnMoveSelection?.invoke(d.x, d.y) else moveDelta = Offset.Zero
+                                },
+                                onDragCancel = { moveDragStart = null; moveDelta = Offset.Zero }
                             )
-                        } else if (activeTool == ActiveTool.OBJECT_REMOVAL && inpaintSelectionMode == com.example.ui.viewmodel.InpaintSelectionMode.RECTANGLE) {
+                        } else if ((activeTool == ActiveTool.SELECTION && (activeSelectionTool == SelectionToolType.RECTANGLE || activeSelectionTool == SelectionToolType.ELLIPSE)) ||
+                            (activeTool == ActiveTool.OBJECT_REMOVAL && inpaintSelectionMode == com.example.ui.viewmodel.InpaintSelectionMode.RECTANGLE)
+                        ) {
+                            val isEllipseTool = activeTool == ActiveTool.SELECTION && activeSelectionTool == SelectionToolType.ELLIPSE
+                            var editMode = 0 // 0 = new shape, 1 = move, 2..5 = resize from corner TL, TR, BR, BL
+                            var editStartRect: RectF? = null
+                            var dragStartDoc = PointF()
                             detectDragGestures(
                                 onDragStart = { offset ->
                                     liveTouchCursor = offset
-                                    val x = ((offset.x - (size.width / 2f) - offsetX) / scale) + (project.width / 2f)
-                                    val y = ((offset.y - (size.height / 2f) - offsetY) / scale) + (project.height / 2f)
-                                    shapeStart = PointF(x.coerceIn(0f, project.width.toFloat()), y.coerceIn(0f, project.height.toFloat()))
-                                    shapeEnd = shapeStart
+                                    val doc = clampDoc(toDoc(offset))
+                                    dragStartDoc = doc
+                                    val existing = latestEditableShape?.takeIf { it.isEllipse == isEllipseTool }
+                                    editMode = 0
+                                    editStartRect = null
+                                    if (existing != null) {
+                                        val r = RectF(existing.left, existing.top, existing.right, existing.bottom)
+                                        val corners = listOf(PointF(r.left, r.top), PointF(r.right, r.top), PointF(r.right, r.bottom), PointF(r.left, r.bottom))
+                                        val grab = with(density) { 30.dp.toPx() }
+                                        val hit = corners.indices.firstOrNull { (toScreen(corners[it]) - offset).getDistance() <= grab }
+                                        if (hit != null) {
+                                            editMode = 2 + hit
+                                            editStartRect = r
+                                        } else if (r.contains(doc.x, doc.y)) {
+                                            editMode = 1
+                                            editStartRect = r
+                                        }
+                                        if (editMode != 0) haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                    }
+                                    if (editMode == 0) {
+                                        shapeStart = doc
+                                        shapeEnd = doc
+                                    } else {
+                                        editingShapeRect = editStartRect
+                                    }
                                 },
                                 onDrag = { change, _ ->
+                                    change.consume()
                                     liveTouchCursor = change.position
-                                    val x = ((change.position.x - (size.width / 2f) - offsetX) / scale) + (project.width / 2f)
-                                    val y = ((change.position.y - (size.height / 2f) - offsetY) / scale) + (project.height / 2f)
-                                    shapeEnd = PointF(x.coerceIn(0f, project.width.toFloat()), y.coerceIn(0f, project.height.toFloat()))
+                                    val doc = clampDoc(toDoc(change.position))
+                                    val start = editStartRect
+                                    if (editMode == 0) {
+                                        shapeEnd = doc
+                                    } else if (start != null) {
+                                        editingShapeRect = when (editMode) {
+                                            1 -> {
+                                                val dx = doc.x - dragStartDoc.x
+                                                val dy = doc.y - dragStartDoc.y
+                                                RectF(start.left + dx, start.top + dy, start.right + dx, start.bottom + dy)
+                                            }
+                                            else -> {
+                                                // Opposite corner stays fixed.
+                                                val fixed = when (editMode) {
+                                                    2 -> PointF(start.right, start.bottom)
+                                                    3 -> PointF(start.left, start.bottom)
+                                                    4 -> PointF(start.left, start.top)
+                                                    else -> PointF(start.right, start.top)
+                                                }
+                                                constrainedShapeRect(fixed, doc, fromCenter = false, square = latestShapeLockSquare)
+                                            }
+                                        }
+                                    }
                                 },
                                 onDragEnd = {
                                     liveTouchCursor = null
-                                    val a = shapeStart
-                                    val b = shapeEnd
-                                    if (a != null && b != null) {
-                                        onRectangleSelection?.invoke(a, b)
+                                    if (editMode == 0) {
+                                        val a = shapeStart
+                                        val b = shapeEnd
+                                        if (a != null && b != null) {
+                                            val r = constrainedShapeRect(a, b, latestShapeFromCenter, latestShapeLockSquare)
+                                            if (activeTool == ActiveTool.OBJECT_REMOVAL) {
+                                                latestOnRectangleSelection?.invoke(PointF(r.left, r.top), PointF(r.right, r.bottom))
+                                            } else {
+                                                latestOnShapeCreated?.invoke(r, isEllipseTool)
+                                            }
+                                        }
+                                        shapeStart = null
+                                        shapeEnd = null
+                                    } else {
+                                        editingShapeRect?.let { latestOnShapeEdited?.invoke(RectF(it)) }
                                     }
+                                },
+                                onDragCancel = {
+                                    liveTouchCursor = null
                                     shapeStart = null
                                     shapeEnd = null
+                                    editingShapeRect = null
                                 }
                             )
                         } else {
+                            val isLassoTool = (activeSelectionTool == SelectionToolType.LASSO && activeTool == ActiveTool.SELECTION) ||
+                                (activeTool == ActiveTool.OBJECT_REMOVAL && inpaintSelectionMode == com.example.ui.viewmodel.InpaintSelectionMode.LASSO)
+                            var strokeRadius = 0f
+                            var emittedCount = 0
+                            var lastEmitTime = 0L
+                            fun emitSegment(phase: com.example.ui.viewmodel.StrokePhase) {
+                                val segmentFn = latestOnStrokeSegment ?: return
+                                // Overlap one point so consecutive segments join without gaps.
+                                val from = (emittedCount - 1).coerceAtLeast(0)
+                                val pts = if (from < currentPoints.size) currentPoints.subList(from, currentPoints.size).toList() else emptyList()
+                                emittedCount = currentPoints.size
+                                lastEmitTime = android.os.SystemClock.uptimeMillis()
+                                segmentFn(pts, strokeRadius, phase)
+                            }
                             detectDragGestures(
                                 onDragStart = { offset ->
+                                    previewClearJob?.cancel()
+                                    isStrokeActive = true
                                     liveTouchCursor = offset
                                     currentPoints.clear()
-                                    val canvasX = ((offset.x - (size.width / 2f) - offsetX) / scale) + (project.width / 2f)
-                                    val canvasY = ((offset.y - (size.height / 2f) - offsetY) / scale) + (project.height / 2f)
-                                    currentPoints.add(PointF(canvasX, canvasY))
+                                    val first = toDoc(offset)
+                                    currentPoints.add(if (isLassoTool) snapIfMagnetic(first) else first)
+                                    val screenRadius = with(density) { (latestBrushSizeDp.dp.toPx()) / 2f }
+                                    val docScale = curDrawW() / latestProject.width.toFloat()
+                                    strokeRadius = if (docScale > 0f) screenRadius / docScale else latestBrushSizeDp
+                                    if (!isLassoTool && latestOnStrokeSegment != null) {
+                                        currentPoints.add(PointF(first.x, first.y)) // a dot for the first touch
+                                        emittedCount = 0
+                                        emitSegment(com.example.ui.viewmodel.StrokePhase.START)
+                                    }
                                 },
                                 onDrag = { change, _ ->
                                     liveTouchCursor = change.position
-                                    val canvasX = ((change.position.x - (size.width / 2f) - offsetX) / scale) + (project.width / 2f)
-                                    val canvasY = ((change.position.y - (size.height / 2f) - offsetY) / scale) + (project.height / 2f)
-                                    currentPoints.add(PointF(canvasX, canvasY))
+                                    val p = toDoc(change.position)
+                                    currentPoints.add(if (isLassoTool) snapIfMagnetic(p) else p)
+                                    if (!isLassoTool && latestOnStrokeSegment != null) {
+                                        val now = android.os.SystemClock.uptimeMillis()
+                                        if (now - lastEmitTime >= 45 || currentPoints.size - emittedCount >= 10) {
+                                            emitSegment(com.example.ui.viewmodel.StrokePhase.MOVE)
+                                        }
+                                    }
                                 },
                                 onDragEnd = {
+                                    isStrokeActive = false
                                     liveTouchCursor = null
-                                    if ((activeSelectionTool == SelectionToolType.LASSO && activeTool == ActiveTool.SELECTION) ||
-                                        (activeTool == ActiveTool.OBJECT_REMOVAL && inpaintSelectionMode == com.example.ui.viewmodel.InpaintSelectionMode.LASSO)
-                                    ) {
-                                        onLassoComplete(currentPoints.toList())
+                                    if (isLassoTool) {
+                                        latestOnLassoComplete(currentPoints.toList())
+                                    } else if (latestOnStrokeSegment != null) {
+                                        emitSegment(com.example.ui.viewmodel.StrokePhase.END)
                                     } else {
-                                        val screenRadius = with(density) { (brushSizeDp.dp.toPx()) / 2f }
-                                        val docScale = targetDrawW / project.width.toFloat()
-                                        val docBrushRadius = if (docScale > 0f) screenRadius / docScale else brushSizeDp
-                                        onBrushStrokeComplete(currentPoints.toList(), docBrushRadius)
+                                        latestOnBrushStrokeComplete(currentPoints.toList(), strokeRadius)
                                     }
+                                    // The preview stays only until the real result is published (see the
+                                    // LaunchedEffect on the mask); this is a safety net for no-op strokes.
+                                    previewClearJob = viewportScope.launch {
+                                        delay(1200)
+                                        if (!isStrokeActive) currentPoints.clear()
+                                    }
+                                },
+                                onDragCancel = {
+                                    isStrokeActive = false
+                                    liveTouchCursor = null
+                                    if (!isLassoTool && latestOnStrokeSegment != null) {
+                                        emitSegment(com.example.ui.viewmodel.StrokePhase.END)
+                                    }
+                                    currentPoints.clear()
                                 }
                             )
                         }
-                    } else if (activeTool == ActiveTool.TRANSFORM && selectedLayerIndex in project.layers.indices) {
+                    } else if (activeTool == ActiveTool.TRANSFORM && selectedLayerIndex in latestProject.layers.indices) {
                         // Interactive Layer Bounding Box & Transform Gestures
-                        val selectedLayer = project.layers[selectedLayerIndex]
+                        // Re-resolved on every drag start: undo/redo can replace the Layer instance
+                        // without restarting this detector.
+                        var selectedLayer = latestProject.layers[selectedLayerIndex]
 
                         detectDragGestures(
                             onDragStart = { startOffset ->
+                                latestProject.layers.getOrNull(selectedLayerIndex)?.let { selectedLayer = it }
                                 initialTouchPos = startOffset
                                 lastTouchPos = startOffset
                                 initialLayerScaleX = selectedLayer.scaleX
                                 initialLayerScaleY = selectedLayer.scaleY
 
                                 if (!selectedLayer.isLocked && selectedLayer.isVisible) {
-                                    val (layerW, layerH) = getLayerBounds(selectedLayer)
-                                    val matrix = SelectionEngine.getLayerMatrix(selectedLayer, project.width, project.height)
+                                    val pts = layerCornersDoc(selectedLayer)
 
-                                    val pts = floatArrayOf(
-                                        0f, 0f,
-                                        layerW, 0f,
-                                        layerW, layerH,
-                                        0f, layerH
-                                    )
-                                    matrix.mapPoints(pts)
-
-                                    val scP0 = Offset(startX + (pts[0] / project.width) * targetDrawW, startY + (pts[1] / project.height) * targetDrawH)
-                                    val scP1 = Offset(startX + (pts[2] / project.width) * targetDrawW, startY + (pts[3] / project.height) * targetDrawH)
-                                    val scP2 = Offset(startX + (pts[4] / project.width) * targetDrawW, startY + (pts[5] / project.height) * targetDrawH)
-                                    val scP3 = Offset(startX + (pts[6] / project.width) * targetDrawW, startY + (pts[7] / project.height) * targetDrawH)
+                                    val scP0 = Offset(curStartX() + (pts[0] / latestProject.width) * curDrawW(), curStartY() + (pts[1] / latestProject.height) * curDrawH())
+                                    val scP1 = Offset(curStartX() + (pts[2] / latestProject.width) * curDrawW(), curStartY() + (pts[3] / latestProject.height) * curDrawH())
+                                    val scP2 = Offset(curStartX() + (pts[4] / latestProject.width) * curDrawW(), curStartY() + (pts[5] / latestProject.height) * curDrawH())
+                                    val scP3 = Offset(curStartX() + (pts[6] / latestProject.width) * curDrawW(), curStartY() + (pts[7] / latestProject.height) * curDrawH())
                                     val scCenter = Offset((scP0.x + scP2.x) / 2f, (scP0.y + scP2.y) / 2f)
 
                                     val scTopMid = Offset((scP0.x + scP1.x) / 2f, (scP0.y + scP1.y) / 2f)
@@ -935,22 +1362,18 @@ fun CanvasView(
                             onDrag = { change, _ ->
                                 if (!selectedLayer.isLocked && selectedLayer.isVisible && activeTransformHandle != TransformHandle.NONE) {
                                     val pos = change.position
-                                    val (layerW, layerH) = getLayerBounds(selectedLayer)
-                                    val matrix = SelectionEngine.getLayerMatrix(selectedLayer, project.width, project.height)
+                                    val pts = layerCornersDoc(selectedLayer)
 
-                                    val pts = floatArrayOf(0f, 0f, layerW, 0f, layerW, layerH, 0f, layerH)
-                                    matrix.mapPoints(pts)
-
-                                    val scP0 = Offset(startX + (pts[0] / project.width) * targetDrawW, startY + (pts[1] / project.height) * targetDrawH)
-                                    val scP2 = Offset(startX + (pts[4] / project.width) * targetDrawW, startY + (pts[5] / project.height) * targetDrawH)
+                                    val scP0 = Offset(curStartX() + (pts[0] / latestProject.width) * curDrawW(), curStartY() + (pts[1] / latestProject.height) * curDrawH())
+                                    val scP2 = Offset(curStartX() + (pts[4] / latestProject.width) * curDrawW(), curStartY() + (pts[5] / latestProject.height) * curDrawH())
                                     val scCenter = Offset((scP0.x + scP2.x) / 2f, (scP0.y + scP2.y) / 2f)
 
                                     when (activeTransformHandle) {
                                         TransformHandle.BODY -> {
                                             val screenDx = pos.x - lastTouchPos.x
                                             val screenDy = pos.y - lastTouchPos.y
-                                            val docDx = (screenDx / targetDrawW) * project.width
-                                            val docDy = (screenDy / targetDrawH) * project.height
+                                            val docDx = (screenDx / curDrawW()) * latestProject.width
+                                            val docDy = (screenDy / curDrawH()) * latestProject.height
 
                                             var newPosX = selectedLayer.positionX + docDx
                                             var newPosY = selectedLayer.positionY + docDy
@@ -972,7 +1395,7 @@ fun CanvasView(
                                                 showSnapH = false
                                             }
 
-                                            onUpdateLayerTransient?.invoke { l ->
+                                            latestOnUpdateLayerTransient?.invoke { l ->
                                                 l.positionX = newPosX
                                                 l.positionY = newPosY
                                             }
@@ -984,7 +1407,7 @@ fun CanvasView(
                                             val angleDeg = Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat() + 90f
                                             val normAngle = (angleDeg % 360f + 360f) % 360f
 
-                                            onUpdateLayerTransient?.invoke { l ->
+                                            latestOnUpdateLayerTransient?.invoke { l ->
                                                 l.rotation = normAngle
                                             }
                                         }
@@ -997,7 +1420,7 @@ fun CanvasView(
                                             val newScaleX = (initialLayerScaleX * scaleFactor).coerceIn(-10f, 10f)
                                             val newScaleY = (initialLayerScaleY * scaleFactor).coerceIn(-10f, 10f)
 
-                                            onUpdateLayerTransient?.invoke { l ->
+                                            latestOnUpdateLayerTransient?.invoke { l ->
                                                 l.scaleX = newScaleX
                                                 l.scaleY = newScaleY
                                             }
@@ -1008,7 +1431,7 @@ fun CanvasView(
                                             val currDistY = abs(pos.y - scCenter.y)
                                             val scaleFactor = if (initDistY > 5f) currDistY / initDistY else 1f
                                             val newScaleY = (initialLayerScaleY * scaleFactor).coerceIn(-10f, 10f)
-                                            onUpdateLayerTransient?.invoke { l -> l.scaleY = newScaleY }
+                                            latestOnUpdateLayerTransient?.invoke { l -> l.scaleY = newScaleY }
                                         }
 
                                         TransformHandle.EDGE_L, TransformHandle.EDGE_R -> {
@@ -1016,7 +1439,7 @@ fun CanvasView(
                                             val currDistX = abs(pos.x - scCenter.x)
                                             val scaleFactor = if (initDistX > 5f) currDistX / initDistX else 1f
                                             val newScaleX = (initialLayerScaleX * scaleFactor).coerceIn(-10f, 10f)
-                                            onUpdateLayerTransient?.invoke { l -> l.scaleX = newScaleX }
+                                            latestOnUpdateLayerTransient?.invoke { l -> l.scaleX = newScaleX }
                                         }
 
                                         else -> {}
@@ -1027,19 +1450,22 @@ fun CanvasView(
                             },
                             onDragEnd = {
                                 if (activeTransformHandle != TransformHandle.NONE) {
-                                    onCommitHistoryState?.invoke()
+                                    latestOnCommitHistoryState?.invoke()
                                 }
                                 activeTransformHandle = TransformHandle.NONE
                                 showSnapV = false
                                 showSnapH = false
                             }
                         )
-                    } else if (activeTool == ActiveTool.TEXT && selectedLayerIndex in project.layers.indices) {
-                        // Direct on-canvas touch-and-drag for Text layers
-                        val selectedLayer = project.layers[selectedLayerIndex]
+                    } else if (activeTool == ActiveTool.TEXT && selectedLayerType == com.example.data.model.LayerType.TEXT &&
+                        selectedLayerIndex in latestProject.layers.indices
+                    ) {
+                        // Direct on-canvas touch-and-drag for Text layers (only text layers move with the Text tool)
+                        var selectedLayer = latestProject.layers[selectedLayerIndex]
 
                         detectDragGestures(
                             onDragStart = { startOffset ->
+                                latestProject.layers.getOrNull(selectedLayerIndex)?.let { selectedLayer = it }
                                 lastTouchPos = startOffset
                             },
                             onDrag = { change, _ ->
@@ -1047,10 +1473,10 @@ fun CanvasView(
                                     val pos = change.position
                                     val screenDx = pos.x - lastTouchPos.x
                                     val screenDy = pos.y - lastTouchPos.y
-                                    val docDx = (screenDx / targetDrawW) * project.width
-                                    val docDy = (screenDy / targetDrawH) * project.height
+                                    val docDx = (screenDx / curDrawW()) * latestProject.width
+                                    val docDy = (screenDy / curDrawH()) * latestProject.height
 
-                                    onUpdateLayerTransient?.invoke { l ->
+                                    latestOnUpdateLayerTransient?.invoke { l ->
                                         l.positionX += docDx
                                         l.positionY += docDy
                                     }
@@ -1058,7 +1484,7 @@ fun CanvasView(
                                 }
                             },
                             onDragEnd = {
-                                onCommitHistoryState?.invoke()
+                                latestOnCommitHistoryState?.invoke()
                             }
                         )
                     }
@@ -1196,12 +1622,30 @@ fun CanvasView(
                 }
             }
 
+            // 4.55. Quick Mask view: everything NOT selected is covered in translucent red.
+            if (isQuickMaskView && selectionMask != null && !selectionMask.isRecycled &&
+                activeTool != ActiveTool.OBJECT_REMOVAL && activeTool != ActiveTool.CROP_PERSPECTIVE
+            ) {
+                val bounds = androidx.compose.ui.geometry.Rect(startX, startY, startX + targetDrawW, startY + targetDrawH)
+                drawIntoCanvas { c -> c.saveLayer(bounds, androidx.compose.ui.graphics.Paint()) }
+                drawRect(Color(0xFFE53935).copy(alpha = 0.5f), Offset(startX, startY), Size(targetDrawW, targetDrawH))
+                drawImage(
+                    image = selectionMask.asImageBitmap(),
+                    dstOffset = androidx.compose.ui.unit.IntOffset((startX + moveDelta.x * targetDrawW / project.width).toInt(), (startY + moveDelta.y * targetDrawH / project.height).toInt()),
+                    dstSize = androidx.compose.ui.unit.IntSize(targetDrawW.toInt(), targetDrawH.toInt()),
+                    blendMode = BlendMode.DstOut
+                )
+                drawIntoCanvas { c -> c.restore() }
+            }
+
             // 4.6. High-contrast alternating Black & White Marching Ants along selection boundary
             // Persists continuously across tools (Adjustments, Filters, Layers, Transform, etc.)
             if (selectionMask != null && activeTool != ActiveTool.CROP_PERSPECTIVE) {
                 selectionContourPath?.let { cPath ->
                     if (!cPath.isEmpty) {
                         val m = android.graphics.Matrix()
+                        // While the Move tool drags, the outline follows the finger before it is applied.
+                        m.postTranslate(moveDelta.x, moveDelta.y)
                         m.postScale(targetDrawW / project.width.toFloat(), targetDrawH / project.height.toFloat())
                         m.postTranslate(startX, startY)
                         val screenPath = android.graphics.Path()
@@ -1244,25 +1688,38 @@ fun CanvasView(
                     path.lineTo(screenX, screenY)
                 }
 
-                if ((activeSelectionTool == SelectionToolType.LASSO && activeTool == ActiveTool.SELECTION) ||
+                val isLassoPreview = (activeSelectionTool == SelectionToolType.LASSO && activeTool == ActiveTool.SELECTION) ||
                     (activeTool == ActiveTool.OBJECT_REMOVAL && inpaintSelectionMode == com.example.ui.viewmodel.InpaintSelectionMode.LASSO)
-                ) {
-                    path.close()
-                }
+                val accent = if (activeTool == ActiveTool.OBJECT_REMOVAL) Color(0xFFFF2A6D) else CyanAccent
 
-                val strokeColor = if (activeTool == ActiveTool.OBJECT_REMOVAL) Color(0xFFFF2A6D).copy(alpha = 0.65f) else CyanAccent
-                val screenStrokeWidth = with(density) { brushSizeDp.dp.toPx() }
-                drawPath(
-                    path = path,
-                    color = strokeColor,
-                    style = Stroke(width = screenStrokeWidth, cap = StrokeCap.Round, join = StrokeJoin.Round)
-                )
+                if (isLassoPreview) {
+                    // A lasso is an outline, not a brush: draw a thin, high-contrast line (fixed on
+                    // screen, so it stays precise at any zoom) instead of a brush-wide band.
+                    path.close()
+                    drawPath(path = path, color = Color.Black.copy(alpha = 0.6f), style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+                    drawPath(path = path, color = accent, style = Stroke(width = 1.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+                } else {
+                    // Brush: translucent band of the real brush diameter (constant on screen, so zooming
+                    // in makes the brush finer on the image) plus a thin centre line for precision.
+                    val screenStrokeWidth = with(density) { effectiveBrushSizeDp.dp.toPx() }
+                    drawPath(
+                        path = path,
+                        color = accent.copy(alpha = 0.32f),
+                        style = Stroke(width = screenStrokeWidth, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                    )
+                    drawPath(
+                        path = path,
+                        color = Color.White.copy(alpha = 0.85f),
+                        style = Stroke(width = 1.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+                    )
+                }
             }
 
             // 5a. Live Brush Cursor Ring calibrated to screen DP (never balloons when zooming)
             liveTouchCursor?.let { cursor ->
-                if (activeTool == ActiveTool.OBJECT_REMOVAL || (activeTool == ActiveTool.SELECTION && (activeSelectionTool == SelectionToolType.QUICK_BRUSH || activeSelectionTool == SelectionToolType.QUICK_SELECTION))) {
-                    val cursorRadius = with(density) { (brushSizeDp.dp.toPx()) / 2f }
+                val shapeOrRemovalRect = activeTool == ActiveTool.OBJECT_REMOVAL && inpaintSelectionMode != com.example.ui.viewmodel.InpaintSelectionMode.BRUSH
+                if ((activeTool == ActiveTool.OBJECT_REMOVAL && !shapeOrRemovalRect) || isEditingSelectedMask || (activeTool == ActiveTool.SELECTION && (activeSelectionTool == SelectionToolType.QUICK_BRUSH || activeSelectionTool == SelectionToolType.QUICK_SELECTION))) {
+                    val cursorRadius = with(density) { (effectiveBrushSizeDp.dp.toPx()) / 2f }
                     drawCircle(
                         color = if (activeTool == ActiveTool.OBJECT_REMOVAL) Color(0xFFFF2A6D).copy(alpha = 0.35f) else CyanAccent.copy(alpha = 0.35f),
                         radius = cursorRadius,
@@ -1277,21 +1734,54 @@ fun CanvasView(
                 }
             }
 
+            // Shapes: the one being drawn, or the last one (still editable with corner handles).
             val sa = shapeStart
             val se = shapeEnd
-            if (activeTool == ActiveTool.SELECTION && sa != null && se != null && (activeSelectionTool == SelectionToolType.RECTANGLE || activeSelectionTool == SelectionToolType.ELLIPSE)) {
-                val l = startX + (min(sa.x, se.x) / project.width) * targetDrawW
-                val t = startY + (min(sa.y, se.y) / project.height) * targetDrawH
-                val w = (abs(se.x - sa.x) / project.width) * targetDrawW
-                val h = (abs(se.y - sa.y) / project.height) * targetDrawH
+            val isShapeTool = (activeTool == ActiveTool.SELECTION && (activeSelectionTool == SelectionToolType.RECTANGLE || activeSelectionTool == SelectionToolType.ELLIPSE)) ||
+                (activeTool == ActiveTool.OBJECT_REMOVAL && inpaintSelectionMode == com.example.ui.viewmodel.InpaintSelectionMode.RECTANGLE)
+            val drawingEllipse = activeTool == ActiveTool.SELECTION && activeSelectionTool == SelectionToolType.ELLIPSE
+            val shownShape: RectF? = when {
+                !isShapeTool -> null
+                sa != null && se != null -> constrainedShapeRect(sa, se, shapeFromCenter, shapeLockSquare)
+                editingShapeRect != null -> editingShapeRect
+                editableShape != null && editableShape.isEllipse == drawingEllipse && activeTool == ActiveTool.SELECTION ->
+                    RectF(editableShape.left, editableShape.top, editableShape.right, editableShape.bottom)
+                else -> null
+            }
+            if (shownShape != null) {
+                val l = startX + (shownShape.left / project.width) * targetDrawW
+                val t = startY + (shownShape.top / project.height) * targetDrawH
+                val w = (shownShape.width() / project.width) * targetDrawW
+                val h = (shownShape.height() / project.height) * targetDrawH
                 val dashB = PathEffect.dashPathEffect(floatArrayOf(8f, 8f), marchingAntsPhase)
                 val dashW = PathEffect.dashPathEffect(floatArrayOf(8f, 8f), (marchingAntsPhase + 8f) % 16f)
-                if (activeSelectionTool == SelectionToolType.RECTANGLE) {
+                if (!drawingEllipse) {
                     drawRect(Color.Black, Offset(l, t), Size(w, h), style = Stroke(2.dp.toPx(), pathEffect = dashB))
                     drawRect(Color.White, Offset(l, t), Size(w, h), style = Stroke(2.dp.toPx(), pathEffect = dashW))
                 } else {
+                    drawRect(Color.White.copy(alpha = 0.35f), Offset(l, t), Size(w, h), style = Stroke(1.dp.toPx()))
                     drawOval(Color.Black, Offset(l, t), Size(w, h), style = Stroke(2.dp.toPx(), pathEffect = dashB))
                     drawOval(Color.White, Offset(l, t), Size(w, h), style = Stroke(2.dp.toPx(), pathEffect = dashW))
+                }
+                // Corner handles once the shape exists (drag a corner to resize, inside to move).
+                if (sa == null && activeTool == ActiveTool.SELECTION) {
+                    for (c in listOf(Offset(l, t), Offset(l + w, t), Offset(l + w, t + h), Offset(l, t + h))) {
+                        drawCircle(Color.White, radius = 8.dp.toPx(), center = c)
+                        drawCircle(IndigoPrimary, radius = 5.5.dp.toPx(), center = c)
+                    }
+                }
+                // Live dimensions (document pixels).
+                val label = "${shownShape.width().toInt()} × ${shownShape.height().toInt()}"
+                drawIntoCanvas { c ->
+                    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                        color = android.graphics.Color.WHITE
+                        textSize = 12.sp.toPx()
+                        isFakeBoldText = true
+                        setShadowLayer(4f, 0f, 1f, android.graphics.Color.BLACK)
+                    }
+                    val tx = l + w / 2f - paint.measureText(label) / 2f
+                    val ty = (t - 8.dp.toPx()).let { if (it < 16.dp.toPx()) t + h + 18.dp.toPx() else it }
+                    c.nativeCanvas.drawText(label, tx, ty, paint)
                 }
             }
 
@@ -1342,6 +1832,84 @@ fun CanvasView(
                 }
             }
 
+            // 5c. Magnifier loupe: shows the area under the finger enlarged in a corner, so the finger
+            // never hides what is being selected.
+            val loupeTouch = liveTouchCursor
+            val loupeBmp = compositeBitmap
+            val loupeTool = activeTool == ActiveTool.SELECTION || activeTool == ActiveTool.OBJECT_REMOVAL || isEditingSelectedMask
+            if (loupeTouch != null && loupeTool && loupeBmp != null && !loupeBmp.isRecycled) {
+                val loupeR = 58.dp.toPx()
+                val margin = 14.dp.toPx()
+                val zoomFactor = 2.5f
+                val onRight = loupeTouch.x < canvasW / 2f && loupeTouch.y < loupeR * 2f + margin * 3f
+                val lc = if (onRight) Offset(canvasW - margin - loupeR, margin + loupeR) else Offset(margin + loupeR, margin + loupeR)
+                val docX = (loupeTouch.x - startX) / targetDrawW * pW
+                val docY = (loupeTouch.y - startY) / targetDrawH * pH
+                val screenPerDoc = scale * zoomFactor
+                val bmpPerDoc = loupeBmp.width / pW
+                val halfDoc = loupeR / screenPerDoc
+                // Source rect (bitmap px), clamped to the bitmap; destination adjusted to match.
+                val sL = ((docX - halfDoc) * bmpPerDoc).coerceIn(0f, loupeBmp.width.toFloat())
+                val sT = ((docY - halfDoc) * bmpPerDoc).coerceIn(0f, loupeBmp.height.toFloat())
+                val sR = ((docX + halfDoc) * bmpPerDoc).coerceIn(0f, loupeBmp.width.toFloat())
+                val sB = ((docY + halfDoc) * bmpPerDoc).coerceIn(0f, loupeBmp.height.toFloat())
+                val loupePath = Path().apply { addOval(androidx.compose.ui.geometry.Rect(lc, loupeR)) }
+                drawCircle(Color.Black.copy(alpha = 0.35f), radius = loupeR + 3.dp.toPx(), center = lc + Offset(0f, 2.dp.toPx()))
+                clipPath(loupePath) {
+                    drawRect(CheckerDark, Offset(lc.x - loupeR, lc.y - loupeR), Size(loupeR * 2, loupeR * 2))
+                    if (sR - sL >= 1f && sB - sT >= 1f) {
+                        val dL = lc.x + (sL / bmpPerDoc - docX) * screenPerDoc
+                        val dT = lc.y + (sT / bmpPerDoc - docY) * screenPerDoc
+                        val dW = (sR - sL) / bmpPerDoc * screenPerDoc
+                        val dH = (sB - sT) / bmpPerDoc * screenPerDoc
+                        drawImage(
+                            image = loupeBmp.asImageBitmap(),
+                            srcOffset = androidx.compose.ui.unit.IntOffset(sL.toInt(), sT.toInt()),
+                            srcSize = androidx.compose.ui.unit.IntSize((sR - sL).toInt().coerceAtLeast(1), (sB - sT).toInt().coerceAtLeast(1)),
+                            dstOffset = androidx.compose.ui.unit.IntOffset(dL.toInt(), dT.toInt()),
+                            dstSize = androidx.compose.ui.unit.IntSize(dW.toInt().coerceAtLeast(1), dH.toInt().coerceAtLeast(1))
+                        )
+                    }
+                    // The stroke / outline in progress, magnified.
+                    if (currentPoints.size > 1) {
+                        val lp = Path()
+                        currentPoints.forEachIndexed { i, p ->
+                            val o = Offset(lc.x + (p.x - docX) * screenPerDoc, lc.y + (p.y - docY) * screenPerDoc)
+                            if (i == 0) lp.moveTo(o.x, o.y) else lp.lineTo(o.x, o.y)
+                        }
+                        drawPath(lp, Color.Black.copy(alpha = 0.6f), style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+                        drawPath(lp, CyanAccent, style = Stroke(width = 1.2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+                    }
+                    // Brush footprint (true size on the image, magnified) and a precise crosshair.
+                    val brushRing = (effectiveBrushSizeDp.dp.toPx() / 2f) * zoomFactor
+                    if (brushRing < loupeR) {
+                        drawCircle(Color.White.copy(alpha = 0.9f), radius = brushRing, center = lc, style = Stroke(width = 1.dp.toPx()))
+                    }
+                    val ch = 7.dp.toPx()
+                    drawLine(Color.Black, Offset(lc.x - ch, lc.y), Offset(lc.x + ch, lc.y), strokeWidth = 3.dp.toPx())
+                    drawLine(Color.Black, Offset(lc.x, lc.y - ch), Offset(lc.x, lc.y + ch), strokeWidth = 3.dp.toPx())
+                    drawLine(Color.White, Offset(lc.x - ch, lc.y), Offset(lc.x + ch, lc.y), strokeWidth = 1.2.dp.toPx())
+                    drawLine(Color.White, Offset(lc.x, lc.y - ch), Offset(lc.x, lc.y + ch), strokeWidth = 1.2.dp.toPx())
+                }
+                drawCircle(Color.White, radius = loupeR, center = lc, style = Stroke(width = 2.dp.toPx()))
+            }
+
+            // 5d. Magic wand tolerance bubble while dragging.
+            wandBubble?.let { (pos, tol) ->
+                val bc = Offset(pos.x, (pos.y - 64.dp.toPx()).coerceAtLeast(28.dp.toPx()))
+                drawCircle(Color.Black.copy(alpha = 0.7f), radius = 26.dp.toPx(), center = bc)
+                drawCircle(CyanAccent, radius = 26.dp.toPx(), center = bc, style = Stroke(width = 2.dp.toPx()))
+                drawIntoCanvas { c ->
+                    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                        color = android.graphics.Color.WHITE
+                        textSize = 15.sp.toPx()
+                        isFakeBoldText = true
+                        textAlign = android.graphics.Paint.Align.CENTER
+                    }
+                    c.nativeCanvas.drawText(tol.toString(), bc.x, bc.y + 5.sp.toPx(), paint)
+                }
+            }
+
             // 6. Canvas Border
             drawRect(
                 color = Color(0x806366F1),
@@ -1354,16 +1922,7 @@ fun CanvasView(
             if (!isPerspectiveActive && activeTool == ActiveTool.TRANSFORM && selectedLayerIndex in project.layers.indices) {
                 val layer = project.layers[selectedLayerIndex]
                 if (layer.isVisible) {
-                    val (layerW, layerH) = getLayerBounds(layer)
-                    val matrix = SelectionEngine.getLayerMatrix(layer, project.width, project.height)
-
-                    val pts = floatArrayOf(
-                        0f, 0f,
-                        layerW, 0f,
-                        layerW, layerH,
-                        0f, layerH
-                    )
-                    matrix.mapPoints(pts)
+                    val pts = layerCornersDoc(layer)
 
                     val scP0 = Offset(startX + (pts[0] / project.width) * targetDrawW, startY + (pts[1] / project.height) * targetDrawH)
                     val scP1 = Offset(startX + (pts[2] / project.width) * targetDrawW, startY + (pts[3] / project.height) * targetDrawH)
@@ -1432,10 +1991,7 @@ fun CanvasView(
             if (activeTool == ActiveTool.TEXT && selectedLayerIndex in project.layers.indices) {
                 val layer = project.layers[selectedLayerIndex]
                 if (layer.isVisible && layer.type == com.example.data.model.LayerType.TEXT) {
-                    val (layerW, layerH) = getLayerBounds(layer)
-                    val matrix = SelectionEngine.getLayerMatrix(layer, project.width, project.height)
-                    val pts = floatArrayOf(0f, 0f, layerW, 0f, layerW, layerH, 0f, layerH)
-                    matrix.mapPoints(pts)
+                    val pts = layerCornersDoc(layer)
                     val scP0 = Offset(startX + (pts[0] / project.width) * targetDrawW, startY + (pts[1] / project.height) * targetDrawH)
                     val scP1 = Offset(startX + (pts[2] / project.width) * targetDrawW, startY + (pts[3] / project.height) * targetDrawH)
                     val scP2 = Offset(startX + (pts[4] / project.width) * targetDrawW, startY + (pts[5] / project.height) * targetDrawH)
@@ -1677,7 +2233,7 @@ fun CanvasView(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = "${polygonPoints.size} pts",
+                        text = stringResource(R.string.polygon_points_count, polygonPoints.size),
                         color = Color.White,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold
@@ -1710,6 +2266,45 @@ fun CanvasView(
                             Text(stringResource(R.string.action_apply), color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
                     }
+                }
+            }
+        }
+
+        // Hold-to-subtract: phones have no Alt key, so this thumb button switches any selection
+        // tool to Subtract only while it is held.
+        val showSubtractHold = onTemporarySubtract != null && !isSplitCompareActive &&
+            ((activeTool == ActiveTool.SELECTION && activeSelectionTool != SelectionToolType.MOVE_SELECTION) ||
+                activeTool == ActiveTool.OBJECT_REMOVAL)
+        if (showSubtractHold) {
+            var holdingSubtract by remember { mutableStateOf(false) }
+            val subtractLabel = stringResource(R.string.select_hold_subtract)
+            Surface(
+                shape = RoundedCornerShape(28.dp),
+                color = if (holdingSubtract) Color(0xFFFF2A6D) else StudioSurface.copy(alpha = 0.9f),
+                shadowElevation = 4.dp,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(start = 14.dp, bottom = 14.dp)
+                    .size(56.dp)
+                    .semantics { contentDescription = subtractLabel }
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onPress = {
+                                holdingSubtract = true
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                onTemporarySubtract?.invoke(true)
+                                try {
+                                    tryAwaitRelease()
+                                } finally {
+                                    holdingSubtract = false
+                                    onTemporarySubtract?.invoke(false)
+                                }
+                            }
+                        )
+                    }
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Default.Remove, contentDescription = null, tint = Color.White, modifier = Modifier.size(26.dp))
                 }
             }
         }
@@ -1788,7 +2383,7 @@ fun CanvasView(
                 horizontalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 IconButton(
-                    onClick = { autoFit = false; scale = (scale * 0.8f).coerceIn(minScale, maxScale) },
+                    onClick = { autoFit = false; zoomAroundViewportCenter(0.8f) },
                     modifier = Modifier.size(48.dp)
                 ) {
                     Icon(
@@ -1816,7 +2411,7 @@ fun CanvasView(
                 )
 
                 IconButton(
-                    onClick = { autoFit = false; scale = (scale * 1.25f).coerceIn(minScale, maxScale) },
+                    onClick = { autoFit = false; zoomAroundViewportCenter(1.25f) },
                     modifier = Modifier.size(48.dp)
                 ) {
                     Icon(

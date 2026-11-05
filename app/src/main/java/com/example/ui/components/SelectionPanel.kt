@@ -67,9 +67,18 @@ fun SelectionPanel(
     onOpenRefineEdgeDialog: () -> Unit = {},
     isMagneticSnap: Boolean = false,
     onToggleMagneticSnap: () -> Unit = {},
+    isQuickMaskView: Boolean = false,
+    onToggleQuickMask: () -> Unit = {},
+    shapeFromCenter: Boolean = false,
+    onToggleShapeFromCenter: (Boolean) -> Unit = {},
+    shapeLockSquare: Boolean = false,
+    onToggleShapeLockSquare: (Boolean) -> Unit = {},
+    modifierOp: com.example.ui.viewmodel.SelectionModifierOp = com.example.ui.viewmodel.SelectionModifierOp.FEATHER,
+    modifierAmount: Float = 5f,
+    onModifierPreview: (com.example.ui.viewmodel.SelectionModifierOp, Float) -> Unit = { _, _ -> },
+    onModifierCommit: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    var edge by remember { mutableFloatStateOf(5f) }
     var showRefine by remember { mutableStateOf(false) }
 
     Column(
@@ -136,6 +145,7 @@ fun SelectionPanel(
             SelectionToolChip(stringResource(R.string.select_lasso_short), selectedTool == SelectionToolType.LASSO) { onToolSelect(SelectionToolType.LASSO) }
             SelectionToolChip(stringResource(R.string.select_polygon_short), selectedTool == SelectionToolType.POLYGON) { onToolSelect(SelectionToolType.POLYGON) }
             SelectionToolChip(stringResource(R.string.select_wand_short), selectedTool == SelectionToolType.MAGIC_WAND) { onToolSelect(SelectionToolType.MAGIC_WAND) }
+            SelectionToolChip(stringResource(R.string.select_move_selection), selectedTool == SelectionToolType.MOVE_SELECTION) { onToolSelect(SelectionToolType.MOVE_SELECTION) }
         }
 
         Spacer(Modifier.height(6.dp))
@@ -205,18 +215,65 @@ fun SelectionPanel(
             }
         }
 
-        if (selectedTool == SelectionToolType.QUICK_BRUSH || selectedTool == SelectionToolType.LASSO) {
-            if (selectedTool == SelectionToolType.QUICK_BRUSH) {
-                SelectionSlider(
-                    label = stringResource(R.string.select_brush_size),
-                    valueLabel = brushSizeDp.toInt().toString(),
-                    value = brushSizeDp,
-                    valueRange = 4f..120f,
-                    onValueChange = onBrushSizeChange
+        if (selectedTool == SelectionToolType.QUICK_BRUSH) {
+            SelectionSlider(
+                label = stringResource(R.string.select_brush_size),
+                valueLabel = brushSizeDp.toInt().toString(),
+                value = brushSizeDp,
+                valueRange = 4f..120f,
+                onValueChange = onBrushSizeChange
+            )
+        }
+
+        if (selectedTool == SelectionToolType.RECTANGLE || selectedTool == SelectionToolType.ELLIPSE) {
+            Text(
+                stringResource(R.string.select_shape_hint),
+                color = Color.LightGray,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                    selected = shapeFromCenter,
+                    onClick = { onToggleShapeFromCenter(!shapeFromCenter) },
+                    label = { Text(stringResource(R.string.select_shape_from_center), fontSize = 12.sp) }
+                )
+                FilterChip(
+                    selected = shapeLockSquare,
+                    onClick = { onToggleShapeLockSquare(!shapeLockSquare) },
+                    label = {
+                        Text(
+                            stringResource(if (selectedTool == SelectionToolType.ELLIPSE) R.string.select_shape_circle else R.string.select_shape_square),
+                            fontSize = 12.sp
+                        )
+                    }
                 )
             }
+        }
 
-            // Magnetic Edge Snap toggle
+        if (selectedTool == SelectionToolType.POLYGON) {
+            Text(
+                stringResource(R.string.select_polygon_hint),
+                color = Color.LightGray,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)
+            )
+        }
+
+        if (selectedTool == SelectionToolType.MOVE_SELECTION) {
+            Text(
+                stringResource(R.string.select_move_hint),
+                color = Color.LightGray,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)
+            )
+        }
+
+        if (selectedTool == SelectionToolType.LASSO || selectedTool == SelectionToolType.POLYGON) {
+            // Magnetic Edge Snap toggle (points snap live to nearby edges while drawing)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -234,6 +291,12 @@ fun SelectionPanel(
         }
 
         if (selectedTool == SelectionToolType.MAGIC_WAND) {
+            Text(
+                stringResource(R.string.select_wand_drag_hint),
+                color = Color.LightGray,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)
+            )
             SelectionSlider(
                 label = stringResource(R.string.select_tolerance),
                 valueLabel = tolerance.toString(),
@@ -286,23 +349,39 @@ fun SelectionPanel(
 
         AnimatedVisibility(showRefine) {
             Column {
-                SelectionSlider(
-                    label = stringResource(R.string.select_edge_radius),
-                    valueLabel = "${edge.toInt()} px",
-                    value = edge,
-                    valueRange = 1f..24f,
-                    onValueChange = { edge = it }
-                )
+                // Pick the operation, then drag the slider: the selection updates live and the whole
+                // drag becomes a single undo step when released.
                 Row(
                     Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    RefineButton(stringResource(R.string.select_feather)) { onFeatherClick(edge) }
-                    RefineButton(stringResource(R.string.select_grow)) { onGrowClick(edge.toInt()) }
-                    RefineButton(stringResource(R.string.select_shrink)) { onShrinkClick(edge.toInt()) }
-                    RefineButton(stringResource(R.string.select_smooth)) { onSmoothClick(edge.toInt().coerceAtMost(12)) }
+                    val ops = listOf(
+                        com.example.ui.viewmodel.SelectionModifierOp.FEATHER to R.string.select_feather,
+                        com.example.ui.viewmodel.SelectionModifierOp.GROW to R.string.select_grow,
+                        com.example.ui.viewmodel.SelectionModifierOp.SHRINK to R.string.select_shrink,
+                        com.example.ui.viewmodel.SelectionModifierOp.SMOOTH to R.string.select_smooth
+                    )
+                    ops.forEach { (op, label) ->
+                        FilterChip(
+                            selected = modifierOp == op,
+                            onClick = {
+                                // Switching the operation restarts from the current selection.
+                                onModifierCommit()
+                                onModifierPreview(op, 0f)
+                            },
+                            label = { Text(stringResource(label), fontSize = 12.sp) }
+                        )
+                    }
                     RefineButton(stringResource(R.string.select_refine), onRefineClick)
                 }
+                SelectionSlider(
+                    label = stringResource(R.string.select_edge_radius),
+                    valueLabel = "${modifierAmount.toInt()} px",
+                    value = modifierAmount,
+                    valueRange = 0f..if (modifierOp == com.example.ui.viewmodel.SelectionModifierOp.SMOOTH) 12f else 50f,
+                    onValueChange = { onModifierPreview(modifierOp, it) },
+                    onValueChangeFinished = onModifierCommit
+                )
             }
         }
 
@@ -312,6 +391,12 @@ fun SelectionPanel(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            FilterChip(
+                selected = isQuickMaskView,
+                onClick = onToggleQuickMask,
+                label = { Text(stringResource(R.string.select_quick_mask_view), fontSize = 12.sp) },
+                modifier = Modifier.heightIn(min = 44.dp).testTag("chip_quick_mask")
+            )
             OutlinedButton(onClick = onSelectAllClick, modifier = Modifier.heightIn(min = 44.dp)) { Text(stringResource(R.string.select_all), fontSize = 12.sp) }
             OutlinedButton(onClick = onInvertClick, modifier = Modifier.heightIn(min = 44.dp)) { Text(stringResource(R.string.select_invert), fontSize = 12.sp) }
             OutlinedButton(onClick = onClearClick, modifier = Modifier.heightIn(min = 44.dp)) { Text(stringResource(R.string.select_clear), fontSize = 12.sp) }
@@ -353,14 +438,15 @@ private fun SelectionSlider(
     valueLabel: String,
     value: Float,
     valueRange: ClosedFloatingPointRange<Float>,
-    onValueChange: (Float) -> Unit
+    onValueChange: (Float) -> Unit,
+    onValueChangeFinished: (() -> Unit)? = null
 ) {
     Column(Modifier.padding(horizontal = 14.dp, vertical = 2.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(label, color = Color.White, fontSize = 12.sp)
             Text(valueLabel, color = IndigoPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
         }
-        Slider(value = value, onValueChange = onValueChange, valueRange = valueRange)
+        Slider(value = value, onValueChange = onValueChange, valueRange = valueRange, onValueChangeFinished = onValueChangeFinished)
     }
 }
 

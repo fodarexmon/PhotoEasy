@@ -261,7 +261,7 @@ fun CurvesView(
             val pt = selectedPointIndex?.let { currentPoints.getOrNull(it) }
             if (pt != null) {
                 Text(
-                    text = "In: ${pt.x.toInt()}  |  Out: ${pt.y.toInt()}",
+                    text = stringResource(R.string.curves_point_in_out, pt.x.toInt(), pt.y.toInt()),
                     color = selectedChannel.color,
                     fontWeight = FontWeight.Bold,
                     fontSize = 12.sp

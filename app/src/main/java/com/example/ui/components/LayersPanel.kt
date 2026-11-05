@@ -341,6 +341,7 @@ fun LayersPanel(
                         Slider(
                             value = selectedLayer.maskDensity,
                             onValueChange = { onMaskDensityChange?.invoke(it) },
+                            onValueChangeFinished = { onOpacityCommit?.invoke() },
                             valueRange = 0f..1f,
                             modifier = Modifier.height(28.dp).testTag("slider_mask_density")
                         )
@@ -357,6 +358,7 @@ fun LayersPanel(
                         Slider(
                             value = selectedLayer.maskFeather,
                             onValueChange = { onMaskFeatherChange?.invoke(it) },
+                            onValueChangeFinished = { onOpacityCommit?.invoke() },
                             valueRange = 0f..30f,
                             modifier = Modifier.height(28.dp).testTag("slider_mask_feather")
                         )
@@ -395,6 +397,22 @@ fun LayersPanel(
                                     Text(stringResource(R.string.action_done), fontSize = 11.sp)
                                 }
                             }
+
+                            // Brush size used when painting the mask on the canvas
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(stringResource(R.string.layer_mask_brush_size), color = Color.White, fontSize = 11.sp)
+                                Text("${maskBrushSizeDp.toInt()} dp", color = IndigoPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                            Slider(
+                                value = maskBrushSizeDp,
+                                onValueChange = { onMaskBrushSizeChange?.invoke(it) },
+                                valueRange = 2f..120f,
+                                modifier = Modifier.height(28.dp).testTag("slider_mask_brush_size")
+                            )
                         }
                     }
                 }
@@ -445,7 +463,7 @@ fun LayersPanel(
                         Spacer(Modifier.width(4.dp))
                         Icon(
                             Icons.Default.Link,
-                            contentDescription = "Linked",
+                            contentDescription = stringResource(R.string.cd_mask_linked),
                             tint = Color.Gray,
                             modifier = Modifier.size(12.dp)
                         )

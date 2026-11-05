@@ -275,41 +275,6 @@ object ImageProcessor {
         }
     }
 
-    /**
-     * Decodes a stored original full-resolution asset file taking EXIF into account.
-     */
-    fun decodeFileWithExifFullRes(file: File): Bitmap? {
-        if (!file.exists()) return null
-        return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                try {
-                    val source = ImageDecoder.createSource(file)
-                    val decoded = ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
-                        decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                    }
-                    if (!decoded.isMutable) {
-                        val copy = decoded.copy(Bitmap.Config.ARGB_8888, true)
-                        if (copy != null && copy !== decoded) decoded.recycle()
-                        copy ?: decoded
-                    } else decoded
-                } catch (e: Exception) {
-                    val exif = ExifInterface(file.absolutePath)
-                    val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
-                    val raw = BitmapFactory.decodeFile(file.absolutePath) ?: return null
-                    applyExifMatrix(raw, orientation)
-                }
-            } else {
-                val exif = ExifInterface(file.absolutePath)
-                val orientation = exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
-                val raw = BitmapFactory.decodeFile(file.absolutePath) ?: return null
-                applyExifMatrix(raw, orientation)
-            }
-        } catch (e: Exception) {
-            Log.e("ImageProcessor", "decodeFileWithExifFullRes error: ${e.message}")
-            null
-        }
-    }
-
     fun decodeFileWithExifSampled(file: File, maxDim: Int): Bitmap? {
         if (!file.exists()) return null
         val safeMax = maxDim.coerceIn(64, 4096)
@@ -695,14 +660,6 @@ object ImageProcessor {
             shadows = 16f,
             sharpness = 15f
         )
-    }
-
-    /**
-     * Smart Auto Correction: Automatically computes auto-contrast, white balance and clarity!
-     */
-    fun smartAutoFix(source: Bitmap): Bitmap {
-        val autoAdj = computeSmartAutoAdjustments(source)
-        return applyAdjustments(source, autoAdj)
     }
 
     /**
@@ -1515,9 +1472,9 @@ object ImageProcessor {
     }
 
     /**
-     * Advanced Inpainting Algorithm:
-     * Supports AI Exemplar Patch Synthesis (Criminisi) for realistic texture preservation
-     * or Fast Marching (Telea), with Smart Edge Snapping and Seamless Poisson Blending.
+     * Content-aware object removal (see [InpaintEngine]): multi-scale PatchMatch completion or
+     * Telea fast marching. [radiusPx] is the fast-marching sampling radius; [featherPx] is the width
+     * of the seamless cross-fade ring around the removed area.
      */
     fun inpaintObjectRemoval(
         source: Bitmap,
@@ -1529,334 +1486,15 @@ object ImageProcessor {
         seamlessBlend: Boolean = true
     ): Bitmap {
         require(source.width == maskBitmap.width && source.height == maskBitmap.height) { "Mask size must match source" }
-        return InpaintEngine.inpaint(source, maskBitmap, mode, smartEdgeSnap, seamlessBlend)
-    }
-
-    private fun inpaintObjectRemovalFallback(source: Bitmap, maskBitmap: Bitmap): Bitmap {
-        val width = source.width
-        val height = source.height
-
-        val sourcePixels = IntArray(width * height)
-        val maskPixels = IntArray(width * height)
-        source.getPixels(sourcePixels, 0, width, 0, 0, width, height)
-        maskBitmap.getPixels(maskPixels, 0, width, 0, 0, width, height)
-
-        // Find bounding box of masked pixels for sub-region performance optimization
-        var minX = width
-        var maxX = -1
-        var minY = height
-        var maxY = -1
-
-        for (y in 0 until height) {
-            val row = y * width
-            for (x in 0 until width) {
-                val mp = maskPixels[row + x]
-                val a = (mp ushr 24) and 0xFF
-                if (a > 10 || (mp and 0x00FFFFFF) > 0x00202020) {
-                    if (x < minX) minX = x
-                    if (x > maxX) maxX = x
-                    if (y < minY) minY = y
-                    if (y > maxY) maxY = y
-                }
-            }
-        }
-
-        if (maxX < minX || maxY < minY) return source // No mask present
-
-        // Expand bounding box by margin
-        val margin = 16
-        val cropX0 = (minX - margin).coerceIn(0, width - 1)
-        val cropY0 = (minY - margin).coerceIn(0, height - 1)
-        val cropX1 = (maxX + margin).coerceIn(0, width - 1)
-        val cropY1 = (maxY + margin).coerceIn(0, height - 1)
-        val cropW = cropX1 - cropX0 + 1
-        val cropH = cropY1 - cropY0 + 1
-
-        val totalArea = cropW * cropH
-        val flag = ByteArray(totalArea) // 0 = KNOWN, 1 = BAND, 2 = INSIDE
-        val dist = FloatArray(totalArea)
-        val red = FloatArray(totalArea)
-        val green = FloatArray(totalArea)
-        val blue = FloatArray(totalArea)
-
-        val KNOWN: Byte = 0
-        val BAND: Byte = 1
-        val INSIDE: Byte = 2
-
-        // Extract binary mask and apply 2-pixel dilation to capture object fringe and edge halos
-        val rawMask = BooleanArray(totalArea)
-        for (cy in 0 until cropH) {
-            val sy = cropY0 + cy
-            val sRow = sy * width
-            val cRow = cy * cropW
-
-            for (cx in 0 until cropW) {
-                val sx = cropX0 + cx
-                val sIdx = sRow + sx
-                val cIdx = cRow + cx
-
-                val mp = maskPixels[sIdx]
-                val a = (mp ushr 24) and 0xFF
-                val isMasked = a > 10 || (mp and 0x00FFFFFF) > 0x00202020
-                rawMask[cIdx] = isMasked
-
-                val p = sourcePixels[sIdx]
-                if (!isMasked) {
-                    red[cIdx] = ((p ushr 16) and 0xFF).toFloat()
-                    green[cIdx] = ((p ushr 8) and 0xFF).toFloat()
-                    blue[cIdx] = (p and 0xFF).toFloat()
-                } else {
-                    red[cIdx] = 0f
-                    green[cIdx] = 0f
-                    blue[cIdx] = 0f
-                }
-            }
-        }
-
-        val dilatedMask = BooleanArray(totalArea)
-        val dilationRadius = 2
-        for (cy in 0 until cropH) {
-            val cRow = cy * cropW
-            for (cx in 0 until cropW) {
-                val cIdx = cRow + cx
-                if (rawMask[cIdx]) {
-                    dilatedMask[cIdx] = true
-                    for (dy in -dilationRadius..dilationRadius) {
-                        val ny = cy + dy
-                        if (ny in 0 until cropH) {
-                            val nRow = ny * cropW
-                            for (dx in -dilationRadius..dilationRadius) {
-                                val nx = cx + dx
-                                if (nx in 0 until cropW && (dx * dx + dy * dy <= dilationRadius * dilationRadius)) {
-                                    dilatedMask[nRow + nx] = true
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        for (cIdx in 0 until totalArea) {
-            if (dilatedMask[cIdx]) {
-                flag[cIdx] = INSIDE
-                dist[cIdx] = 1e9f
-            } else {
-                flag[cIdx] = KNOWN
-                dist[cIdx] = 0f
-            }
-        }
-
-        // Priority queue for Fast Marching
-        val narrowBand = java.util.PriorityQueue<Int>(1024) { a, b ->
-            dist[a].compareTo(dist[b])
-        }
-
-        // Find initial BAND pixels
-        val dx4 = intArrayOf(1, -1, 0, 0)
-        val dy4 = intArrayOf(0, 0, 1, -1)
-
-        for (cy in 0 until cropH) {
-            val cRow = cy * cropW
-            for (cx in 0 until cropW) {
-                val cIdx = cRow + cx
-                if (flag[cIdx] == INSIDE) {
-                    var isNeighborKnown = false
-                    for (k in 0 until 4) {
-                        val nx = cx + dx4[k]
-                        val ny = cy + dy4[k]
-                        if (nx in 0 until cropW && ny in 0 until cropH) {
-                            if (flag[ny * cropW + nx] == KNOWN) {
-                                isNeighborKnown = true
-                                break
-                            }
-                        }
-                    }
-                    if (isNeighborKnown) {
-                        flag[cIdx] = BAND
-                        dist[cIdx] = 1f
-                        narrowBand.add(cIdx)
-                    }
-                }
-            }
-        }
-
-        // Inpainting neighborhood search radius
-        val radius = 5
-        val maxDist = radius.toFloat()
-
-        // Marching loop
-        while (!narrowBand.isEmpty()) {
-            val p = narrowBand.poll() ?: break
-            if (flag[p] == KNOWN) continue // Lazy update skip
-
-            flag[p] = KNOWN
-            val px = p % cropW
-            val py = p / cropW
-
-            // Compute color for p using Telea's weighting formula
-            var sumR = 0f
-            var sumG = 0f
-            var sumB = 0f
-            var sumW = 0f
-
-            // Distance gradient at p
-            var gradTx = 0f
-            var gradTy = 0f
-
-            val rightP = if (px < cropW - 1) p + 1 else p
-            val leftP = if (px > 0) p - 1 else p
-            val downP = if (py < cropH - 1) p + cropW else p
-            val upP = if (py > 0) p - cropW else p
-
-            if (flag[rightP] == KNOWN && flag[leftP] == KNOWN) gradTx = (dist[rightP] - dist[leftP]) / 2f
-            else if (flag[rightP] == KNOWN) gradTx = dist[rightP] - dist[p]
-            else if (flag[leftP] == KNOWN) gradTx = dist[p] - dist[leftP]
-
-            if (flag[downP] == KNOWN && flag[upP] == KNOWN) gradTy = (dist[downP] - dist[upP]) / 2f
-            else if (flag[downP] == KNOWN) gradTy = dist[downP] - dist[p]
-            else if (flag[upP] == KNOWN) gradTy = dist[p] - dist[upP]
-
-            val gradTNorm = sqrt(gradTx * gradTx + gradTy * gradTy)
-
-            for (dy in -radius..radius) {
-                val qy = py + dy
-                if (qy !in 0 until cropH) continue
-                val qRow = qy * cropW
-
-                for (dx in -radius..radius) {
-                    if (dx == 0 && dy == 0) continue
-                    val qx = px + dx
-                    if (qx !in 0 until cropW) continue
-
-                    val q = qRow + qx
-                    if (flag[q] == KNOWN) {
-                        val d = sqrt((dx * dx + dy * dy).toFloat())
-                        if (d > maxDist || d < 0.1f) continue
-
-                        // Directional weight wDir
-                        val dir = if (gradTNorm > 1e-5f) {
-                            abs(dx * gradTx + dy * gradTy) / (d * gradTNorm)
-                        } else 1.0f
-
-                        // Distance weight wDst
-                        val wDst = 1.0f / (d * d)
-
-                        // Level set weight wLev
-                        val wLev = 1.0f / (1.0f + abs(dist[p] - dist[q]))
-
-                        val w = dir * wDst * wLev + 1e-6f
-
-                        val estR = red[q]
-                        val estG = green[q]
-                        val estB = blue[q]
-
-                        sumR += estR * w
-                        sumG += estG * w
-                        sumB += estB * w
-                        sumW += w
-                    }
-                }
-            }
-
-            if (sumW > 0f) {
-                red[p] = sumR / sumW
-                green[p] = sumG / sumW
-                blue[p] = sumB / sumW
-            }
-
-            // Update 4-neighbors
-            for (k in 0 until 4) {
-                val nx = px + dx4[k]
-                val ny = py + dy4[k]
-                if (nx in 0 until cropW && ny in 0 until cropH) {
-                    val n = ny * cropW + nx
-                    if (flag[n] != KNOWN) {
-                        val newDist = solveEikonal(nx, ny, dist, flag, cropW, cropH, KNOWN)
-                        if (flag[n] == INSIDE) {
-                            flag[n] = BAND
-                            dist[n] = newDist
-                            narrowBand.add(n)
-                        } else if (flag[n] == BAND && newDist < dist[n]) {
-                            dist[n] = newDist
-                            narrowBand.add(n) // Lazy update
-                        }
-                    }
-                }
-            }
-        }
-
-        // Write back inpainted pixels to result bitmap
-        val result = source.copy(Bitmap.Config.ARGB_8888, true)
-        val resultPixels = sourcePixels.clone()
-
-        for (cy in 0 until cropH) {
-            val sy = cropY0 + cy
-            val sRow = sy * width
-            val cRow = cy * cropW
-
-            for (cx in 0 until cropW) {
-                val cIdx = cRow + cx
-                // Only touch pixels that were part of the inpaint region! Leave known pixels 100% pristine!
-                if (!dilatedMask[cIdx]) continue
-
-                val sx = cropX0 + cx
-                val sIdx = sRow + sx
-
-                val r = red[cIdx].toInt().coerceIn(0, 255)
-                val g = green[cIdx].toInt().coerceIn(0, 255)
-                val b = blue[cIdx].toInt().coerceIn(0, 255)
-
-                if (!rawMask[cIdx]) {
-                    // Outer 2-pixel dilation margin: blend 50/50 with original background for seamless transition
-                    val orig = sourcePixels[sIdx]
-                    val origR = (orig ushr 16) and 0xFF
-                    val origG = (orig ushr 8) and 0xFF
-                    val origB = orig and 0xFF
-                    val blendR = ((r + origR) shr 1)
-                    val blendG = ((g + origG) shr 1)
-                    val blendB = ((b + origB) shr 1)
-                    resultPixels[sIdx] = (0xFF shl 24) or (blendR shl 16) or (blendG shl 8) or blendB
-                } else {
-                    resultPixels[sIdx] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
-                }
-            }
-        }
-
-        result.setPixels(resultPixels, 0, width, 0, 0, width, height)
-        return result
-    }
-
-    private fun solveEikonal(
-        x: Int,
-        y: Int,
-        dist: FloatArray,
-        flag: ByteArray,
-        width: Int,
-        height: Int,
-        KNOWN: Byte
-    ): Float {
-        var tx = 1e9f
-        if (x > 0 && flag[y * width + (x - 1)] == KNOWN) tx = min(tx, dist[y * width + (x - 1)])
-        if (x < width - 1 && flag[y * width + (x + 1)] == KNOWN) tx = min(tx, dist[y * width + (x + 1)])
-
-        var ty = 1e9f
-        if (y > 0 && flag[(y - 1) * width + x] == KNOWN) ty = min(ty, dist[(y - 1) * width + x])
-        if (y < height - 1 && flag[(y + 1) * width + x] == KNOWN) ty = min(ty, dist[(y + 1) * width + x])
-
-        if (tx < 1e8f && ty < 1e8f) {
-            val d = abs(tx - ty)
-            return if (d < 1.0f) {
-                (tx + ty + sqrt(2.0f - d * d)) / 2.0f
-            } else {
-                min(tx, ty) + 1.0f
-            }
-        } else if (tx < 1e8f) {
-            return tx + 1.0f
-        } else if (ty < 1e8f) {
-            return ty + 1.0f
-        }
-        return 1e9f
+        return InpaintEngine.inpaint(
+            source = source,
+            maskBitmap = maskBitmap,
+            mode = mode,
+            smartEdgeSnap = smartEdgeSnap,
+            seamlessBlend = seamlessBlend,
+            featherPx = featherPx,
+            radiusPx = radiusPx
+        )
     }
 
     private fun applyVignetteEffect(
@@ -2417,6 +2055,23 @@ object ImageProcessor {
     }
 
     /**
+     * Pixel-sized parameters (radii, distances) must shrink with the image for a downscaled preview
+     * to look like the full-resolution result. [ratio] = previewSize / fullSize (<= 1).
+     */
+    fun scaleProEffectParams(type: ProFilterType, param1: Float, param2: Float, ratio: Float): Pair<Float, Float> {
+        val r = ratio.coerceIn(0.001f, 1f)
+        return when (type) {
+            ProFilterType.GAUSSIAN_BLUR,
+            ProFilterType.SURFACE_BLUR,
+            ProFilterType.OIL_PAINT,
+            ProFilterType.MOTION_BLUR -> (param1 * r).coerceAtLeast(1f) to param2
+            ProFilterType.SHARPEN -> param1 to (param2 * r).coerceAtLeast(1f)
+            ProFilterType.NOISE_REDUCTION,
+            ProFilterType.RADIAL_BLUR -> param1 to param2
+        }
+    }
+
+    /**
      * Dispatcher for all Pro Blur & Effect filters.
      */
     fun applyProEffect(
@@ -2437,4 +2092,3 @@ object ImageProcessor {
         }
     }
 }
-

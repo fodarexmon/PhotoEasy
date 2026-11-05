@@ -2,6 +2,8 @@ package com.example.ui.components
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -35,7 +37,12 @@ import com.example.ui.theme.StudioSurfaceVariant
 fun RefineEdgeDialog(
     initialConfig: RefineEdgeConfig = RefineEdgeConfig(),
     onDismiss: () -> Unit,
-    onApply: (RefineEdgeConfig) -> Unit
+    onApply: (RefineEdgeConfig) -> Unit,
+    /** Live preview of the refined selection (null while computing / unavailable). */
+    preview: android.graphics.Bitmap? = null,
+    previewMode: com.example.ui.viewmodel.RefinePreviewMode = com.example.ui.viewmodel.RefinePreviewMode.OVERLAY,
+    onPreviewModeChange: (com.example.ui.viewmodel.RefinePreviewMode) -> Unit = {},
+    onRequestPreview: (RefineEdgeConfig) -> Unit = {}
 ) {
     var radiusPx by remember { mutableFloatStateOf(initialConfig.radiusPx.toFloat()) }
     var smartRadius by remember { mutableStateOf(initialConfig.smartRadius) }
@@ -46,6 +53,23 @@ fun RefineEdgeDialog(
     var shiftEdgePercent by remember { mutableFloatStateOf(initialConfig.shiftEdgePercent) }
     var decontaminate by remember { mutableStateOf(initialConfig.decontaminateColors) }
     var decontamAmount by remember { mutableFloatStateOf(initialConfig.decontaminateAmount) }
+
+    fun currentConfig() = RefineEdgeConfig(
+        radiusPx = radiusPx.toInt(),
+        smartRadius = smartRadius,
+        hairRefine = hairRefine,
+        smoothPx = smoothPx.toInt(),
+        featherPx = featherPx,
+        contrastPercent = contrastPercent,
+        shiftEdgePercent = shiftEdgePercent,
+        decontaminateColors = decontaminate,
+        decontaminateAmount = decontamAmount
+    )
+
+    // Every change re-renders the preview (the ViewModel debounces).
+    LaunchedEffect(radiusPx, smartRadius, hairRefine, smoothPx, featherPx, contrastPercent, shiftEdgePercent, decontaminate, decontamAmount, previewMode) {
+        onRequestPreview(currentConfig())
+    }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -87,6 +111,46 @@ fun RefineEdgeDialog(
                 }
 
                 Spacer(Modifier.height(8.dp))
+
+                // Live preview of the selected area with the current settings
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(170.dp)
+                        .background(Color.Black.copy(alpha = 0.35f), RoundedCornerShape(12.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (preview != null && !preview.isRecycled) {
+                        androidx.compose.foundation.Image(
+                            bitmap = preview.asImageBitmap(),
+                            contentDescription = stringResource(R.string.refine_preview),
+                            contentScale = androidx.compose.ui.layout.ContentScale.Fit,
+                            modifier = Modifier.fillMaxSize().padding(4.dp)
+                        )
+                    } else {
+                        CircularProgressIndicator(color = IndigoPrimary, modifier = Modifier.size(28.dp))
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    listOf(
+                        com.example.ui.viewmodel.RefinePreviewMode.OVERLAY to R.string.refine_view_overlay,
+                        com.example.ui.viewmodel.RefinePreviewMode.ON_BLACK to R.string.refine_view_black,
+                        com.example.ui.viewmodel.RefinePreviewMode.ON_WHITE to R.string.refine_view_white,
+                        com.example.ui.viewmodel.RefinePreviewMode.MASK to R.string.refine_view_mask
+                    ).forEach { (mode, label) ->
+                        FilterChip(
+                            selected = previewMode == mode,
+                            onClick = { onPreviewModeChange(mode) },
+                            label = { Text(stringResource(label), fontSize = 11.sp) }
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(6.dp))
 
                 // Scrollable Controls
                 Column(
@@ -162,7 +226,7 @@ fun RefineEdgeDialog(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text("صقل الحواف (Global Adjustments)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            Text(stringResource(R.string.refine_global_adjustments), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
 
                             // Smooth
                             RefineSliderItem(
@@ -227,7 +291,7 @@ fun RefineEdgeDialog(
 
                             if (decontaminate) {
                                 RefineSliderItem(
-                                    label = "مقدار إزالة الهالات",
+                                    label = stringResource(R.string.refine_decontaminate_amount),
                                     valueLabel = "${(decontamAmount * 100).toInt()}%",
                                     value = decontamAmount,
                                     range = 0.1f..1.0f,
@@ -252,20 +316,7 @@ fun RefineEdgeDialog(
                         Text(stringResource(R.string.action_cancel), fontSize = 12.sp)
                     }
                     Button(
-                        onClick = {
-                            val config = RefineEdgeConfig(
-                                radiusPx = radiusPx.toInt(),
-                                smartRadius = smartRadius,
-                                hairRefine = hairRefine,
-                                smoothPx = smoothPx.toInt(),
-                                featherPx = featherPx,
-                                contrastPercent = contrastPercent,
-                                shiftEdgePercent = shiftEdgePercent,
-                                decontaminateColors = decontaminate,
-                                decontaminateAmount = decontamAmount
-                            )
-                            onApply(config)
-                        },
+                        onClick = { onApply(currentConfig()) },
                         colors = ButtonDefaults.buttonColors(containerColor = IndigoPrimary),
                         modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("btn_apply_refine_edge")
                     ) {

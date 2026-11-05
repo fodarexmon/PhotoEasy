@@ -17,6 +17,7 @@ import com.example.engine.LayerRenderer
 import com.example.engine.SelectionEngine
 import com.example.util.CanvasValidation
 import com.example.ui.viewmodel.ActiveTool
+import kotlin.math.abs
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
@@ -47,6 +48,54 @@ class PhotoEasyRobolectricTest {
     fun `context reads correct application name`() {
         val appName = context.getString(R.string.app_name)
         assertEquals("PhotoEasy", appName)
+    }
+
+    // Real pixel encode/decode is needed to verify the mask contents survive a save.
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun `round trip persists curves hsl filter intensity text effects and an editable mask`() = runBlocking {
+        val project = Project(id = "test_proj_persist", name = "Persist", width = 100, height = 100)
+        val curve = listOf(android.graphics.PointF(0f, 0f), android.graphics.PointF(128f, 160f), android.graphics.PointF(255f, 255f))
+        val mask = Bitmap.createBitmap(100, 100, Bitmap.Config.ALPHA_8)
+        android.graphics.Canvas(mask).drawRect(0f, 0f, 50f, 100f, android.graphics.Paint().apply { color = Color.WHITE })
+        val layer = Layer(
+            id = "layer_persist",
+            name = "Img",
+            type = LayerType.IMAGE,
+            bitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) },
+            maskBitmap = mask,
+            maskDensity = 0.6f,
+            maskFeather = 4f,
+            filter = FilterType.SEPIA,
+            filterIntensity = 0.4f,
+            adjustments = ColorAdjustments(curvesRgb = curve, hueShift = 30f, hslLightness = -10f, replaceColorEnabled = true, replaceTargetHue = 200f),
+            textConfig = TextLayerConfig(shadowDxDp = 9f, shadowDyDp = -3f, outerGlowRadiusDp = 5f, outerGlowColorHex = 0xFF112233.toInt())
+        )
+        project.layers.add(layer)
+        assertTrue(repository.saveProject(project))
+
+        val loaded = repository.getProjectById("test_proj_persist")!!.layers[0]
+        assertEquals(0.4f, loaded.filterIntensity, 0.001f)
+        assertEquals(0.6f, loaded.maskDensity, 0.001f)
+        assertEquals(4f, loaded.maskFeather, 0.001f)
+        assertEquals(3, loaded.adjustments.curvesRgb.size)
+        assertEquals(160f, loaded.adjustments.curvesRgb[1].y, 0.001f)
+        assertEquals(30f, loaded.adjustments.hueShift, 0.001f)
+        assertEquals(-10f, loaded.adjustments.hslLightness, 0.001f)
+        assertTrue(loaded.adjustments.replaceColorEnabled)
+        assertEquals(200f, loaded.adjustments.replaceTargetHue, 0.001f)
+        assertEquals(9f, loaded.textConfig.shadowDxDp, 0.001f)
+        assertEquals(-3f, loaded.textConfig.shadowDyDp, 0.001f)
+        assertEquals(5f, loaded.textConfig.outerGlowRadiusDp, 0.001f)
+        assertEquals(0xFF112233.toInt(), loaded.textConfig.outerGlowColorHex)
+
+        val loadedMask = loaded.maskBitmap!!
+        assertTrue("Reloaded mask must be editable", loadedMask.isMutable)
+        assertEquals(Bitmap.Config.ALPHA_8, loadedMask.config)
+        assertTrue(((loadedMask.getPixel(10, 50) ushr 24) and 0xFF) > 200)
+        assertEquals(0, (loadedMask.getPixel(90, 50) ushr 24) and 0xFF)
+        // Must not throw "Immutable bitmap passed to Canvas constructor"
+        android.graphics.Canvas(loadedMask).drawColor(Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR)
     }
 
     @Test
@@ -531,6 +580,139 @@ class PhotoEasyRobolectricTest {
         assertNotNull(context.getString(R.string.compare_after))
         assertNotNull(context.getString(R.string.compare_split_mode))
         assertNotNull(context.getString(R.string.compare_this_adjustment))
+    }
+
+    /** Builds an ARGB image from a colour function and an ALPHA_8 mask from a predicate. */
+    private fun scene(w: Int, h: Int, color: (Int, Int) -> Int, selected: (Int, Int) -> Boolean): Pair<Bitmap, Bitmap> {
+        val img = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val mask = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
+        val px = IntArray(w * h)
+        val mk = IntArray(w * h)
+        for (y in 0 until h) for (x in 0 until w) {
+            px[y * w + x] = color(x, y)
+            mk[y * w + x] = if (selected(x, y)) (255 shl 24) else 0
+        }
+        img.setPixels(px, 0, w, 0, 0, w, h)
+        mask.setPixels(mk, 0, w, 0, 0, w, h)
+        return img to mask
+    }
+
+    private fun alphaAt(b: Bitmap, x: Int, y: Int) = (b.getPixel(x, y) ushr 24) and 0xFF
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun `refine edge finds a soft horizontal edge the rough selection missed`() {
+        // Red subject below y = 20, a 50% red/blue mixed row at y = 20, blue above.
+        // The rough selection starts 2 rows too high (y >= 18).
+        val red = Color.rgb(220, 30, 30)
+        val blue = Color.rgb(30, 60, 220)
+        val mixed = Color.rgb(125, 45, 125)
+        val (img, mask) = scene(64, 64, { _, y -> when { y < 20 -> blue; y == 20 -> mixed; else -> red } }, { _, y -> y >= 18 })
+        val cfg = com.example.engine.RefineEdgeConfig(radiusPx = 6, smartRadius = false, smoothPx = 0, contrastPercent = 0f)
+        val result = com.example.engine.RefineEdgeEngine.refineEdges(img, mask, cfg).refinedMask
+        assertTrue("background above the edge must be dropped (was ${alphaAt(result, 32, 18)})", alphaAt(result, 32, 18) < 60)
+        val edge = alphaAt(result, 32, 20)
+        assertTrue("mixed edge row should be partial (was $edge)", edge in 70..190)
+        assertTrue("subject below must stay selected (was ${alphaAt(result, 32, 24)})", alphaAt(result, 32, 24) > 200)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun `refine edge recovers a thin hair strand outside the rough selection`() {
+        val red = Color.rgb(200, 40, 40)
+        val blue = Color.rgb(40, 70, 210)
+        // Subject block for y >= 40, one-pixel "hair" at x = 30 from y = 28 to 39; the selection only covers the block.
+        val (img, mask) = scene(64, 64, { x, y -> if (y >= 40 || (x == 30 && y in 28..39)) red else blue }, { _, y -> y >= 40 })
+        val cfg = com.example.engine.RefineEdgeConfig(radiusPx = 14, smartRadius = false, hairRefine = true, smoothPx = 0, contrastPercent = 0f)
+        val result = com.example.engine.RefineEdgeEngine.refineEdges(img, mask, cfg).refinedMask
+        assertTrue("hair strand pixel should be selected (was ${alphaAt(result, 30, 33)})", alphaAt(result, 30, 33) > 150)
+        assertTrue("background next to the strand should not (was ${alphaAt(result, 35, 33)})", alphaAt(result, 35, 33) < 80)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun `decontamination keeps the layer transparency`() {
+        val red = Color.argb(128, 220, 30, 30)
+        val blue = Color.argb(128, 30, 60, 220)
+        val mixed = Color.argb(128, 125, 45, 125)
+        val (img, mask) = scene(48, 48, { _, y -> when { y < 20 -> blue; y == 20 -> mixed; else -> red } }, { _, y -> y >= 19 })
+        val cfg = com.example.engine.RefineEdgeConfig(radiusPx = 5, smartRadius = false, smoothPx = 0, contrastPercent = 0f, decontaminateColors = true, decontaminateAmount = 1f)
+        val out = com.example.engine.RefineEdgeEngine.refineEdges(img, mask, cfg).decontaminatedSource!!
+        assertEquals(128, (out.getPixel(24, 20) ushr 24) and 0xFF)
+        // The edge colour moves towards the subject colour (less blue).
+        assertTrue(Color.blue(out.getPixel(24, 20)) < Color.blue(mixed))
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun `selection history keeps many compressed steps and restores them exactly`() {
+        val history = com.example.engine.SelectionHistory(maxEntries = 30)
+        val w = 120
+        val h = 80
+        fun maskWithBar(x0: Int): Bitmap {
+            val m = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
+            val px = IntArray(w * h) { i -> if (i % w in x0 until x0 + 10) (255 shl 24) else 0 }
+            m.setPixels(px, 0, w, 0, 0, w, h)
+            return m
+        }
+        // 20 steps: bar moves right each time.
+        for (step in 0 until 20) history.push(maskWithBar(step * 5))
+        assertTrue(history.canUndo)
+        var current = maskWithBar(100)
+        for (step in 19 downTo 0) {
+            current = history.undo(current)!!
+            assertEquals("step $step left edge", 255, (current.getPixel(step * 5, 10) ushr 24) and 0xFF)
+            assertEquals("step $step outside", 0, (current.getPixel((step * 5 + 15) % w, 10) ushr 24) and 0xFF)
+        }
+        assertFalse(history.canUndo)
+        assertTrue(history.canRedo)
+        val redone = history.redo(current)!!
+        assertEquals(255, (redone.getPixel(5, 10) ushr 24) and 0xFF)
+    }
+
+    private fun redSquareScene(width: Int, height: Int, background: (Int, Int) -> Int, x0: Int, y0: Int, x1: Int, y1: Int): Pair<Bitmap, Bitmap> {
+        val src = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val mask = Bitmap.createBitmap(width, height, Bitmap.Config.ALPHA_8)
+        val px = IntArray(width * height)
+        val mk = IntArray(width * height)
+        for (y in 0 until height) for (x in 0 until width) {
+            val inside = x in x0..x1 && y in y0..y1
+            px[y * width + x] = if (inside) Color.RED else background(x, y)
+            mk[y * width + x] = if (inside) (255 shl 24) else 0
+        }
+        src.setPixels(px, 0, width, 0, 0, width, height)
+        mask.setPixels(mk, 0, width, 0, 0, width, height)
+        return src to mask
+    }
+
+    @Test
+    fun `fast marching removal does not leave a black blob`() {
+        val (src, mask) = redSquareScene(60, 60, { _, _ -> Color.BLUE }, 22, 22, 37, 37)
+        val result = com.example.engine.InpaintEngine.inpaint(src, mask, com.example.engine.InpaintEngineMode.FAST_MARCHING)
+        val c = result.getPixel(30, 30)
+        assertTrue("Center must be blue, was ${Integer.toHexString(c)}", Color.blue(c) > 200 && Color.red(c) < 40)
+    }
+
+    @Test
+    fun `patch synthesis rebuilds surrounding texture instead of a colored blob`() {
+        // Vertical black/white stripes, 4px wide, with a red object in the middle.
+        val (src, mask) = redSquareScene(80, 80, { x, _ -> if ((x / 4) % 2 == 0) Color.BLACK else Color.WHITE }, 30, 30, 49, 49)
+        val result = com.example.engine.InpaintEngine.inpaint(src, mask, com.example.engine.InpaintEngineMode.AI_PATCH_SYNTHESIS)
+        for (y in 32..47 step 5) for (x in 32..47 step 5) {
+            val c = result.getPixel(x, y)
+            // Neutral (black / white / grey) — no red left from the object.
+            assertTrue("Pixel ($x,$y) still reddish: ${Integer.toHexString(c)}", abs(Color.red(c) - Color.green(c)) < 40 && abs(Color.green(c) - Color.blue(c)) < 40)
+        }
+        // Untouched far away pixels stay exactly the same.
+        assertEquals(src.getPixel(2, 2), result.getPixel(2, 2))
+    }
+
+    @Test
+    fun `patch synthesis also fills an object touching the image border`() {
+        val (src, mask) = redSquareScene(64, 64, { _, _ -> Color.GREEN }, 0, 20, 10, 40)
+        val result = com.example.engine.InpaintEngine.inpaint(src, mask, com.example.engine.InpaintEngineMode.AI_PATCH_SYNTHESIS)
+        val c = result.getPixel(0, 30)
+        assertTrue("Border pixel must be green, was ${Integer.toHexString(c)}", Color.green(c) > 200 && Color.red(c) < 40)
     }
 
     @Test

@@ -1,35 +1,44 @@
 package com.example.util
 
+import androidx.annotation.StringRes
+import com.example.R
+
 object CanvasValidation {
     const val MIN_DIMENSION = 64
     const val MAX_DIMENSION = 4096
     const val MAX_MEGAPIXELS = 12.0f // Safe 12 MP (~4000x3000 px) to prevent Android Dalvik OOM heap exhaustion
 
+    /**
+     * [errorResId] + [errorArgs] describe the problem as a localized string resource, so the UI
+     * shows it in the user's language (format with stringResource(errorResId, *errorArgs)).
+     */
     data class ValidationResult(
         val isValid: Boolean,
         val width: Int,
         val height: Int,
-        val errorMessage: String? = null
+        @StringRes val errorResId: Int? = null,
+        val errorArgs: List<Any> = emptyList()
     )
 
     fun validate(widthInput: Int?, heightInput: Int?): ValidationResult {
         if (widthInput == null || heightInput == null) {
-            return ValidationResult(false, 0, 0, "Please enter valid numeric dimensions.")
+            return ValidationResult(false, 0, 0, R.string.canvas_error_numeric)
         }
         if (widthInput < MIN_DIMENSION || heightInput < MIN_DIMENSION) {
-            return ValidationResult(false, widthInput, heightInput, "Minimum canvas dimension is $MIN_DIMENSION px.")
+            return ValidationResult(false, widthInput, heightInput, R.string.canvas_error_min, listOf(MIN_DIMENSION))
         }
         if (widthInput > MAX_DIMENSION || heightInput > MAX_DIMENSION) {
-            return ValidationResult(false, widthInput, heightInput, "Maximum canvas dimension is $MAX_DIMENSION px.")
+            return ValidationResult(false, widthInput, heightInput, R.string.canvas_error_max, listOf(MAX_DIMENSION))
         }
         val megaPixels = (widthInput.toLong() * heightInput.toLong()) / 1_000_000f
         if (megaPixels > MAX_MEGAPIXELS) {
             return ValidationResult(
                 false, widthInput, heightInput,
-                "Canvas exceeds limit of ${MAX_MEGAPIXELS.toInt()} Megapixels ($widthInput x $heightInput = ${String.format("%.1f", megaPixels)} MP)."
+                R.string.canvas_error_megapixels,
+                listOf(MAX_MEGAPIXELS.toInt(), widthInput, heightInput, String.format(java.util.Locale.US, "%.1f", megaPixels))
             )
         }
-        return ValidationResult(true, widthInput, heightInput, null)
+        return ValidationResult(true, widthInput, heightInput)
     }
 
     fun clamp(width: Int, height: Int): Pair<Int, Int> {
