@@ -17,6 +17,12 @@ import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.Texture
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Shield
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -42,7 +48,7 @@ fun InpaintPanel(
     featherPx: Int,
     selectionMode: SelectionMode,
     inpaintSelectionMode: InpaintSelectionMode = InpaintSelectionMode.BRUSH,
-    engineMode: InpaintEngineMode = InpaintEngineMode.AI_PATCH_SYNTHESIS,
+    engineMode: InpaintEngineMode = InpaintEngineMode.SMART,
     smartEdgeSnap: Boolean = true,
     seamlessBlend: Boolean = true,
     canUndoMask: Boolean,
@@ -57,8 +63,15 @@ fun InpaintPanel(
     onClearMask: () -> Unit,
     onUndoMask: () -> Unit,
     onRemoveClick: () -> Unit,
+    isProtectMode: Boolean = false,
+    onToggleProtectMode: () -> Unit = {},
+    hasProtectArea: Boolean = false,
+    onClearProtect: () -> Unit = {},
+    canRetry: Boolean = false,
+    onRetry: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    var showAdvanced by remember { mutableStateOf(engineMode != InpaintEngineMode.SMART) }
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -88,85 +101,90 @@ fun InpaintPanel(
 
         Spacer(Modifier.height(10.dp))
 
-        // 1. Inpaint Algorithm Selector (AI Texture Synthesis vs Fast Marching)
-        Text(
-            stringResource(R.string.inpaint_engine_title),
-            color = Color.White,
-            fontWeight = FontWeight.SemiBold,
-            fontSize = 12.sp
-        )
-        Spacer(Modifier.height(6.dp))
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        // 1. One smart tool; the individual techniques stay available under "Advanced".
+        Surface(
+            color = PinkAccent.copy(alpha = 0.14f),
+            shape = RoundedCornerShape(10.dp),
+            border = BorderStroke(1.dp, PinkAccent.copy(alpha = 0.4f)),
+            modifier = Modifier.fillMaxWidth()
         ) {
-            FilterChip(
-                selected = engineMode == InpaintEngineMode.AI_PATCH_SYNTHESIS,
-                onClick = { onEngineModeChange(InpaintEngineMode.AI_PATCH_SYNTHESIS) },
-                label = {
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = PinkAccent, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
                     Text(
-                        stringResource(R.string.inpaint_engine_ai),
-                        fontSize = 11.sp,
-                        fontWeight = if (engineMode == InpaintEngineMode.AI_PATCH_SYNTHESIS) FontWeight.Bold else FontWeight.Normal
+                        stringResource(if (engineMode == InpaintEngineMode.SMART) R.string.inpaint_engine_smart else if (engineMode == InpaintEngineMode.AI_PATCH_SYNTHESIS) R.string.inpaint_engine_ai else R.string.inpaint_engine_telea),
+                        color = Color.White,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 13.sp,
+                        modifier = Modifier.weight(1f)
                     )
-                },
-                leadingIcon = {
-                    Icon(
-                        Icons.Default.AutoAwesome,
-                        contentDescription = null,
-                        modifier = Modifier.size(14.dp),
-                        tint = if (engineMode == InpaintEngineMode.AI_PATCH_SYNTHESIS) PinkAccent else Color.Gray
+                    TextButton(onClick = { showAdvanced = !showAdvanced }, modifier = Modifier.heightIn(min = 40.dp)) {
+                        Text(stringResource(R.string.inpaint_advanced), fontSize = 11.sp, color = PinkAccent)
+                    }
+                }
+                Text(
+                    stringResource(
+                        when (engineMode) {
+                            InpaintEngineMode.SMART -> R.string.inpaint_engine_desc_smart
+                            InpaintEngineMode.AI_PATCH_SYNTHESIS -> R.string.inpaint_engine_desc_ai
+                            InpaintEngineMode.FAST_MARCHING -> R.string.inpaint_engine_desc_telea
+                        }
+                    ),
+                    color = Color.LightGray,
+                    fontSize = 11.sp
+                )
+            }
+        }
+        if (showAdvanced) {
+            Spacer(Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                listOf(
+                    Triple(InpaintEngineMode.SMART, R.string.inpaint_engine_smart_short, Icons.Default.AutoAwesome),
+                    Triple(InpaintEngineMode.AI_PATCH_SYNTHESIS, R.string.inpaint_engine_texture_short, Icons.Default.Texture),
+                    Triple(InpaintEngineMode.FAST_MARCHING, R.string.inpaint_engine_fast_short, Icons.Default.Speed)
+                ).forEach { (mode, label, icon) ->
+                    FilterChip(
+                        selected = engineMode == mode,
+                        onClick = { onEngineModeChange(mode) },
+                        label = { Text(stringResource(label), fontSize = 11.sp, fontWeight = if (engineMode == mode) FontWeight.Bold else FontWeight.Normal) },
+                        leadingIcon = { Icon(icon, contentDescription = null, modifier = Modifier.size(14.dp)) },
+                        modifier = Modifier.weight(1f).heightIn(min = 44.dp).testTag("chip_inpaint_${mode.name.lowercase()}")
                     )
-                },
-                colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = PinkAccent.copy(alpha = 0.2f),
-                    selectedLabelColor = Color.White
-                ),
-                border = FilterChipDefaults.filterChipBorder(
-                    enabled = true,
-                    selected = engineMode == InpaintEngineMode.AI_PATCH_SYNTHESIS,
-                    borderColor = if (engineMode == InpaintEngineMode.AI_PATCH_SYNTHESIS) PinkAccent else Color.DarkGray
-                ),
-                modifier = Modifier.weight(1f).heightIn(min = 44.dp).testTag("chip_inpaint_ai")
-            )
-
-            FilterChip(
-                selected = engineMode == InpaintEngineMode.FAST_MARCHING,
-                onClick = { onEngineModeChange(InpaintEngineMode.FAST_MARCHING) },
-                label = {
-                    Text(
-                        stringResource(R.string.inpaint_engine_telea),
-                        fontSize = 11.sp
-                    )
-                },
-                leadingIcon = {
-                    Icon(
-                        Icons.Default.Speed,
-                        contentDescription = null,
-                        modifier = Modifier.size(14.dp),
-                        tint = if (engineMode == InpaintEngineMode.FAST_MARCHING) CyanAccent else Color.Gray
-                    )
-                },
-                modifier = Modifier.weight(1f).heightIn(min = 44.dp).testTag("chip_inpaint_telea")
-            )
+                }
+            }
         }
 
-        // Subtitle badge describing the active engine
-        Surface(
-            color = StudioSurfaceVariant,
-            shape = RoundedCornerShape(8.dp),
-            modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+        Spacer(Modifier.height(8.dp))
+
+        // Protected area: paint over things that must not be cloned into the hole.
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
+            FilterChip(
+                selected = isProtectMode,
+                onClick = onToggleProtectMode,
+                label = { Text(stringResource(R.string.inpaint_protect_area), fontSize = 11.sp) },
+                leadingIcon = { Icon(Icons.Default.Shield, contentDescription = null, tint = Color(0xFF22C55E), modifier = Modifier.size(14.dp)) },
+                modifier = Modifier.weight(1f).heightIn(min = 44.dp).testTag("chip_inpaint_protect")
+            )
+            if (hasProtectArea) {
+                TextButton(onClick = onClearProtect, modifier = Modifier.heightIn(min = 44.dp)) {
+                    Text(stringResource(R.string.inpaint_clear_protect), fontSize = 11.sp, color = Color(0xFFEF4444))
+                }
+            }
+        }
+        if (isProtectMode) {
             Text(
-                text = if (engineMode == InpaintEngineMode.AI_PATCH_SYNTHESIS) {
-                    "✨ " + stringResource(R.string.inpaint_engine_desc_ai)
-                } else {
-                    "⚡ " + stringResource(R.string.inpaint_engine_desc_telea)
-                },
-                color = Color.LightGray,
+                stringResource(R.string.inpaint_protect_hint),
+                color = Color(0xFF86EFAC),
                 fontSize = 11.sp,
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                modifier = Modifier.padding(top = 2.dp)
             )
         }
 
@@ -320,6 +338,17 @@ fun InpaintPanel(
             Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(8.dp))
             Text(stringResource(R.string.inpaint_remove_now), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+        }
+        if (canRetry) {
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                onClick = onRetry,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("btn_inpaint_retry")
+            ) {
+                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(stringResource(R.string.inpaint_another_result), fontSize = 13.sp)
+            }
         }
     }
 }

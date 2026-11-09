@@ -31,6 +31,12 @@ class SelectionHistory(
         redoStack.clear()
     }
 
+    /** Drops the redo branch (a document edit happened after the undo). */
+    @Synchronized
+    fun clearRedo() {
+        redoStack.clear()
+    }
+
     /** Records [mask] as the state to return to, and drops the redo branch. */
     fun push(mask: Bitmap) {
         val entry = encode(mask)

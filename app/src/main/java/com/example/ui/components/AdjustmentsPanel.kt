@@ -37,6 +37,8 @@ import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import com.example.ui.theme.CyanAccent
 import kotlin.math.abs
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 
 enum class AdjustmentsTab(val labelRes: Int) {
     BASIC(R.string.adj_tab_basic),
@@ -55,9 +57,31 @@ fun AdjustmentsPanel(
     onCompareChange: (Boolean) -> Unit = {},
     hasActiveSelection: Boolean = false,
     onClearSelection: (() -> Unit)? = null,
+    /** Strength of the last Smart Auto (null hides the strength slider). */
+    smartAutoStrength: Float? = null,
+    onSmartAutoStrengthChange: (Float) -> Unit = {},
+    onSmartAutoStrengthCommit: () -> Unit = {},
+    /** Adds an adjustment layer masked by the selection (adjust only that area). */
+    onCreateAdjustmentLayerFromSelection: (() -> Unit)? = null,
+    /** Image the layer's curves apply to (histogram) and on-image picking for the curves. */
+    sourceBitmap: android.graphics.Bitmap? = null,
+    curvePickMode: CurvePickMode? = null,
+    onCurvePickModeChange: (CurvePickMode?) -> Unit = {},
+    curvePickedSample: CurveSample? = null,
+    onCurveSampleConsumed: () -> Unit = {},
+    replacePickTarget: Pair<Int, Boolean>? = null,
+    hslTargetProperty: String? = null,
+    onHslTargetPropertyChange: (String?) -> Unit = {},
+    onReplacePickChange: (Pair<Int, Boolean>?) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var activeTab by remember { mutableStateOf(AdjustmentsTab.BASIC) }
+    // Picking on the image only makes sense while the curves are shown.
+    LaunchedEffect(activeTab) {
+        if (activeTab != AdjustmentsTab.CURVES) onCurvePickModeChange(null)
+        if (activeTab != AdjustmentsTab.REPLACE) onReplacePickChange(null)
+        if (activeTab != AdjustmentsTab.HSL) onHslTargetPropertyChange(null)
+    }
     val compareInteraction = remember { MutableInteractionSource() }
     val comparingOriginal by compareInteraction.collectIsPressedAsState()
     LaunchedEffect(comparingOriginal) { onCompareChange(comparingOriginal) }
@@ -91,6 +115,15 @@ fun AdjustmentsPanel(
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium
                         )
+                    }
+                    if (onCreateAdjustmentLayerFromSelection != null) {
+                        TextButton(
+                            onClick = onCreateAdjustmentLayerFromSelection,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                            modifier = Modifier.heightIn(min = 36.dp).testTag("btn_adjustment_layer_from_selection")
+                        ) {
+                            Text(stringResource(R.string.adj_layer_from_selection), color = CyanAccent, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
                     }
                     if (onClearSelection != null) {
                         TextButton(
@@ -143,7 +176,8 @@ fun AdjustmentsPanel(
                     adjustments.copy(
                         brightness = 0f, contrast = 0f, saturation = 0f,
                         temperature = 0f, tint = 0f, exposure = 0f,
-                        highlights = 0f, shadows = 0f, sharpness = 0f, vignette = 0f
+                        highlights = 0f, shadows = 0f, sharpness = 0f, vignette = 0f,
+                        whites = 0f, blacks = 0f, vibrance = 0f, clarity = 0f, dehaze = 0f
                     )
                 )
             } else {
@@ -172,7 +206,7 @@ fun AdjustmentsPanel(
         LaunchedEffect(isComparingHsl) {
             if (isComparingHsl) {
                 hslBeforeHold = adjustments
-                onAdjustmentsChange(adjustments.copy(hueShift = 0f, hslSaturation = 0f, hslLightness = 0f))
+                onAdjustmentsChange(adjustments.copy(hueShift = 0f, hslSaturation = 0f, hslLightness = 0f, hslBands = emptyMap(), colorizeEnabled = false))
             } else {
                 hslBeforeHold?.let { onAdjustmentsChange(it) }
                 hslBeforeHold = null
@@ -185,7 +219,7 @@ fun AdjustmentsPanel(
         LaunchedEffect(isComparingReplace) {
             if (isComparingReplace) {
                 replaceBeforeHold = adjustments
-                onAdjustmentsChange(adjustments.copy(replaceColorEnabled = false))
+                onAdjustmentsChange(adjustments.withReplacements(adjustments.effectiveReplacements().map { it.copy(enabled = false) }))
             } else {
                 replaceBeforeHold?.let { onAdjustmentsChange(it) }
                 replaceBeforeHold = null
@@ -231,17 +265,49 @@ fun AdjustmentsPanel(
                     )
                 }
 
-                Spacer(Modifier.height(8.dp))
-                AdjustmentSlider(stringResource(R.string.adj_brightness), adjustments.brightness, onValueChange = { onAdjustmentsChange(adjustments.copy(brightness = it)) }, onValueChangeFinished = onAdjustmentsCommit)
-                AdjustmentSlider(stringResource(R.string.adj_contrast), adjustments.contrast, onValueChange = { onAdjustmentsChange(adjustments.copy(contrast = it)) }, onValueChangeFinished = onAdjustmentsCommit)
-                AdjustmentSlider(stringResource(R.string.adj_saturation), adjustments.saturation, onValueChange = { onAdjustmentsChange(adjustments.copy(saturation = it)) }, onValueChangeFinished = onAdjustmentsCommit)
-                AdjustmentSlider(stringResource(R.string.adj_temperature), adjustments.temperature, onValueChange = { onAdjustmentsChange(adjustments.copy(temperature = it)) }, onValueChangeFinished = onAdjustmentsCommit)
-                AdjustmentSlider(stringResource(R.string.adj_tint), adjustments.tint, onValueChange = { onAdjustmentsChange(adjustments.copy(tint = it)) }, onValueChangeFinished = onAdjustmentsCommit)
-                AdjustmentSlider(stringResource(R.string.adj_exposure), adjustments.exposure, onValueChange = { onAdjustmentsChange(adjustments.copy(exposure = it)) }, onValueChangeFinished = onAdjustmentsCommit)
-                AdjustmentSlider(stringResource(R.string.adj_highlights), adjustments.highlights, onValueChange = { onAdjustmentsChange(adjustments.copy(highlights = it)) }, onValueChangeFinished = onAdjustmentsCommit)
-                AdjustmentSlider(stringResource(R.string.adj_shadows), adjustments.shadows, onValueChange = { onAdjustmentsChange(adjustments.copy(shadows = it)) }, onValueChangeFinished = onAdjustmentsCommit)
-                AdjustmentSlider(stringResource(R.string.adj_sharpness), adjustments.sharpness, 0f..100f, onValueChange = { onAdjustmentsChange(adjustments.copy(sharpness = it)) }, onValueChangeFinished = onAdjustmentsCommit)
-                AdjustmentSlider(stringResource(R.string.adj_vignette), adjustments.vignette, 0f..100f, onValueChange = { onAdjustmentsChange(adjustments.copy(vignette = it)) }, onValueChangeFinished = onAdjustmentsCommit)
+                if (smartAutoStrength != null) {
+                    Spacer(Modifier.height(6.dp))
+                    AdjustmentSlider(
+                        label = stringResource(R.string.adj_smart_auto_strength),
+                        value = smartAutoStrength * 100f,
+                        valueRange = 0f..150f,
+                        onValueChange = { onSmartAutoStrengthChange(it / 100f) },
+                        onValueChangeFinished = onSmartAutoStrengthCommit,
+                        defaultValue = 100f,
+                        showCompare = false
+                    )
+                }
+
+                fun set(transform: ColorAdjustments.() -> ColorAdjustments) = onAdjustmentsChange(adjustments.transform())
+
+                AdjustmentGroupTitle(stringResource(R.string.adj_group_light))
+                AdjustmentSlider(stringResource(R.string.adj_exposure), adjustments.exposure, onValueChange = { set { copy(exposure = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                AdjustmentSlider(stringResource(R.string.adj_brightness), adjustments.brightness, onValueChange = { set { copy(brightness = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                AdjustmentSlider(stringResource(R.string.adj_contrast), adjustments.contrast, onValueChange = { set { copy(contrast = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                AdjustmentSlider(stringResource(R.string.adj_highlights), adjustments.highlights, onValueChange = { set { copy(highlights = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                AdjustmentSlider(stringResource(R.string.adj_shadows), adjustments.shadows, onValueChange = { set { copy(shadows = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                AdjustmentSlider(stringResource(R.string.adj_whites), adjustments.whites, onValueChange = { set { copy(whites = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                AdjustmentSlider(stringResource(R.string.adj_blacks), adjustments.blacks, onValueChange = { set { copy(blacks = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+
+                AdjustmentGroupTitle(stringResource(R.string.adj_group_color))
+                AdjustmentSlider(stringResource(R.string.adj_temperature), adjustments.temperature, onValueChange = { set { copy(temperature = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                AdjustmentSlider(stringResource(R.string.adj_tint), adjustments.tint, onValueChange = { set { copy(tint = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                AdjustmentSlider(stringResource(R.string.adj_vibrance), adjustments.vibrance, onValueChange = { set { copy(vibrance = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                AdjustmentSlider(stringResource(R.string.adj_saturation), adjustments.saturation, onValueChange = { set { copy(saturation = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+
+                AdjustmentGroupTitle(stringResource(R.string.adj_group_detail))
+                AdjustmentSlider(stringResource(R.string.adj_clarity), adjustments.clarity, onValueChange = { set { copy(clarity = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                AdjustmentSlider(stringResource(R.string.adj_dehaze), adjustments.dehaze, onValueChange = { set { copy(dehaze = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                AdjustmentSlider(stringResource(R.string.adj_sharpness), adjustments.sharpness, 0f..100f, onValueChange = { set { copy(sharpness = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+
+                AdjustmentGroupTitle(stringResource(R.string.adj_group_effects))
+                AdjustmentSlider(stringResource(R.string.adj_vignette), adjustments.vignette, onValueChange = { set { copy(vignette = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                Text(
+                    stringResource(R.string.adj_double_tap_reset_hint),
+                    color = Color.Gray,
+                    fontSize = 10.sp,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
             }
 
             AdjustmentsTab.CURVES -> {
@@ -262,7 +328,12 @@ fun AdjustmentsPanel(
                 CurvesView(
                     adjustments = adjustments,
                     onAdjustmentsChange = onAdjustmentsChange,
-                    onAdjustmentsCommit = onAdjustmentsCommit
+                    onAdjustmentsCommit = onAdjustmentsCommit,
+                    sourceBitmap = sourceBitmap,
+                    pickMode = curvePickMode,
+                    onPickModeChange = onCurvePickModeChange,
+                    pickedSample = curvePickedSample,
+                    onSampleConsumed = onCurveSampleConsumed
                 )
             }
 
@@ -284,7 +355,9 @@ fun AdjustmentsPanel(
                 HslPanel(
                     adjustments = adjustments,
                     onAdjustmentsChange = onAdjustmentsChange,
-                    onAdjustmentsCommit = onAdjustmentsCommit
+                    onAdjustmentsCommit = onAdjustmentsCommit,
+                    targetProperty = hslTargetProperty,
+                    onTargetPropertyChange = onHslTargetPropertyChange
                 )
             }
 
@@ -306,7 +379,11 @@ fun AdjustmentsPanel(
                 ColorReplacePanel(
                     adjustments = adjustments,
                     onAdjustmentsChange = onAdjustmentsChange,
-                    onAdjustmentsCommit = onAdjustmentsCommit
+                    onAdjustmentsCommit = onAdjustmentsCommit,
+                    pickTarget = replacePickTarget,
+                    onPickRequest = onReplacePickChange,
+                    hasActiveSelection = hasActiveSelection,
+                    onAdjustSelectionOnly = onCreateAdjustmentLayerFromSelection
                 )
             }
         }
@@ -320,7 +397,8 @@ private fun AdjustmentSlider(
     valueRange: ClosedFloatingPointRange<Float> = -100f..100f,
     onValueChange: (Float) -> Unit,
     onValueChangeFinished: () -> Unit,
-    defaultValue: Float = 0f
+    defaultValue: Float = 0f,
+    showCompare: Boolean = true
 ) {
     var savedValueBeforeHold by remember { mutableFloatStateOf(value) }
     val sliderCompareInteraction = remember { MutableInteractionSource() }
@@ -340,9 +418,19 @@ private fun AdjustmentSlider(
 
     val isModified = abs(value - defaultValue) > 0.01f
 
+    val latestValueChange by rememberUpdatedState(onValueChange)
+    val latestFinished by rememberUpdatedState(onValueChangeFinished)
     Column(Modifier.padding(vertical = 3.dp)) {
         Row(
-            Modifier.fillMaxWidth(),
+            Modifier
+                .fillMaxWidth()
+                // Double tap the name or value to reset just this slider.
+                .pointerInput(defaultValue) {
+                    detectTapGestures(onDoubleTap = {
+                        latestValueChange(defaultValue)
+                        latestFinished()
+                    })
+                },
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -364,13 +452,13 @@ private fun AdjustmentSlider(
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (isModified || isHoldingSliderCompare) {
+                if (showCompare && (isModified || isHoldingSliderCompare)) {
                     IconButton(
                         // Press & hold = compare with the default. A tap must not silently reset the
                         // value (use "Reset all" or drag the slider for that).
                         onClick = {},
                         interactionSource = sliderCompareInteraction,
-                        modifier = Modifier.size(28.dp).testTag("btn_compare_${label.lowercase().replace(" ", "_")}")
+                        modifier = Modifier.size(40.dp).testTag("btn_compare_${label.lowercase().replace(" ", "_")}")
                     ) {
                         Icon(
                             imageVector = if (isHoldingSliderCompare) Icons.Default.VisibilityOff else Icons.Default.Visibility,
@@ -381,7 +469,7 @@ private fun AdjustmentSlider(
                     }
                 }
                 Text(
-                    text = value.toInt().toString(),
+                    text = kotlin.math.round(value).toInt().toString(),
                     color = if (isHoldingSliderCompare) AmberAccent else if (isModified) IndigoPrimary else Color.Gray,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold
@@ -395,4 +483,16 @@ private fun AdjustmentSlider(
             valueRange = valueRange
         )
     }
+}
+
+@Composable
+private fun AdjustmentGroupTitle(text: String) {
+    Text(
+        text = text,
+        color = IndigoPrimary,
+        fontSize = 12.sp,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier.padding(top = 10.dp, bottom = 2.dp)
+    )
+    HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
 }

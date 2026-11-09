@@ -41,10 +41,17 @@ fun SelectionPanel(
     brushSizeDp: Float,
     tolerance: Int,
     isContiguous: Boolean = true,
+    wandOptions: com.example.engine.WandOptions = com.example.engine.WandOptions(),
+    onWandOptionsChange: (com.example.engine.WandOptions) -> Unit = {},
     isQuickAutoEnhance: Boolean = true,
     onToggleQuickAutoEnhance: (Boolean) -> Unit = {},
     isQuickSampleAll: Boolean = false,
     onToggleQuickSampleAll: (Boolean) -> Unit = {},
+    /** Quick Selection has its own colour tolerance and edge sensitivity. */
+    quickTolerance: Int = 35,
+    onQuickToleranceChange: (Int) -> Unit = {},
+    quickEdgeSensitivity: Int = 60,
+    onQuickEdgeSensitivityChange: (Int) -> Unit = {},
     canUndoSelection: Boolean,
     canRedoSelection: Boolean,
     onToolSelect: (SelectionToolType) -> Unit,
@@ -77,6 +84,15 @@ fun SelectionPanel(
     modifierAmount: Float = 5f,
     onModifierPreview: (com.example.ui.viewmodel.SelectionModifierOp, Float) -> Unit = { _, _ -> },
     onModifierCommit: () -> Unit = {},
+    /** Live refine (shift / smooth / feather / contrast together). */
+    refineParams: com.example.ui.viewmodel.SelectionRefineParams = com.example.ui.viewmodel.SelectionRefineParams(),
+    onRefinePreview: (com.example.ui.viewmodel.SelectionRefineParams) -> Unit = {},
+    onRefineApply: () -> Unit = {},
+    onRefineReset: () -> Unit = {},
+    onBorderSelection: (Float) -> Unit = {},
+    onCleanupSelection: () -> Unit = {},
+    /** Longest side of the document: slider ranges scale with the image. */
+    documentMaxDim: Int = 2000,
     modifier: Modifier = Modifier
 ) {
     var showRefine by remember { mutableStateOf(false) }
@@ -191,14 +207,28 @@ fun SelectionPanel(
             )
             SelectionSlider(
                 label = stringResource(R.string.select_tolerance),
-                valueLabel = tolerance.toString(),
-                value = tolerance.toFloat(),
+                valueLabel = quickTolerance.toString(),
+                value = quickTolerance.toFloat(),
                 valueRange = 5f..100f,
-                onValueChange = { onToleranceChange(it.toInt()) }
+                onValueChange = { onQuickToleranceChange(it.toInt()) }
+            )
+            SelectionSlider(
+                label = stringResource(R.string.select_quick_edge_sensitivity),
+                valueLabel = "${quickEdgeSensitivity}%",
+                value = quickEdgeSensitivity.toFloat(),
+                valueRange = 0f..100f,
+                onValueChange = { onQuickEdgeSensitivityChange(it.toInt()) }
+            )
+            Text(
+                stringResource(R.string.select_quick_subtract_hint),
+                color = Color.Gray,
+                fontSize = 10.sp,
+                modifier = Modifier.padding(horizontal = 14.dp)
             )
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 12.dp, vertical = 2.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -321,6 +351,56 @@ fun SelectionPanel(
                     label = { Text(stringResource(R.string.select_wand_all_colors), fontSize = 12.sp) }
                 )
             }
+            // Sample size: the tapped colour is averaged over this square (less sensitive to noise).
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(stringResource(R.string.select_wand_sample), color = Color.LightGray, fontSize = 12.sp)
+                listOf(
+                    1 to R.string.select_wand_sample_point,
+                    3 to R.string.select_wand_sample_3,
+                    5 to R.string.select_wand_sample_5
+                ).forEach { (size, res) ->
+                    FilterChip(
+                        selected = wandOptions.sampleSize == size,
+                        onClick = { onWandOptionsChange(wandOptions.copy(sampleSize = size)) },
+                        label = { Text(stringResource(res), fontSize = 12.sp) }
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                FilterChip(
+                    selected = wandOptions.smartGradient,
+                    onClick = { onWandOptionsChange(wandOptions.copy(smartGradient = !wandOptions.smartGradient)) },
+                    label = { Text(stringResource(R.string.select_wand_smart_gradient), fontSize = 12.sp) }
+                )
+                FilterChip(
+                    selected = wandOptions.cleanNoise,
+                    onClick = { onWandOptionsChange(wandOptions.copy(cleanNoise = !wandOptions.cleanNoise)) },
+                    label = { Text(stringResource(R.string.select_wand_clean_noise), fontSize = 12.sp) }
+                )
+                FilterChip(
+                    selected = wandOptions.softEdges,
+                    onClick = { onWandOptionsChange(wandOptions.copy(softEdges = !wandOptions.softEdges)) },
+                    label = { Text(stringResource(R.string.select_wand_soft_edges), fontSize = 12.sp) }
+                )
+                FilterChip(
+                    selected = wandOptions.sampleAllLayers,
+                    onClick = { onWandOptionsChange(wandOptions.copy(sampleAllLayers = !wandOptions.sampleAllLayers)) },
+                    label = { Text(stringResource(R.string.select_sample_all_layers), fontSize = 12.sp) }
+                )
+            }
         }
 
         // Quick Refine & Undo/Redo Action Row
@@ -348,39 +428,78 @@ fun SelectionPanel(
         }
 
         AnimatedVisibility(showRefine) {
+            // All four settings preview together on the selection; Apply keeps them (one undo step).
+            val maxPx = kotlin.math.max(20f, documentMaxDim / 25f)
+            var borderWidth by remember { mutableFloatStateOf(10f) }
             Column {
-                // Pick the operation, then drag the slider: the selection updates live and the whole
-                // drag becomes a single undo step when released.
+                SelectionSlider(
+                    label = stringResource(R.string.select_shift_edge),
+                    valueLabel = "${if (refineParams.shift > 0f) "+" else ""}${kotlin.math.round(refineParams.shift).toInt()} px",
+                    value = refineParams.shift,
+                    valueRange = -maxPx..maxPx,
+                    onValueChange = { onRefinePreview(refineParams.copy(shift = it)) },
+                    onValueChangeFinished = {}
+                )
+                SelectionSlider(
+                    label = stringResource(R.string.select_smooth),
+                    valueLabel = "${kotlin.math.round(refineParams.smooth).toInt()} px",
+                    value = refineParams.smooth,
+                    valueRange = 0f..(maxPx / 2f),
+                    onValueChange = { onRefinePreview(refineParams.copy(smooth = it)) },
+                    onValueChangeFinished = {}
+                )
+                SelectionSlider(
+                    label = stringResource(R.string.select_feather),
+                    valueLabel = "${kotlin.math.round(refineParams.feather).toInt()} px",
+                    value = refineParams.feather,
+                    valueRange = 0f..maxPx,
+                    onValueChange = { onRefinePreview(refineParams.copy(feather = it)) },
+                    onValueChangeFinished = {}
+                )
+                SelectionSlider(
+                    label = stringResource(R.string.select_edge_contrast),
+                    valueLabel = "${kotlin.math.round(refineParams.contrast).toInt()}%",
+                    value = refineParams.contrast,
+                    valueRange = 0f..100f,
+                    onValueChange = { onRefinePreview(refineParams.copy(contrast = it)) },
+                    onValueChangeFinished = {}
+                )
                 Row(
-                    Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    val ops = listOf(
-                        com.example.ui.viewmodel.SelectionModifierOp.FEATHER to R.string.select_feather,
-                        com.example.ui.viewmodel.SelectionModifierOp.GROW to R.string.select_grow,
-                        com.example.ui.viewmodel.SelectionModifierOp.SHRINK to R.string.select_shrink,
-                        com.example.ui.viewmodel.SelectionModifierOp.SMOOTH to R.string.select_smooth
-                    )
-                    ops.forEach { (op, label) ->
-                        FilterChip(
-                            selected = modifierOp == op,
-                            onClick = {
-                                // Switching the operation restarts from the current selection.
-                                onModifierCommit()
-                                onModifierPreview(op, 0f)
-                            },
-                            label = { Text(stringResource(label), fontSize = 12.sp) }
-                        )
+                    OutlinedButton(
+                        onClick = onRefineReset,
+                        enabled = !refineParams.isIdentity(),
+                        modifier = Modifier.weight(1f).heightIn(min = 44.dp)
+                    ) { Text(stringResource(R.string.action_reset), fontSize = 12.sp) }
+                    Button(
+                        onClick = onRefineApply,
+                        enabled = !refineParams.isIdentity(),
+                        colors = ButtonDefaults.buttonColors(containerColor = IndigoPrimary),
+                        modifier = Modifier.weight(1f).heightIn(min = 44.dp).testTag("btn_apply_refine")
+                    ) { Text(stringResource(R.string.action_apply), fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+                }
+                // One-shot tools.
+                Row(
+                    Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedButton(onClick = onCleanupSelection, modifier = Modifier.heightIn(min = 44.dp).testTag("btn_cleanup_selection")) {
+                        Text(stringResource(R.string.select_cleanup), fontSize = 12.sp)
                     }
-                    RefineButton(stringResource(R.string.select_refine), onRefineClick)
+                    OutlinedButton(onClick = { onBorderSelection(borderWidth) }, modifier = Modifier.heightIn(min = 44.dp).testTag("btn_border_selection")) {
+                        Text(stringResource(R.string.select_border_width, kotlin.math.round(borderWidth).toInt()), fontSize = 12.sp)
+                    }
                 }
                 SelectionSlider(
-                    label = stringResource(R.string.select_edge_radius),
-                    valueLabel = "${modifierAmount.toInt()} px",
-                    value = modifierAmount,
-                    valueRange = 0f..if (modifierOp == com.example.ui.viewmodel.SelectionModifierOp.SMOOTH) 12f else 50f,
-                    onValueChange = { onModifierPreview(modifierOp, it) },
-                    onValueChangeFinished = onModifierCommit
+                    label = stringResource(R.string.select_border),
+                    valueLabel = "${kotlin.math.round(borderWidth).toInt()} px",
+                    value = borderWidth,
+                    valueRange = 2f..maxPx,
+                    onValueChange = { borderWidth = it },
+                    onValueChangeFinished = {}
                 )
             }
         }

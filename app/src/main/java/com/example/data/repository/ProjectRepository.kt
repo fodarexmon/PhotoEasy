@@ -7,7 +7,6 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.PointF
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -114,20 +113,6 @@ class ProjectRepository(private val context: Context) {
         }
     }
 
-    private fun pointsToJson(points: List<PointF>): JSONArray = JSONArray().apply {
-        points.forEach { p -> put(JSONArray().put(p.x.toDouble()).put(p.y.toDouble())) }
-    }
-
-    private fun jsonToPoints(arr: JSONArray?): List<PointF>? {
-        if (arr == null) return null
-        val list = mutableListOf<PointF>()
-        for (i in 0 until arr.length()) {
-            val p = arr.optJSONArray(i) ?: continue
-            list.add(PointF(p.optDouble(0, 0.0).toFloat(), p.optDouble(1, 0.0).toFloat()))
-        }
-        return if (list.size >= 2) list else null
-    }
-
     /**
      * Masks are persisted as opaque grayscale PNG (white = reveal). Encoding ALPHA_8 bitmaps
      * directly is codec-dependent, so the alpha channel is written into RGB explicitly.
@@ -230,38 +215,19 @@ class ProjectRepository(private val context: Context) {
                         put("scaleX", layer.scaleX.toDouble())
                         put("scaleY", layer.scaleY.toDouble())
                         put("rotation", layer.rotation.toDouble())
+                        put("skewX", layer.skewX.toDouble())
+                        put("skewY", layer.skewY.toDouble())
+                        layer.distort?.takeIf { it.size == 8 }?.let { d ->
+                            put("distort", JSONArray().apply { d.forEach { v -> put(v.toDouble()) } })
+                        }
                         put("colorFillHex", layer.colorFillHex)
                         put("filter", layer.filter.name)
                         put("filterIntensity", layer.filterIntensity.toDouble())
+                        layer.lutId?.let { put("lutId", it) }
 
                         // Save adjustments config
                         val adj = layer.adjustments
-                        val adjObj = JSONObject().apply {
-                            put("brightness", adj.brightness.toDouble())
-                            put("contrast", adj.contrast.toDouble())
-                            put("saturation", adj.saturation.toDouble())
-                            put("temperature", adj.temperature.toDouble())
-                            put("tint", adj.tint.toDouble())
-                            put("exposure", adj.exposure.toDouble())
-                            put("highlights", adj.highlights.toDouble())
-                            put("shadows", adj.shadows.toDouble())
-                            put("sharpness", adj.sharpness.toDouble())
-                            put("vignette", adj.vignette.toDouble())
-                            put("curvesRgb", pointsToJson(adj.curvesRgb))
-                            put("curvesRed", pointsToJson(adj.curvesRed))
-                            put("curvesGreen", pointsToJson(adj.curvesGreen))
-                            put("curvesBlue", pointsToJson(adj.curvesBlue))
-                            put("hueShift", adj.hueShift.toDouble())
-                            put("hslSaturation", adj.hslSaturation.toDouble())
-                            put("hslLightness", adj.hslLightness.toDouble())
-                            put("hslColorRange", adj.hslColorRange)
-                            put("replaceColorEnabled", adj.replaceColorEnabled)
-                            put("replaceSourceColorHex", adj.replaceSourceColorHex)
-                            put("replaceTolerance", adj.replaceTolerance.toDouble())
-                            put("replaceTargetHue", adj.replaceTargetHue.toDouble())
-                            put("replaceTargetSaturation", adj.replaceTargetSaturation.toDouble())
-                            put("replaceTargetLightness", adj.replaceTargetLightness.toDouble())
-                        }
+                        val adjObj = com.example.engine.AdjustmentsJson.toJson(adj)
                         put("adjustments", adjObj)
 
                         // Save text config
@@ -282,6 +248,19 @@ class ProjectRepository(private val context: Context) {
                             put("lineSpacingMultiplier", layer.textConfig.lineSpacingMultiplier.toDouble())
                             put("letterSpacingEm", layer.textConfig.letterSpacingEm.toDouble())
                             put("maxLineWidthPercent", layer.textConfig.maxLineWidthPercent.toDouble())
+                            put("isBold", layer.textConfig.isBold)
+                            put("isItalic", layer.textConfig.isItalic)
+                            put("isUnderline", layer.textConfig.isUnderline)
+                            put("shadowOpacity", layer.textConfig.shadowOpacity.toDouble())
+                            put("glowOpacity", layer.textConfig.glowOpacity.toDouble())
+                            put("backgroundEnabled", layer.textConfig.backgroundEnabled)
+                            put("backgroundColorHex", layer.textConfig.backgroundColorHex)
+                            put("backgroundOpacity", layer.textConfig.backgroundOpacity.toDouble())
+                            put("backgroundPadding", layer.textConfig.backgroundPadding.toDouble())
+                            put("backgroundCorner", layer.textConfig.backgroundCorner.toDouble())
+                            put("gradientEnabled", layer.textConfig.gradientEnabled)
+                            put("gradientEndColorHex", layer.textConfig.gradientEndColorHex)
+                            put("gradientAngle", layer.textConfig.gradientAngle.toDouble())
                         }
                         put("textConfig", textObj)
 
@@ -332,6 +311,15 @@ class ProjectRepository(private val context: Context) {
                         put("isEditingMask", layer.isEditingMask)
                         put("maskDensity", layer.maskDensity.toDouble())
                         put("maskFeather", layer.maskFeather.toDouble())
+                        put("isMaskLinked", layer.isMaskLinked)
+                        put("isClipped", layer.isClipped)
+                        layer.maskAnchor?.let { a ->
+                            put("maskAnchor", JSONObject().apply {
+                                put("x", a.x.toDouble()); put("y", a.y.toDouble())
+                                put("scaleX", a.scaleX.toDouble()); put("scaleY", a.scaleY.toDouble())
+                                put("rotation", a.rotation.toDouble())
+                            })
+                        }
                         layer.maskBitmap?.let { maskBmp ->
                             if (!maskBmp.isRecycled) {
                                 val maskFileName = "mask_${layer.id}.png"
@@ -764,7 +752,12 @@ class ProjectRepository(private val context: Context) {
                         strokeColorHex = textObj.optInt("strokeColorHex", 0xFF000000.toInt()),
                         strokeWidthDp = textObj.optDouble("strokeWidthDp", 0.0).toFloat(),
                         alignment = safeValueOf(textObj.optString("alignment", ""), TextAlignment.CENTER),
-                        shadowColorHex = textObj.optInt("shadowColorHex", 0x80000000.toInt()),
+                        // Older projects kept the shadow transparency in the colour's alpha.
+                        shadowColorHex = textObj.optInt("shadowColorHex", 0x80000000.toInt()) or 0xFF000000.toInt(),
+                        shadowOpacity = textObj.optDouble(
+                            "shadowOpacity",
+                            ((textObj.optInt("shadowColorHex", 0x80000000.toInt()) ushr 24) and 0xFF) / 255.0
+                        ).toFloat().coerceIn(0f, 1f),
                         shadowRadiusDp = textObj.optDouble("shadowRadiusDp", 0.0).toFloat(),
                         shadowDxDp = textObj.optDouble("shadowDxDp", 4.0).toFloat(),
                         shadowDyDp = textObj.optDouble("shadowDyDp", 6.0).toFloat(),
@@ -772,40 +765,24 @@ class ProjectRepository(private val context: Context) {
                         outerGlowRadiusDp = textObj.optDouble("outerGlowRadiusDp", 0.0).toFloat(),
                         lineSpacingMultiplier = textObj.optDouble("lineSpacingMultiplier", 1.0).toFloat(),
                         letterSpacingEm = textObj.optDouble("letterSpacingEm", 0.0).toFloat(),
-                        maxLineWidthPercent = textObj.optDouble("maxLineWidthPercent", 80.0).toFloat()
+                        maxLineWidthPercent = textObj.optDouble("maxLineWidthPercent", 80.0).toFloat(),
+                        isBold = textObj.optBoolean("isBold", false),
+                        isItalic = textObj.optBoolean("isItalic", false),
+                        isUnderline = textObj.optBoolean("isUnderline", false),
+                        glowOpacity = textObj.optDouble("glowOpacity", 0.9).toFloat().coerceIn(0f, 1f),
+                        backgroundEnabled = textObj.optBoolean("backgroundEnabled", false),
+                        backgroundColorHex = textObj.optInt("backgroundColorHex", 0xFF000000.toInt()),
+                        backgroundOpacity = textObj.optDouble("backgroundOpacity", 0.6).toFloat().coerceIn(0f, 1f),
+                        backgroundPadding = textObj.optDouble("backgroundPadding", 12.0).toFloat(),
+                        backgroundCorner = textObj.optDouble("backgroundCorner", 12.0).toFloat(),
+                        gradientEnabled = textObj.optBoolean("gradientEnabled", false),
+                        gradientEndColorHex = textObj.optInt("gradientEndColorHex", 0xFF06B6D4.toInt()),
+                        gradientAngle = textObj.optDouble("gradientAngle", 90.0).toFloat()
                     )
                 } else TextLayerConfig()
 
                 val adjObj = layerObj.optJSONObject("adjustments")
-                val defaults = ColorAdjustments()
-                val colorAdjustments = if (adjObj != null) {
-                    ColorAdjustments(
-                        brightness = adjObj.optDouble("brightness", 0.0).toFloat(),
-                        contrast = adjObj.optDouble("contrast", 0.0).toFloat(),
-                        saturation = adjObj.optDouble("saturation", 0.0).toFloat(),
-                        temperature = adjObj.optDouble("temperature", 0.0).toFloat(),
-                        tint = adjObj.optDouble("tint", 0.0).toFloat(),
-                        exposure = adjObj.optDouble("exposure", 0.0).toFloat(),
-                        highlights = adjObj.optDouble("highlights", 0.0).toFloat(),
-                        shadows = adjObj.optDouble("shadows", 0.0).toFloat(),
-                        sharpness = adjObj.optDouble("sharpness", 0.0).toFloat(),
-                        vignette = adjObj.optDouble("vignette", 0.0).toFloat(),
-                        curvesRgb = jsonToPoints(adjObj.optJSONArray("curvesRgb")) ?: defaults.curvesRgb,
-                        curvesRed = jsonToPoints(adjObj.optJSONArray("curvesRed")) ?: defaults.curvesRed,
-                        curvesGreen = jsonToPoints(adjObj.optJSONArray("curvesGreen")) ?: defaults.curvesGreen,
-                        curvesBlue = jsonToPoints(adjObj.optJSONArray("curvesBlue")) ?: defaults.curvesBlue,
-                        hueShift = adjObj.optDouble("hueShift", 0.0).toFloat(),
-                        hslSaturation = adjObj.optDouble("hslSaturation", 0.0).toFloat(),
-                        hslLightness = adjObj.optDouble("hslLightness", 0.0).toFloat(),
-                        hslColorRange = adjObj.optString("hslColorRange", defaults.hslColorRange),
-                        replaceColorEnabled = adjObj.optBoolean("replaceColorEnabled", false),
-                        replaceSourceColorHex = adjObj.optInt("replaceSourceColorHex", defaults.replaceSourceColorHex),
-                        replaceTolerance = adjObj.optDouble("replaceTolerance", defaults.replaceTolerance.toDouble()).toFloat(),
-                        replaceTargetHue = adjObj.optDouble("replaceTargetHue", defaults.replaceTargetHue.toDouble()).toFloat(),
-                        replaceTargetSaturation = adjObj.optDouble("replaceTargetSaturation", 0.0).toFloat(),
-                        replaceTargetLightness = adjObj.optDouble("replaceTargetLightness", 0.0).toFloat()
-                    )
-                } else ColorAdjustments()
+                val colorAdjustments = com.example.engine.AdjustmentsJson.fromJson(adjObj)
 
                 val layer = Layer(
                     id = layerId,
@@ -829,6 +806,7 @@ class ProjectRepository(private val context: Context) {
                     colorFillHex = layerObj.optInt("colorFillHex", 0xFF12131C.toInt()),
                     filter = safeValueOf(layerObj.optString("filter", ""), FilterType.NONE),
                     filterIntensity = layerObj.optDouble("filterIntensity", 1.0).toFloat().coerceIn(0f, 1f),
+                    lutId = layerObj.optString("lutId", "").ifBlank { null },
                     textConfig = textCfg,
                     adjustments = colorAdjustments,
                     isBitmapDirty = false,
@@ -836,8 +814,24 @@ class ProjectRepository(private val context: Context) {
                     originalWidth = layerObj.optInt("originalWidth", 0),
                     originalHeight = layerObj.optInt("originalHeight", 0),
                     contentWidth = layerObj.optDouble("contentWidth", layerBmp?.width?.toDouble() ?: 0.0).toFloat(),
-                    contentHeight = layerObj.optDouble("contentHeight", layerBmp?.height?.toDouble() ?: 0.0).toFloat()
+                    contentHeight = layerObj.optDouble("contentHeight", layerBmp?.height?.toDouble() ?: 0.0).toFloat(),
+                    isMaskLinked = layerObj.optBoolean("isMaskLinked", true),
+                    isClipped = layerObj.optBoolean("isClipped", false),
+                    skewX = layerObj.optDouble("skewX", 0.0).toFloat(),
+                    skewY = layerObj.optDouble("skewY", 0.0).toFloat(),
+                    distort = layerObj.optJSONArray("distort")?.takeIf { it.length() == 8 }?.let { a ->
+                        FloatArray(8) { a.optDouble(it, 0.0).toFloat() }
+                    },
+                    maskAnchor = layerObj.optJSONObject("maskAnchor")?.let { a ->
+                        com.example.data.model.MaskAnchor(
+                            a.optDouble("x", 0.0).toFloat(), a.optDouble("y", 0.0).toFloat(),
+                            a.optDouble("scaleX", 1.0).toFloat(), a.optDouble("scaleY", 1.0).toFloat(),
+                            a.optDouble("rotation", 0.0).toFloat()
+                        )
+                    }
                 )
+                // Projects saved before masks were linked: the mask is where it is now.
+                layer.ensureMaskAnchor()
                 proj.layers.add(layer)
             }
         }

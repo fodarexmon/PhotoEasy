@@ -1,13 +1,19 @@
 package com.example.ui.components
 
+import android.graphics.Bitmap
+import android.graphics.Canvas as AndroidCanvas
+import android.graphics.Matrix as AndroidMatrix
+import android.graphics.Paint as AndroidPaint
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -16,21 +22,50 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import com.example.R
 import com.example.data.model.BlendModeType
 import com.example.data.model.Layer
 import com.example.data.model.LayerType
+import com.example.data.model.MaskGradient
+import com.example.engine.LayerRenderer
 import com.example.ui.theme.IndigoPrimary
 import com.example.ui.theme.StudioSurface
 import com.example.ui.theme.StudioSurfaceVariant
+import kotlin.math.max
+import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+
+/** Layer-panel actions added for reordering, renaming, clipping and advanced mask editing. */
+class LayerPanelActions(
+    val onToggleVisibilityAt: (Int) -> Unit = {},
+    val onToggleLockAt: (Int) -> Unit = {},
+    val onMoveLayer: (from: Int, to: Int) -> Unit = { _, _ -> },
+    val onRenameLayer: (Int, String) -> Unit = { _, _ -> },
+    val onToggleClip: () -> Unit = {},
+    val onToggleMaskLink: () -> Unit = {},
+    val onSelectLayerPixels: (Int) -> Unit = {},
+    val onMaskGradient: (MaskGradient) -> Unit = {},
+    val onMaskBrushHardnessChange: (Float) -> Unit = {},
+    val onMaskBrushOpacityChange: (Float) -> Unit = {}
+)
 
 @Composable
 fun LayersPanel(
@@ -67,12 +102,19 @@ fun LayersPanel(
     showMaskRubyOverlay: Boolean = false,
     maskBrushSizeDp: Float = 24f,
     onMaskBrushSizeChange: ((Float) -> Unit)? = null,
+    actions: LayerPanelActions = LayerPanelActions(),
+    maskBrushHardness: Float = 0.6f,
+    maskBrushOpacity: Float = 1f,
+    /** Document size, for thumbnails that show the layer as placed on the canvas. */
+    documentWidth: Int = 0,
+    documentHeight: Int = 0,
     modifier: Modifier = Modifier
 ) {
     var showAddMenu by remember { mutableStateOf(false) }
     var showBlendMenu by remember { mutableStateOf(false) }
     var showActionsMenu by remember { mutableStateOf(false) }
     var showMaskMenu by remember { mutableStateOf(false) }
+    var renameIndex by remember { mutableStateOf<Int?>(null) }
     val selectedLayer = layers.getOrNull(selectedIndex)
 
     Column(modifier.fillMaxWidth().fillMaxHeight().background(StudioSurface).padding(12.dp)) {
@@ -118,7 +160,7 @@ fun LayersPanel(
                 Column(Modifier.weight(1f)) {
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Text(stringResource(R.string.layer_opacity), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                        Text("${(selectedLayer.opacity * 100).toInt()}%", color = IndigoPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text("${(selectedLayer.opacity * 100).roundToInt()}%", color = IndigoPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                     Slider(
                         value = selectedLayer.opacity,
@@ -139,7 +181,12 @@ fun LayersPanel(
                     DropdownMenu(expanded = showBlendMenu, onDismissRequest = { showBlendMenu = false }) {
                         BlendModeType.getAvailableModes().forEach { mode ->
                             DropdownMenuItem(
-                                text = { Text(stringResource(mode.resId)) },
+                                text = {
+                                    Text(
+                                        stringResource(mode.resId),
+                                        fontWeight = if (mode == selectedLayer.blendMode) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
                                 onClick = { showBlendMenu = false; onBlendModeChange(mode) }
                             )
                         }
@@ -156,12 +203,8 @@ fun LayersPanel(
                 Box {
                     IconButton(
                         onClick = {
-                            if (selectedLayer.maskBitmap == null) {
-                                if (hasActiveSelection) {
-                                    showMaskMenu = true
-                                } else {
-                                    onAddLayerMask?.invoke(false)
-                                }
+                            if (selectedLayer.maskBitmap == null && !hasActiveSelection) {
+                                onAddLayerMask?.invoke(false)
                             } else {
                                 showMaskMenu = true
                             }
@@ -208,6 +251,13 @@ fun LayersPanel(
                             )
                             DropdownMenuItem(
                                 text = {
+                                    Text(stringResource(if (selectedLayer.isMaskLinked) R.string.layer_mask_unlink else R.string.layer_mask_link))
+                                },
+                                leadingIcon = { Icon(if (selectedLayer.isMaskLinked) Icons.Default.LinkOff else Icons.Default.Link, null) },
+                                onClick = { showMaskMenu = false; actions.onToggleMaskLink() }
+                            )
+                            DropdownMenuItem(
+                                text = {
                                     Text(
                                         stringResource(
                                             if (selectedLayer.isMaskEnabled) R.string.layer_mask_disable else R.string.layer_mask_enable
@@ -216,6 +266,11 @@ fun LayersPanel(
                                 },
                                 leadingIcon = { Icon(if (selectedLayer.isMaskEnabled) Icons.Default.VisibilityOff else Icons.Default.Visibility, null) },
                                 onClick = { showMaskMenu = false; onToggleLayerMaskEnabled?.invoke() }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.layer_select_pixels)) },
+                                leadingIcon = { Icon(Icons.Default.HighlightAlt, null) },
+                                onClick = { showMaskMenu = false; actions.onSelectLayerPixels(selectedIndex) }
                             )
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.layer_mask_apply)) },
@@ -251,6 +306,22 @@ fun LayersPanel(
                     }
                     DropdownMenu(expanded = showActionsMenu, onDismissRequest = { showActionsMenu = false }) {
                         DropdownMenuItem(
+                            text = { Text(stringResource(R.string.action_rename)) },
+                            leadingIcon = { Icon(Icons.Default.Edit, null) },
+                            onClick = { showActionsMenu = false; renameIndex = selectedIndex }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(stringResource(if (selectedLayer.isClipped) R.string.layer_clip_release else R.string.layer_clip_create)) },
+                            leadingIcon = { Icon(Icons.Default.SubdirectoryArrowRight, null) },
+                            enabled = selectedLayer.isClipped || selectedIndex > 0,
+                            onClick = { showActionsMenu = false; actions.onToggleClip() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.layer_select_pixels)) },
+                            leadingIcon = { Icon(Icons.Default.HighlightAlt, null) },
+                            onClick = { showActionsMenu = false; actions.onSelectLayerPixels(selectedIndex) }
+                        )
+                        DropdownMenuItem(
                             text = { Text(stringResource(R.string.layer_move_up)) },
                             leadingIcon = { Icon(Icons.Default.ArrowUpward, null) },
                             enabled = selectedIndex < layers.size - 1,
@@ -285,141 +356,42 @@ fun LayersPanel(
 
             // Layer Mask Controls Section (Active whenever layer has a mask)
             if (selectedLayer.maskBitmap != null) {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp),
-                    shape = RoundedCornerShape(10.dp),
-                    color = StudioSurfaceVariant
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 10.dp, vertical = 6.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                stringResource(R.string.layer_mask_controls),
-                                color = IndigoPrimary,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp
-                            )
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                FilterChip(
-                                    selected = showMaskRubyOverlay,
-                                    onClick = { onToggleRubyOverlay?.invoke() },
-                                    label = { Text(stringResource(R.string.layer_mask_overlay), fontSize = 10.sp) },
-                                    modifier = Modifier.heightIn(min = 32.dp).testTag("chip_ruby_overlay")
-                                )
-                                FilterChip(
-                                    selected = selectedLayer.isEditingMask,
-                                    onClick = { onSetEditingMask?.invoke(!selectedLayer.isEditingMask) },
-                                    label = {
-                                        Text(
-                                            if (selectedLayer.isEditingMask) stringResource(R.string.layer_mask_editing_mask) else stringResource(R.string.layer_mask_editing_layer),
-                                            fontSize = 10.sp
-                                        )
-                                    },
-                                    modifier = Modifier.heightIn(min = 32.dp).testTag("chip_editing_mask")
-                                )
-                            }
-                        }
-
-                        // Mask Density Slider
-                        Row(
-                            Modifier.fillMaxWidth().padding(top = 2.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(stringResource(R.string.layer_mask_density), color = Color.White, fontSize = 11.sp)
-                            Text("${(selectedLayer.maskDensity * 100).toInt()}%", color = IndigoPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        }
-                        Slider(
-                            value = selectedLayer.maskDensity,
-                            onValueChange = { onMaskDensityChange?.invoke(it) },
-                            onValueChangeFinished = { onOpacityCommit?.invoke() },
-                            valueRange = 0f..1f,
-                            modifier = Modifier.height(28.dp).testTag("slider_mask_density")
-                        )
-
-                        // Mask Feather Slider
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(stringResource(R.string.layer_mask_feather), color = Color.White, fontSize = 11.sp)
-                            Text("${selectedLayer.maskFeather.toInt()} px", color = IndigoPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                        }
-                        Slider(
-                            value = selectedLayer.maskFeather,
-                            onValueChange = { onMaskFeatherChange?.invoke(it) },
-                            onValueChangeFinished = { onOpacityCommit?.invoke() },
-                            valueRange = 0f..30f,
-                            modifier = Modifier.height(28.dp).testTag("slider_mask_feather")
-                        )
-
-                        // Editing Mask Toolbar
-                        if (selectedLayer.isEditingMask) {
-                            Spacer(Modifier.height(4.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    FilterChip(
-                                        selected = isMaskEditingBlack,
-                                        onClick = { onToggleMaskPaintColor?.invoke() },
-                                        label = {
-                                            Text(
-                                                if (isMaskEditingBlack) stringResource(R.string.layer_mask_paint_black) else stringResource(R.string.layer_mask_paint_white),
-                                                fontSize = 10.sp
-                                            )
-                                        },
-                                        modifier = Modifier.heightIn(min = 32.dp)
-                                    )
-                                    IconButton(
-                                        onClick = { onInvertLayerMask?.invoke() },
-                                        modifier = Modifier.size(32.dp).testTag("btn_invert_mask")
-                                    ) {
-                                        Icon(Icons.Default.InvertColors, contentDescription = stringResource(R.string.layer_mask_invert), tint = Color.White, modifier = Modifier.size(16.dp))
-                                    }
-                                }
-                                TextButton(
-                                    onClick = { onSetEditingMask?.invoke(false) },
-                                    modifier = Modifier.heightIn(min = 32.dp)
-                                ) {
-                                    Text(stringResource(R.string.action_done), fontSize = 11.sp)
-                                }
-                            }
-
-                            // Brush size used when painting the mask on the canvas
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(stringResource(R.string.layer_mask_brush_size), color = Color.White, fontSize = 11.sp)
-                                Text("${maskBrushSizeDp.toInt()} dp", color = IndigoPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                            }
-                            Slider(
-                                value = maskBrushSizeDp,
-                                onValueChange = { onMaskBrushSizeChange?.invoke(it) },
-                                valueRange = 2f..120f,
-                                modifier = Modifier.height(28.dp).testTag("slider_mask_brush_size")
-                            )
-                        }
-                    }
-                }
+                MaskControls(
+                    layer = selectedLayer,
+                    showMaskRubyOverlay = showMaskRubyOverlay,
+                    isMaskEditingBlack = isMaskEditingBlack,
+                    maskBrushSizeDp = maskBrushSizeDp,
+                    maskBrushHardness = maskBrushHardness,
+                    maskBrushOpacity = maskBrushOpacity,
+                    hasActiveSelection = hasActiveSelection,
+                    onToggleRubyOverlay = onToggleRubyOverlay,
+                    onSetEditingMask = onSetEditingMask,
+                    onMaskDensityChange = onMaskDensityChange,
+                    onMaskFeatherChange = onMaskFeatherChange,
+                    onCommit = onOpacityCommit,
+                    onToggleMaskPaintColor = onToggleMaskPaintColor,
+                    onInvertLayerMask = onInvertLayerMask,
+                    onMaskBrushSizeChange = onMaskBrushSizeChange,
+                    actions = actions
+                )
             }
         }
 
         Spacer(Modifier.height(4.dp))
+        Text(
+            stringResource(R.string.layer_reorder_hint),
+            color = Color.Gray,
+            fontSize = 10.sp,
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+        )
+
+        // Drag-to-reorder state (list is shown top layer first).
+        var draggingId by remember { mutableStateOf<String?>(null) }
+        var dragOffset by remember { mutableFloatStateOf(0f) }
+        var rowPitchPx by remember { mutableFloatStateOf(0f) }
+        val spacingPx = with(LocalDensity.current) { 6.dp.toPx() }
+        val latestLayers by rememberUpdatedState(layers)
+
         LazyColumn(
             modifier = Modifier.fillMaxWidth().weight(1f),
             verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -428,22 +400,71 @@ fun LayersPanel(
             itemsIndexed(layers.reversed(), key = { _, layer -> layer.id }) { revIdx, layer ->
                 val actualIdx = layers.size - 1 - revIdx
                 val isSelected = actualIdx == selectedIndex
+                val isDragging = draggingId == layer.id
+                val layerId = layer.id
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .zIndex(if (isDragging) 1f else 0f)
+                        .graphicsLayer {
+                            translationY = if (isDragging) dragOffset else 0f
+                            shadowElevation = if (isDragging) 12f else 0f
+                        }
+                        .onSizeChanged { rowPitchPx = it.height + spacingPx }
                         .clip(RoundedCornerShape(10.dp))
-                        .background(if (isSelected) StudioSurfaceVariant else Color.Transparent)
+                        .background(if (isSelected || isDragging) StudioSurfaceVariant else Color.Transparent)
                         .border(if (isSelected) 1.5.dp else 0.dp, if (isSelected) IndigoPrimary else Color.Transparent, RoundedCornerShape(10.dp))
                         .clickable { onSelectLayer(actualIdx) }
-                        .padding(8.dp),
+                        .padding(start = 0.dp, end = 4.dp, top = 6.dp, bottom = 6.dp)
+                        .padding(start = if (layer.isClipped) 14.dp else 0.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // Drag handle: drag up/down to reorder.
+                    Box(
+                        modifier = Modifier
+                            .size(width = 32.dp, height = 48.dp)
+                            .pointerInput(layerId) {
+                                detectVerticalDragGestures(
+                                    onDragStart = { draggingId = layerId; dragOffset = 0f },
+                                    onVerticalDrag = { change, amount ->
+                                        change.consume()
+                                        dragOffset += amount
+                                    },
+                                    onDragEnd = {
+                                        val list = latestLayers
+                                        val from = list.indexOfFirst { it.id == layerId }
+                                        val pitch = if (rowPitchPx > 1f) rowPitchPx else 1f
+                                        // Screen order is reversed: dragging down moves the layer lower.
+                                        val steps = (dragOffset / pitch).roundToInt()
+                                        val to = (from - steps).coerceIn(0, list.size - 1)
+                                        draggingId = null
+                                        dragOffset = 0f
+                                        if (from >= 0 && to != from) actions.onMoveLayer(from, to)
+                                    },
+                                    onDragCancel = { draggingId = null; dragOffset = 0f }
+                                )
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.DragHandle, contentDescription = stringResource(R.string.cd_layer_drag), tint = Color.Gray, modifier = Modifier.size(20.dp))
+                    }
+
+                    if (layer.isClipped) {
+                        Icon(
+                            Icons.Default.SubdirectoryArrowRight,
+                            contentDescription = stringResource(R.string.cd_layer_clipped),
+                            tint = IndigoPrimary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(Modifier.width(2.dp))
+                    }
+
                     // Layer Content Thumbnail
                     Box(
                         modifier = Modifier
                             .size(46.dp)
                             .clip(RoundedCornerShape(8.dp))
-                            .background(Color.Black.copy(alpha = 0.3f))
+                            .background(Color(0xFF2A2C34))
                             .border(
                                 width = if (isSelected && !layer.isEditingMask) 2.dp else 1.dp,
                                 color = if (isSelected && !layer.isEditingMask) IndigoPrimary else Color.White.copy(alpha = 0.12f),
@@ -455,19 +476,25 @@ fun LayersPanel(
                             },
                         contentAlignment = Alignment.Center
                     ) {
-                        LayerThumbnailContent(layer)
+                        LayerThumbnailContent(layer, documentWidth, documentHeight)
                     }
 
-                    // Layer Mask Thumbnail (if present)
+                    // Layer Mask Thumbnail (if present), with a chain link that toggles linking.
                     if (layer.maskBitmap != null) {
-                        Spacer(Modifier.width(4.dp))
-                        Icon(
-                            Icons.Default.Link,
-                            contentDescription = stringResource(R.string.cd_mask_linked),
-                            tint = Color.Gray,
-                            modifier = Modifier.size(12.dp)
-                        )
-                        Spacer(Modifier.width(4.dp))
+                        IconButton(
+                            onClick = {
+                                if (actualIdx != selectedIndex) onSelectLayer(actualIdx)
+                                actions.onToggleMaskLink()
+                            },
+                            modifier = Modifier.size(width = 24.dp, height = 46.dp)
+                        ) {
+                            Icon(
+                                if (layer.isMaskLinked) Icons.Default.Link else Icons.Default.LinkOff,
+                                contentDescription = stringResource(if (layer.isMaskLinked) R.string.layer_mask_unlink else R.string.layer_mask_link),
+                                tint = if (layer.isMaskLinked) Color.LightGray else Color.Gray,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
                         Box(
                             modifier = Modifier
                                 .size(46.dp)
@@ -484,13 +511,13 @@ fun LayersPanel(
                                 },
                             contentAlignment = Alignment.Center
                         ) {
-                            val maskBmp = layer.maskBitmap
-                            if (maskBmp != null && !maskBmp.isRecycled) {
+                            val maskThumb = rememberMaskThumbnail(layer, documentWidth, documentHeight)
+                            if (maskThumb != null) {
                                 Image(
-                                    bitmap = maskBmp.asImageBitmap(),
+                                    bitmap = maskThumb,
                                     contentDescription = stringResource(R.string.layer_mask_title),
                                     modifier = Modifier.fillMaxSize(),
-                                    contentScale = ContentScale.Crop
+                                    contentScale = ContentScale.Fit
                                 )
                             }
                             if (!layer.isMaskEnabled) {
@@ -504,7 +531,7 @@ fun LayersPanel(
                         }
                     }
 
-                    Spacer(Modifier.width(10.dp))
+                    Spacer(Modifier.width(8.dp))
                     Column(Modifier.weight(1f)) {
                         Text(
                             layer.name,
@@ -517,35 +544,364 @@ fun LayersPanel(
                         Text(
                             when {
                                 layer.maskBitmap != null && layer.isEditingMask -> stringResource(R.string.layer_mask_editing_mask)
-                                layer.type == LayerType.IMAGE -> stringResource(R.string.layer_add_image)
-                                layer.type == LayerType.TEXT -> stringResource(R.string.layer_add_text)
-                                layer.type == LayerType.ADJUSTMENT -> stringResource(R.string.layer_add_adjustment)
-                                else -> stringResource(R.string.layer_color_fill)
+                                else -> buildString {
+                                    append(
+                                        stringResource(
+                                            when (layer.type) {
+                                                LayerType.IMAGE -> R.string.layer_add_image
+                                                LayerType.TEXT -> R.string.layer_add_text
+                                                LayerType.ADJUSTMENT -> R.string.layer_add_adjustment
+                                                else -> R.string.layer_color_fill
+                                            }
+                                        )
+                                    )
+                                    if (layer.blendMode != BlendModeType.NORMAL) append(" · ").append(stringResource(layer.blendMode.resId))
+                                    if (layer.opacity < 0.995f) append(" · ").append((layer.opacity * 100).roundToInt()).append('%')
+                                }
                             },
                             color = if (layer.maskBitmap != null && layer.isEditingMask) IndigoPrimary else Color.Gray,
                             fontSize = 11.sp,
-                            maxLines = 1
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
-                    if (!layer.isVisible) Icon(Icons.Default.VisibilityOff, stringResource(R.string.cd_layer_hidden), tint = Color.Gray, modifier = Modifier.size(18.dp))
-                    if (layer.isLocked) Icon(Icons.Default.Lock, stringResource(R.string.layer_lock), tint = Color.Gray, modifier = Modifier.size(18.dp))
+                    IconButton(onClick = { actions.onToggleVisibilityAt(actualIdx) }, modifier = Modifier.size(40.dp)) {
+                        Icon(
+                            if (layer.isVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                            contentDescription = stringResource(R.string.layer_visibility),
+                            tint = if (layer.isVisible) Color.LightGray else Color.Gray,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    IconButton(onClick = { actions.onToggleLockAt(actualIdx) }, modifier = Modifier.size(40.dp)) {
+                        Icon(
+                            if (layer.isLocked) Icons.Default.Lock else Icons.Default.LockOpen,
+                            contentDescription = stringResource(R.string.layer_lock),
+                            tint = if (layer.isLocked) MaterialTheme.colorScheme.error else Color.Gray,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
+            }
+        }
+    }
+
+    renameIndex?.let { idx ->
+        val layer = layers.getOrNull(idx)
+        if (layer == null) {
+            renameIndex = null
+        } else {
+            var name by remember(layer.id) { mutableStateOf(layer.name) }
+            AlertDialog(
+                onDismissRequest = { renameIndex = null },
+                title = { Text(stringResource(R.string.layer_rename_title)) },
+                text = {
+                    OutlinedTextField(
+                        value = name,
+                        onValueChange = { name = it.take(60) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        modifier = Modifier.fillMaxWidth().testTag("field_layer_name")
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = { actions.onRenameLayer(idx, name); renameIndex = null },
+                        enabled = name.isNotBlank()
+                    ) { Text(stringResource(R.string.action_rename)) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { renameIndex = null }) { Text(stringResource(R.string.action_cancel)) }
+                }
+            )
+        }
+    }
+}
+
+@Composable
+private fun MaskControls(
+    layer: Layer,
+    showMaskRubyOverlay: Boolean,
+    isMaskEditingBlack: Boolean,
+    maskBrushSizeDp: Float,
+    maskBrushHardness: Float,
+    maskBrushOpacity: Float,
+    hasActiveSelection: Boolean,
+    onToggleRubyOverlay: (() -> Unit)?,
+    onSetEditingMask: ((Boolean) -> Unit)?,
+    onMaskDensityChange: ((Float) -> Unit)?,
+    onMaskFeatherChange: ((Float) -> Unit)?,
+    onCommit: (() -> Unit)?,
+    onToggleMaskPaintColor: (() -> Unit)?,
+    onInvertLayerMask: (() -> Unit)?,
+    onMaskBrushSizeChange: ((Float) -> Unit)?,
+    actions: LayerPanelActions
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        shape = RoundedCornerShape(10.dp),
+        color = StudioSurfaceVariant
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    stringResource(R.string.layer_mask_controls),
+                    color = IndigoPrimary,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(
+                        selected = showMaskRubyOverlay,
+                        onClick = { onToggleRubyOverlay?.invoke() },
+                        label = { Text(stringResource(R.string.layer_mask_overlay), fontSize = 10.sp) },
+                        modifier = Modifier.heightIn(min = 32.dp).testTag("chip_ruby_overlay")
+                    )
+                    FilterChip(
+                        selected = layer.isEditingMask,
+                        onClick = { onSetEditingMask?.invoke(!layer.isEditingMask) },
+                        label = {
+                            Text(
+                                if (layer.isEditingMask) stringResource(R.string.layer_mask_editing_mask) else stringResource(R.string.layer_mask_editing_layer),
+                                fontSize = 10.sp
+                            )
+                        },
+                        modifier = Modifier.heightIn(min = 32.dp).testTag("chip_editing_mask")
+                    )
+                }
+            }
+
+            MaskSlider(
+                label = stringResource(R.string.layer_mask_density),
+                valueLabel = "${(layer.maskDensity * 100).roundToInt()}%",
+                value = layer.maskDensity,
+                range = 0f..1f,
+                onChange = { onMaskDensityChange?.invoke(it) },
+                onFinished = { onCommit?.invoke() },
+                tag = "slider_mask_density"
+            )
+            MaskSlider(
+                label = stringResource(R.string.layer_mask_feather),
+                valueLabel = "${layer.maskFeather.roundToInt()} px",
+                value = layer.maskFeather,
+                range = 0f..50f,
+                onChange = { onMaskFeatherChange?.invoke(it) },
+                onFinished = { onCommit?.invoke() },
+                tag = "slider_mask_feather"
+            )
+
+            // Gradient: revealed -> hidden, limited to the selection when one is active.
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    stringResource(if (hasActiveSelection) R.string.layer_mask_gradient_in_selection else R.string.layer_mask_gradient),
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    modifier = Modifier.weight(1f)
+                )
+                listOf(
+                    Triple(MaskGradient.TOP_TO_BOTTOM, Icons.Default.ArrowDownward, R.string.mask_gradient_down),
+                    Triple(MaskGradient.BOTTOM_TO_TOP, Icons.Default.ArrowUpward, R.string.mask_gradient_up),
+                    Triple(MaskGradient.LEFT_TO_RIGHT, Icons.Default.ArrowForward, R.string.mask_gradient_right),
+                    Triple(MaskGradient.RIGHT_TO_LEFT, Icons.Default.ArrowBack, R.string.mask_gradient_left),
+                    Triple(MaskGradient.RADIAL, Icons.Default.RadioButtonUnchecked, R.string.mask_gradient_radial)
+                ).forEach { (type, icon, label) ->
+                    IconButton(onClick = { actions.onMaskGradient(type) }, modifier = Modifier.size(40.dp)) {
+                        Icon(icon, contentDescription = stringResource(label), tint = Color.White, modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+
+            // Editing Mask Toolbar
+            if (layer.isEditingMask) {
+                Spacer(Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                        FilterChip(
+                            selected = isMaskEditingBlack,
+                            onClick = { onToggleMaskPaintColor?.invoke() },
+                            label = {
+                                Text(
+                                    if (isMaskEditingBlack) stringResource(R.string.layer_mask_paint_black) else stringResource(R.string.layer_mask_paint_white),
+                                    fontSize = 10.sp
+                                )
+                            },
+                            modifier = Modifier.heightIn(min = 32.dp)
+                        )
+                        IconButton(
+                            onClick = { onInvertLayerMask?.invoke() },
+                            modifier = Modifier.size(40.dp).testTag("btn_invert_mask")
+                        ) {
+                            Icon(Icons.Default.InvertColors, contentDescription = stringResource(R.string.layer_mask_invert), tint = Color.White, modifier = Modifier.size(16.dp))
+                        }
+                    }
+                    TextButton(
+                        onClick = { onSetEditingMask?.invoke(false) },
+                        modifier = Modifier.heightIn(min = 32.dp)
+                    ) {
+                        Text(stringResource(R.string.action_done), fontSize = 11.sp)
+                    }
+                }
+
+                MaskSlider(
+                    label = stringResource(R.string.layer_mask_brush_size),
+                    valueLabel = "${maskBrushSizeDp.roundToInt()} dp",
+                    value = maskBrushSizeDp,
+                    range = 2f..120f,
+                    onChange = { onMaskBrushSizeChange?.invoke(it) },
+                    tag = "slider_mask_brush_size"
+                )
+                MaskSlider(
+                    label = stringResource(R.string.layer_mask_hardness),
+                    valueLabel = "${(maskBrushHardness * 100).roundToInt()}%",
+                    value = maskBrushHardness,
+                    range = 0f..1f,
+                    onChange = actions.onMaskBrushHardnessChange,
+                    tag = "slider_mask_brush_hardness"
+                )
+                MaskSlider(
+                    label = stringResource(R.string.layer_mask_opacity),
+                    valueLabel = "${(maskBrushOpacity * 100).roundToInt()}%",
+                    value = maskBrushOpacity,
+                    range = 0.05f..1f,
+                    onChange = actions.onMaskBrushOpacityChange,
+                    tag = "slider_mask_brush_opacity"
+                )
             }
         }
     }
 }
 
 @Composable
-private fun LayerThumbnailContent(layer: Layer) {
-    when (layer.type) {
-        LayerType.IMAGE -> {
-            val bmp = layer.bitmap
-            if (bmp != null && !bmp.isRecycled) {
-                Image(bmp.asImageBitmap(), contentDescription = stringResource(R.string.layer_thumbnail), modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-            } else Icon(Icons.Default.Image, null, tint = Color.Gray)
+private fun MaskSlider(
+    label: String,
+    valueLabel: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    onChange: (Float) -> Unit,
+    onFinished: (() -> Unit)? = null,
+    tag: String
+) {
+    Row(
+        Modifier.fillMaxWidth().padding(top = 2.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(label, color = Color.White, fontSize = 11.sp)
+        Text(valueLabel, color = IndigoPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+    }
+    Slider(
+        value = value.coerceIn(range.start, range.endInclusive),
+        onValueChange = onChange,
+        onValueChangeFinished = { onFinished?.invoke() },
+        valueRange = range,
+        modifier = Modifier.height(28.dp).testTag(tag)
+    )
+}
+
+private const val THUMB_SIZE = 96
+
+/**
+ * Small thumbnail of the layer as placed on the canvas (transform, adjustments, filter), without
+ * its mask, which has its own thumbnail. Rendered off the main thread and debounced while sliders move.
+ */
+@Composable
+private fun rememberLayerThumbnail(layer: Layer, docW: Int, docH: Int): ImageBitmap? {
+    val context = LocalContext.current
+    val snapshot = layer.previewSnapshot().also { it.isMaskEnabled = false }
+    val key = snapshot.hashCode() xor (layer.bitmap?.generationId ?: 0)
+    val state = produceState<ImageBitmap?>(initialValue = null, layer.id, key, docW, docH) {
+        delay(120)
+        val w = if (docW > 0) docW else layer.bitmap?.width ?: return@produceState
+        val h = if (docH > 0) docH else layer.bitmap?.height ?: return@produceState
+        val ratio = THUMB_SIZE.toFloat() / max(w, h).toFloat()
+        val tw = (w * ratio).roundToInt().coerceAtLeast(1)
+        val th = (h * ratio).roundToInt().coerceAtLeast(1)
+        value = try {
+            withContext(Dispatchers.Default) {
+                LayerRenderer.renderSingleLayerToBitmap(context, snapshot, tw, th, ratio)?.asImageBitmap()
+            }
+        } catch (e: OutOfMemoryError) {
+            null
         }
-        LayerType.TEXT -> Text("T", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+    }
+    return state.value
+}
+
+/** Black/white thumbnail of the mask (white = revealed), placed where the mask currently is. */
+@Composable
+private fun rememberMaskThumbnail(layer: Layer, docW: Int, docH: Int): ImageBitmap? {
+    val mask = layer.maskBitmap
+    val anchorKey = LayerRenderer.linkedMaskMatrix(layer, max(docW, 1), max(docH, 1))?.let { m ->
+        FloatArray(9).also { m.getValues(it) }.contentHashCode()
+    } ?: 0
+    val state = produceState<ImageBitmap?>(initialValue = null, mask, mask?.generationId, anchorKey, docW, docH) {
+        if (mask == null || mask.isRecycled) { value = null; return@produceState }
+        delay(80)
+        val w = if (docW > 0) docW else mask.width
+        val h = if (docH > 0) docH else mask.height
+        val ratio = THUMB_SIZE.toFloat() / max(w, h).toFloat()
+        val tw = (w * ratio).roundToInt().coerceAtLeast(1)
+        val th = (h * ratio).roundToInt().coerceAtLeast(1)
+        value = withContext(Dispatchers.Default) {
+            if (mask.isRecycled) return@withContext null
+            val out = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888)
+            out.eraseColor(android.graphics.Color.BLACK)
+            val moved = LayerRenderer.linkedMaskMatrix(layer, w, h)
+            val m = AndroidMatrix().apply {
+                setScale(w.toFloat() / mask.width, h.toFloat() / mask.height)
+                if (moved != null) postConcat(moved)
+                postScale(tw.toFloat() / w, th.toFloat() / h)
+            }
+            val canvas = AndroidCanvas(out)
+            if (moved != null) {
+                // Area the moved mask no longer covers is revealed, as rendered.
+                canvas.drawColor(android.graphics.Color.WHITE)
+                val hole = AndroidPaint().apply { xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.CLEAR) }
+                val r = android.graphics.RectF(0f, 0f, mask.width.toFloat(), mask.height.toFloat())
+                m.mapRect(r)
+                canvas.drawRect(r, hole)
+                canvas.drawColor(android.graphics.Color.BLACK, android.graphics.PorterDuff.Mode.DST_OVER)
+            }
+            // An ALPHA_8 bitmap is drawn in the paint colour: white where the mask reveals.
+            canvas.drawBitmap(mask, m, AndroidPaint(AndroidPaint.FILTER_BITMAP_FLAG).apply { color = android.graphics.Color.WHITE })
+            out.asImageBitmap()
+        }
+    }
+    return state.value
+}
+
+@Composable
+private fun LayerThumbnailContent(layer: Layer, docW: Int, docH: Int) {
+    when (layer.type) {
         LayerType.ADJUSTMENT -> Icon(Icons.Default.Tune, null, tint = IndigoPrimary)
-        else -> Icon(Icons.Default.Layers, null, tint = Color.Gray)
+        else -> {
+            val thumb = rememberLayerThumbnail(layer, docW, docH)
+            if (thumb != null) {
+                Image(thumb, contentDescription = stringResource(R.string.layer_thumbnail), modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+            } else {
+                when (layer.type) {
+                    LayerType.TEXT -> Text("T", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+                    LayerType.IMAGE -> Icon(Icons.Default.Image, null, tint = Color.Gray)
+                    else -> Icon(Icons.Default.Layers, null, tint = Color.Gray)
+                }
+            }
+        }
     }
 }

@@ -99,6 +99,8 @@ class MainActivity : AppCompatActivity() {
                                     brushSizeDp = uiState.brushSizeDp,
                                     magicWandTolerance = uiState.magicWandTolerance,
                                     isMagicWandContiguous = uiState.isMagicWandContiguous,
+                                    wandOptions = uiState.wandOptions,
+                                    onWandOptionsChange = { viewModel.setWandOptions(it) },
                                     inpaintRadiusPx = uiState.inpaintRadiusPx,
                                     inpaintFeatherPx = uiState.inpaintFeatherPx,
                                     canUndo = uiState.canUndo,
@@ -121,7 +123,7 @@ class MainActivity : AppCompatActivity() {
                                     onSelectLayer = { viewModel.selectLayer(it) },
                                     onUpdateLayer = { action -> viewModel.updateSelectedLayer(action) },
                                     onUpdateLayerTransient = { action -> viewModel.updateSelectedLayerTransient(action) },
-                                    onCommitHistoryState = { viewModel.saveHistoryState() },
+                                    onCommitHistoryState = { viewModel.commitPendingHistory() },
                                     onCancelHistoryState = { viewModel.cancelHistoryTransaction() },
                                     onOpacityChange = { op -> viewModel.updateSelectedLayerTransient { l -> l.opacity = op } },
                                     onBlendModeChange = { mode -> viewModel.updateSelectedLayer { l -> l.blendMode = mode } },
@@ -142,6 +144,13 @@ class MainActivity : AppCompatActivity() {
                                     isSmartEdgeSnapEnabled = uiState.isSmartEdgeSnapEnabled,
                                     isSeamlessBlendEnabled = uiState.isSeamlessBlendEnabled,
                                     onInpaintEngineModeChange = { viewModel.setInpaintEngineMode(it) },
+                                    isInpaintProtectMode = uiState.isInpaintProtectMode,
+                                    onToggleInpaintProtect = { viewModel.setInpaintProtectMode(!uiState.isInpaintProtectMode) },
+                                    onClearInpaintProtect = { viewModel.clearInpaintProtect() },
+                                    inpaintProtectMask = uiState.inpaintProtectMask,
+                                    inpaintProtectRevision = uiState.inpaintProtectRevision,
+                                    canRetryRemoval = uiState.canRetryRemoval,
+                                    onRetryRemoval = { viewModel.retryObjectRemoval() },
                                     onToggleSmartEdgeSnap = { viewModel.toggleSmartEdgeSnap() },
                                     onToggleSeamlessBlend = { viewModel.toggleSeamlessBlend() },
                                     onInpaintSelectionModeChange = { viewModel.setInpaintSelectionMode(it) },
@@ -162,7 +171,9 @@ class MainActivity : AppCompatActivity() {
                                     onToggleMagicWandContiguous = { viewModel.setMagicWandContiguous(it) },
                                     onBrushStrokeComplete = { points, docRadius ->
                                         val activeLayer = uiState.currentProject?.layers?.getOrNull(uiState.selectedLayerIndex)
-                                        if (activeLayer?.isEditingMask == true) {
+                                        if (uiState.activeTool == ActiveTool.OBJECT_REMOVAL && uiState.isInpaintProtectMode) {
+                                            viewModel.paintProtectSegment(points, docRadius, com.example.ui.viewmodel.StrokePhase.END)
+                                        } else if (activeLayer?.isEditingMask == true) {
                                             viewModel.paintOnLayerMask(points, docRadius, isReveal = !uiState.isMaskEditingBlack)
                                         } else if (uiState.activeSelectionTool == SelectionToolType.QUICK_SELECTION && uiState.activeTool == ActiveTool.SELECTION) {
                                             viewModel.applyQuickSelection(points, isEraser = false, docRadius = docRadius)
@@ -188,10 +199,20 @@ class MainActivity : AppCompatActivity() {
                                     onRedoSelection = { viewModel.redoSelection() },
                                     onSaveProject = { viewModel.saveCurrentProject() },
                                     onExportConfirm = { isPng, quality -> exportImageSafely(isPng, quality) },
+                                    luts = uiState.luts,
+                                    customPresets = uiState.customPresets,
+                                    favoriteFilters = uiState.favoriteFilters,
+                                    onToggleFavoriteFilter = { viewModel.toggleFavoriteFilter(it) },
+                                    onImportLut = { viewModel.importLut(it) },
+                                    onDeleteLut = { viewModel.deleteLut(it) },
+                                    onSaveLook = { viewModel.saveCurrentLookAsPreset(it) },
+                                    onDeleteCustomPreset = { viewModel.deleteCustomPreset(it) },
                                     // Live strokes: the selection / mask updates while the finger moves.
                                     onStrokeSegment = { points, radius, phase ->
                                         val activeLayer = uiState.currentProject?.layers?.getOrNull(uiState.selectedLayerIndex)
                                         when {
+                                            uiState.activeTool == ActiveTool.OBJECT_REMOVAL && uiState.isInpaintProtectMode ->
+                                                viewModel.paintProtectSegment(points, radius, phase)
                                             uiState.activeTool == ActiveTool.LAYERS && activeLayer?.isEditingMask == true ->
                                                 viewModel.paintMaskSegment(points, radius, isReveal = !uiState.isMaskEditingBlack, phase = phase)
                                             uiState.activeTool == ActiveTool.SELECTION && uiState.activeSelectionTool == SelectionToolType.QUICK_SELECTION ->
@@ -218,10 +239,20 @@ class MainActivity : AppCompatActivity() {
                                     modifierAmount = uiState.selectionModifierAmount,
                                     onModifierPreview = { op, amount -> viewModel.previewSelectionModifier(op, amount) },
                                     onModifierCommit = { viewModel.endSelectionModifier() },
+                                    selectionRefine = uiState.selectionRefine,
+                                    onSelectionRefinePreview = { viewModel.previewSelectionRefine(it) },
+                                    onSelectionRefineApply = { viewModel.applySelectionRefine() },
+                                    onSelectionRefineReset = { viewModel.resetSelectionRefine() },
+                                    onBorderSelection = { viewModel.borderSelection(it) },
+                                    onCleanupSelection = { viewModel.cleanupSelection() },
                                     isQuickAutoEnhance = uiState.isQuickSelectionAutoEnhance,
                                     onToggleQuickAutoEnhance = { viewModel.setQuickSelectionAutoEnhance(it) },
                                     isQuickSampleAll = uiState.isQuickSelectionSampleAll,
                                     onToggleQuickSampleAll = { viewModel.setQuickSelectionSampleAll(it) },
+                                    quickSelectionTolerance = uiState.quickSelectionTolerance,
+                                    onQuickSelectionToleranceChange = { viewModel.setQuickSelectionTolerance(it) },
+                                    quickSelectionEdgeSensitivity = uiState.quickSelectionEdgeSensitivity,
+                                    onQuickSelectionEdgeSensitivityChange = { viewModel.setQuickSelectionEdgeSensitivity(it) },
                                     refinePreview = uiState.refinePreview,
                                     refinePreviewMode = uiState.refinePreviewMode,
                                     onRefinePreviewModeChange = { viewModel.setRefinePreviewMode(it) },
@@ -269,7 +300,54 @@ class MainActivity : AppCompatActivity() {
                                     onToggleRubyOverlay = { viewModel.toggleMaskRubyOverlay() },
                                     showMaskRubyOverlay = uiState.showMaskRubyOverlay,
                                     maskBrushSizeDp = uiState.maskBrushSizeDp,
-                                    onMaskBrushSizeChange = { viewModel.setMaskBrushSize(it) }
+                                    onMaskBrushSizeChange = { viewModel.setMaskBrushSize(it) },
+                                    maskBrushHardness = uiState.maskBrushHardness,
+                                    onTextConfigChange = { viewModel.updateTextConfigTransient(it) },
+                                    smartAutoStrength = uiState.smartAutoStrength,
+                                    onSmartAutoStrengthChange = { viewModel.setSmartAutoStrength(it) },
+                                    onCreateAdjustmentLayerFromSelection = { viewModel.createAdjustmentLayerFromSelection() },
+                                    onSampleCurveColor = { x, y -> viewModel.sampleColorForCurves(x, y) },
+                                    onSampleReplaceColor = { x, y -> viewModel.sampleColorForReplace(x, y) },
+                                    onSampleHslColor = { x, y -> viewModel.sampleColorForHsl(x, y) },
+                                    cropStraighten = uiState.cropStraighten,
+                                    onCropStraightenChange = { viewModel.setCropStraighten(it) },
+                                    cropGrid = uiState.cropGrid,
+                                    onCropGridChange = { viewModel.setCropGrid(it) },
+                                    cropExpandCanvas = uiState.cropExpandCanvas,
+                                    onToggleCropExpandCanvas = { viewModel.setCropExpandCanvas(!uiState.cropExpandCanvas) },
+                                    cropTargetWidth = uiState.cropTargetWidth,
+                                    cropTargetHeight = uiState.cropTargetHeight,
+                                    onCropTargetSize = { w, h -> viewModel.setCropTargetSize(w, h) },
+                                    onSwapCropOrientation = { viewModel.swapCropOrientation() },
+                                    onRotateCanvas = { viewModel.rotateCanvas90(it) },
+                                    onFlipCanvas = { viewModel.flipCanvas(it) },
+                                    perspectiveVertical = uiState.perspectiveVertical,
+                                    perspectiveHorizontal = uiState.perspectiveHorizontal,
+                                    onKeystoneChange = { v, h -> viewModel.setPerspectiveKeystone(v, h) },
+                                    onAutoDetectDocument = { viewModel.autoDetectPerspective() },
+                                    transformMode = uiState.transformMode,
+                                    onTransformModeChange = { viewModel.setTransformMode(it) },
+                                    transformPivot = uiState.transformPivot,
+                                    onTransformPivotChange = { viewModel.setTransformPivot(it) },
+                                    transformFromCenter = uiState.transformFromCenter,
+                                    onToggleTransformFromCenter = { viewModel.toggleTransformFromCenter() },
+                                    transformLockAspect = uiState.transformLockAspect,
+                                    onToggleTransformLockAspect = { viewModel.toggleTransformLockAspect() },
+                                    transformSnap = uiState.transformSnap,
+                                    onToggleTransformSnap = { viewModel.toggleTransformSnap() },
+                                    maskBrushOpacity = uiState.maskBrushOpacity,
+                                    layerActions = com.example.ui.components.LayerPanelActions(
+                                        onToggleVisibilityAt = { viewModel.toggleLayerVisibilityAt(it) },
+                                        onToggleLockAt = { viewModel.toggleLayerLockAt(it) },
+                                        onMoveLayer = { from, to -> viewModel.moveLayer(from, to) },
+                                        onRenameLayer = { index, name -> viewModel.renameLayer(index, name) },
+                                        onToggleClip = { viewModel.toggleClippingMask() },
+                                        onToggleMaskLink = { viewModel.toggleMaskLink() },
+                                        onSelectLayerPixels = { viewModel.selectLayerPixels(it) },
+                                        onMaskGradient = { viewModel.applyMaskGradient(it) },
+                                        onMaskBrushHardnessChange = { viewModel.setMaskBrushHardness(it) },
+                                        onMaskBrushOpacityChange = { viewModel.setMaskBrushOpacity(it) }
+                                    )
                                 )
                             }
                         }

@@ -9,7 +9,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -18,19 +17,28 @@ import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.filled.FormatAlignCenter
 import androidx.compose.material.icons.filled.FormatAlignLeft
 import androidx.compose.material.icons.filled.FormatAlignRight
+import androidx.compose.material.icons.filled.FormatBold
+import androidx.compose.material.icons.filled.FormatItalic
+import androidx.compose.material.icons.filled.FormatUnderlined
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.R
@@ -40,6 +48,9 @@ import com.example.data.model.TextLayerConfig
 import com.example.ui.theme.IndigoPrimary
 import com.example.ui.theme.StudioSurface
 import com.example.ui.theme.StudioSurfaceVariant
+import java.util.Locale
+import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 
 private val RichPresetColors = listOf(
     0xFFFFFFFF.toInt(), // White
@@ -72,6 +83,8 @@ private val RichPresetColors = listOf(
     0xFFB45309.toInt()  // Bronze
 )
 
+private enum class ColorTarget { TEXT, GRADIENT, STROKE, BACKGROUND, GLOW, SHADOW }
+
 @Composable
 fun TextEditorPanel(
     config: TextLayerConfig,
@@ -81,15 +94,58 @@ fun TextEditorPanel(
     onConfigCommit: () -> Unit = {},
     onPositionChange: (posX: Float, posY: Float) -> Unit = { _, _ -> },
     onCenterText: () -> Unit = {},
+    /** Document size: the position sliders cover the whole image. */
+    documentWidth: Int = 1200,
+    documentHeight: Int = 1200,
+    /** When true the text field takes focus with all its text selected (new layer, double tap). */
+    requestEditFocus: Boolean = false,
+    onEditFocusHandled: () -> Unit = {},
+    /** Identifies the edited layer, so the text field resets when another text layer is selected. */
+    layerKey: String = "",
     modifier: Modifier = Modifier
 ) {
-    val focusManager = LocalFocusManager.current
-    var showColorPickerTarget by remember { mutableStateOf<String?>(null) } // "text", "stroke", "shadow", "glow"
+    var colorTarget by remember { mutableStateOf<ColorTarget?>(null) }
+    val focusRequester = remember { FocusRequester() }
+    val latestConfig by rememberUpdatedState(config)
+    val latestCommit by rememberUpdatedState(onConfigCommit)
+
+    // The field keeps its own cursor / selection; the layer text follows it. External changes
+    // (undo, another layer) replace the field content.
+    var fieldValue by remember(layerKey) { mutableStateOf(TextFieldValue(config.text, TextRange(config.text.length))) }
+    // Last text this field sent; anything else arriving in [config] is an external change.
+    // Only a NEW config text that the field did not send (undo, redo) replaces the field; a config
+    // that simply has not caught up with typing yet is ignored.
+    var lastSentText by remember(layerKey) { mutableStateOf(config.text) }
+    var lastSeenConfigText by remember(layerKey) { mutableStateOf(config.text) }
+    if (config.text != lastSeenConfigText) {
+        lastSeenConfigText = config.text
+        if (config.text != lastSentText) {
+            lastSentText = config.text
+            fieldValue = TextFieldValue(config.text, TextRange(config.text.length))
+        }
+    }
+
+    LaunchedEffect(requestEditFocus, layerKey) {
+        if (requestEditFocus) {
+            delay(120)
+            fieldValue = fieldValue.copy(selection = TextRange(0, fieldValue.text.length))
+            try {
+                focusRequester.requestFocus()
+            } catch (_: IllegalStateException) {
+                // Field not laid out yet; the user can still tap it.
+            }
+            onEditFocusHandled()
+        }
+    }
 
     DisposableEffect(Unit) {
-        onDispose {
-            onConfigCommit()
-        }
+        onDispose { latestCommit() }
+    }
+
+    fun change(newConfig: TextLayerConfig) = onConfigChange(newConfig)
+    fun changeAndCommit(newConfig: TextLayerConfig) {
+        onConfigChange(newConfig)
+        onConfigCommit()
     }
 
     Column(
@@ -109,27 +165,28 @@ fun TextEditorPanel(
 
         Spacer(modifier = Modifier.height(10.dp))
 
-        // Multiline Text Input Field
+        // Multiline text: Enter inserts a new line; the edit is committed when the field loses focus.
+        var hadFocus by remember { mutableStateOf(false) }
         OutlinedTextField(
-            value = config.text,
-            onValueChange = { onConfigChange(config.copy(text = it)) },
+            value = fieldValue,
+            onValueChange = { v ->
+                fieldValue = v
+                if (v.text != lastSentText) {
+                    lastSentText = v.text
+                    change(latestConfig.copy(text = v.text))
+                }
+            },
             label = { Text(stringResource(R.string.text_hint)) },
             minLines = 2,
-            maxLines = 4,
+            maxLines = 6,
             singleLine = false,
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-            keyboardActions = KeyboardActions(
-                onDone = {
-                    onConfigCommit()
-                    focusManager.clearFocus()
-                }
-            ),
+            keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
             modifier = Modifier
                 .fillMaxWidth()
+                .focusRequester(focusRequester)
                 .onFocusChanged { focusState ->
-                    if (!focusState.isFocused) {
-                        onConfigCommit()
-                    }
+                    if (hadFocus && !focusState.isFocused) onConfigCommit()
+                    hadFocus = focusState.isFocused
                 }
                 .testTag("input_text_content"),
             colors = OutlinedTextFieldDefaults.colors(
@@ -144,98 +201,155 @@ fun TextEditorPanel(
 
         Spacer(modifier = Modifier.height(14.dp))
 
-        // Font Family Selector
-        Text(
-            text = stringResource(R.string.font_family),
-            color = Color.White,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold
-        )
-        Spacer(modifier = Modifier.height(6.dp))
+        // Font family: each chip is written in its own font.
+        SectionTitle(stringResource(R.string.font_family))
         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             items(AvailableFonts) { fontItem ->
                 val isSelected = fontItem.name.equals(config.fontName, ignoreCase = true)
+                val family = remember(fontItem.fontResId) {
+                    fontItem.fontResId?.let { FontFamily(Font(it)) } ?: FontFamily.Default
+                }
                 Box(
                     modifier = Modifier
+                        .heightIn(min = 44.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(if (isSelected) IndigoPrimary else StudioSurfaceVariant)
-                        .clickable {
-                            onConfigChange(config.copy(fontName = fontItem.name))
-                            onConfigCommit()
-                        }
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .clickable { changeAndCommit(config.copy(fontName = fontItem.name)) }
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    contentAlignment = Alignment.Center
                 ) {
                     Text(
                         text = stringResource(fontItem.displayNameResId),
-                        color = if (isSelected) Color.White else Color.Gray,
-                        fontSize = 12.sp,
+                        color = if (isSelected) Color.White else Color.LightGray,
+                        fontSize = 13.sp,
+                        fontFamily = family,
                         fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
                     )
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(12.dp))
 
-        // Font Size Slider
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(text = stringResource(R.string.text_size), color = Color.White, fontSize = 12.sp)
-            Text(text = "${config.fontSizeSp.toInt()}sp", color = IndigoPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-        }
-        Slider(
-            value = config.fontSizeSp,
-            onValueChange = { onConfigChange(config.copy(fontSizeSp = it)) },
-            onValueChangeFinished = onConfigCommit,
-            valueRange = 12f..140f
-        )
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        // Text Alignment & Color Palette
-        Text(text = stringResource(R.string.text_align), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(modifier = Modifier.height(6.dp))
+        // Style and alignment
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                IconButton(
-                    onClick = {
-                        onConfigChange(config.copy(alignment = TextAlignment.LEFT))
-                        onConfigCommit()
-                    },
-                    modifier = Modifier.size(48.dp).background(if (config.alignment == TextAlignment.LEFT) IndigoPrimary else StudioSurfaceVariant, RoundedCornerShape(8.dp))
-                ) {
-                    Icon(Icons.Default.FormatAlignLeft, contentDescription = stringResource(R.string.text_align_left), tint = Color.White)
+                ToggleIcon(Icons.Default.FormatBold, stringResource(R.string.text_bold), config.isBold) {
+                    changeAndCommit(config.copy(isBold = !config.isBold))
                 }
-                IconButton(
-                    onClick = {
-                        onConfigChange(config.copy(alignment = TextAlignment.CENTER))
-                        onConfigCommit()
-                    },
-                    modifier = Modifier.size(48.dp).background(if (config.alignment == TextAlignment.CENTER) IndigoPrimary else StudioSurfaceVariant, RoundedCornerShape(8.dp))
-                ) {
-                    Icon(Icons.Default.FormatAlignCenter, contentDescription = stringResource(R.string.text_align_center), tint = Color.White)
+                ToggleIcon(Icons.Default.FormatItalic, stringResource(R.string.text_italic), config.isItalic) {
+                    changeAndCommit(config.copy(isItalic = !config.isItalic))
                 }
-                IconButton(
-                    onClick = {
-                        onConfigChange(config.copy(alignment = TextAlignment.RIGHT))
-                        onConfigCommit()
-                    },
-                    modifier = Modifier.size(48.dp).background(if (config.alignment == TextAlignment.RIGHT) IndigoPrimary else StudioSurfaceVariant, RoundedCornerShape(8.dp))
-                ) {
-                    Icon(Icons.Default.FormatAlignRight, contentDescription = stringResource(R.string.text_align_right), tint = Color.White)
+                ToggleIcon(Icons.Default.FormatUnderlined, stringResource(R.string.text_underline), config.isUnderline) {
+                    changeAndCommit(config.copy(isUnderline = !config.isUnderline))
                 }
             }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                ToggleIcon(Icons.Default.FormatAlignLeft, stringResource(R.string.text_align_left), config.alignment == TextAlignment.LEFT) {
+                    changeAndCommit(config.copy(alignment = TextAlignment.LEFT))
+                }
+                ToggleIcon(Icons.Default.FormatAlignCenter, stringResource(R.string.text_align_center), config.alignment == TextAlignment.CENTER) {
+                    changeAndCommit(config.copy(alignment = TextAlignment.CENTER))
+                }
+                ToggleIcon(Icons.Default.FormatAlignRight, stringResource(R.string.text_align_right), config.alignment == TextAlignment.RIGHT) {
+                    changeAndCommit(config.copy(alignment = TextAlignment.RIGHT))
+                }
+            }
+        }
 
+        Spacer(modifier = Modifier.height(10.dp))
+
+        LabeledSlider(stringResource(R.string.text_size), config.fontSizeSp.roundToInt().toString(), config.fontSizeSp, 8f..200f,
+            { change(config.copy(fontSizeSp = it)) }, onConfigCommit)
+        LabeledSlider(stringResource(R.string.text_max_width), "${config.maxLineWidthPercent.roundToInt()}%", config.maxLineWidthPercent, 20f..100f,
+            { change(config.copy(maxLineWidthPercent = it)) }, onConfigCommit)
+
+        Spacer(modifier = Modifier.height(10.dp))
+
+        // Fill colour (+ optional gradient)
+        ColorHeader(stringResource(R.string.text_color)) { colorTarget = ColorTarget.TEXT }
+        ColorSwatchesRow(selectedColorHex = config.colorHex, onColorSelect = { changeAndCommit(config.copy(colorHex = it)) })
+        SwitchRow(stringResource(R.string.text_gradient), config.gradientEnabled) {
+            changeAndCommit(config.copy(gradientEnabled = it))
+        }
+        if (config.gradientEnabled) {
+            ColorHeader(stringResource(R.string.text_gradient_end), small = true) { colorTarget = ColorTarget.GRADIENT }
+            ColorSwatchesRow(selectedColorHex = config.gradientEndColorHex, onColorSelect = { changeAndCommit(config.copy(gradientEndColorHex = it)) })
+            LabeledSlider(stringResource(R.string.text_gradient_angle), "${config.gradientAngle.roundToInt()}°", config.gradientAngle, 0f..360f,
+                { change(config.copy(gradientAngle = it)) }, onConfigCommit)
+        }
+
+        SectionDivider()
+
+        // Outline
+        LabeledSlider(stringResource(R.string.text_stroke_width), config.strokeWidthDp.roundToInt().toString(), config.strokeWidthDp, 0f..20f,
+            { change(config.copy(strokeWidthDp = it)) }, onConfigCommit, bold = true)
+        if (config.strokeWidthDp > 0f) {
+            ColorHeader(stringResource(R.string.text_stroke_color), small = true) { colorTarget = ColorTarget.STROKE }
+            ColorSwatchesRow(selectedColorHex = config.strokeColorHex, onColorSelect = { changeAndCommit(config.copy(strokeColorHex = it)) })
+        }
+
+        SectionDivider()
+
+        // Background box
+        SwitchRow(stringResource(R.string.text_background), config.backgroundEnabled, bold = true) {
+            changeAndCommit(config.copy(backgroundEnabled = it))
+        }
+        if (config.backgroundEnabled) {
+            ColorHeader(stringResource(R.string.text_background_color), small = true) { colorTarget = ColorTarget.BACKGROUND }
+            ColorSwatchesRow(selectedColorHex = config.backgroundColorHex, onColorSelect = { changeAndCommit(config.copy(backgroundColorHex = it)) })
+            LabeledSlider(stringResource(R.string.text_opacity), "${(config.backgroundOpacity * 100).roundToInt()}%", config.backgroundOpacity, 0f..1f,
+                { change(config.copy(backgroundOpacity = it)) }, onConfigCommit)
+            LabeledSlider(stringResource(R.string.text_background_padding), config.backgroundPadding.roundToInt().toString(), config.backgroundPadding, 0f..60f,
+                { change(config.copy(backgroundPadding = it)) }, onConfigCommit)
+            LabeledSlider(stringResource(R.string.text_background_corner), config.backgroundCorner.roundToInt().toString(), config.backgroundCorner, 0f..60f,
+                { change(config.copy(backgroundCorner = it)) }, onConfigCommit)
+        }
+
+        SectionDivider()
+
+        // Outer glow
+        LabeledSlider(stringResource(R.string.text_outer_glow), config.outerGlowRadiusDp.roundToInt().toString(), config.outerGlowRadiusDp, 0f..40f,
+            { change(config.copy(outerGlowRadiusDp = it)) }, onConfigCommit, bold = true)
+        if (config.outerGlowRadiusDp > 0f) {
+            ColorHeader(stringResource(R.string.text_glow_color), small = true) { colorTarget = ColorTarget.GLOW }
+            ColorSwatchesRow(selectedColorHex = config.outerGlowColorHex, onColorSelect = { changeAndCommit(config.copy(outerGlowColorHex = it)) })
+            LabeledSlider(stringResource(R.string.text_opacity), "${(config.glowOpacity * 100).roundToInt()}%", config.glowOpacity, 0f..1f,
+                { change(config.copy(glowOpacity = it)) }, onConfigCommit)
+        }
+
+        SectionDivider()
+
+        // Drop shadow
+        LabeledSlider(stringResource(R.string.text_drop_shadow), config.shadowRadiusDp.roundToInt().toString(), config.shadowRadiusDp, 0f..35f,
+            { change(config.copy(shadowRadiusDp = it)) }, onConfigCommit, bold = true)
+        if (config.shadowRadiusDp > 0f) {
+            LabeledSlider(stringResource(R.string.text_shadow_offset_x), config.shadowDxDp.roundToInt().toString(), config.shadowDxDp, -30f..30f,
+                { change(config.copy(shadowDxDp = it)) }, onConfigCommit)
+            LabeledSlider(stringResource(R.string.text_shadow_offset_y), config.shadowDyDp.roundToInt().toString(), config.shadowDyDp, -30f..30f,
+                { change(config.copy(shadowDyDp = it)) }, onConfigCommit)
+            ColorHeader(stringResource(R.string.text_shadow_color), small = true) { colorTarget = ColorTarget.SHADOW }
+            ColorSwatchesRow(selectedColorHex = config.shadowColorHex, onColorSelect = { changeAndCommit(config.copy(shadowColorHex = it)) })
+            LabeledSlider(stringResource(R.string.text_opacity), "${(config.shadowOpacity * 100).roundToInt()}%", config.shadowOpacity, 0f..1f,
+                { change(config.copy(shadowOpacity = it)) }, onConfigCommit)
+        }
+
+        SectionDivider()
+
+        // Position over the whole image
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            SectionTitle(stringResource(R.string.text_position))
             OutlinedButton(
                 onClick = onCenterText,
-                modifier = Modifier.heightIn(min = 48.dp),
+                modifier = Modifier.heightIn(min = 44.dp),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
             ) {
                 Icon(Icons.Default.CenterFocusStrong, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -243,244 +357,142 @@ fun TextEditorPanel(
                 Text(stringResource(R.string.text_center_canvas), fontSize = 11.sp)
             }
         }
+        val halfW = (documentWidth / 2f).coerceAtLeast(50f)
+        val halfH = (documentHeight / 2f).coerceAtLeast(50f)
+        LabeledSlider(stringResource(R.string.transform_pos_x), "${positionX.roundToInt()} px", positionX.coerceIn(-halfW, halfW), -halfW..halfW,
+            { onPositionChange(it, positionY) }, onConfigCommit)
+        LabeledSlider(stringResource(R.string.transform_pos_y), "${positionY.roundToInt()} px", positionY.coerceIn(-halfH, halfH), -halfH..halfH,
+            { onPositionChange(positionX, it) }, onConfigCommit)
 
-        Spacer(modifier = Modifier.height(14.dp))
+        SectionDivider()
 
-        // Text Fill Color Swatches (28 colors + custom picker)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(text = stringResource(R.string.text_color), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            TextButton(
-                onClick = { showColorPickerTarget = "text" },
-                modifier = Modifier.heightIn(min = 48.dp)
-            ) {
-                Icon(Icons.Default.ColorLens, contentDescription = null, modifier = Modifier.size(16.dp), tint = IndigoPrimary)
-                Spacer(Modifier.width(4.dp))
-                Text(stringResource(R.string.text_custom_color), fontSize = 11.sp, color = IndigoPrimary)
-            }
-        }
-        Spacer(modifier = Modifier.height(4.dp))
-        ColorSwatchesRow(
-            selectedColorHex = config.colorHex,
-            onColorSelect = { hex ->
-                onConfigChange(config.copy(colorHex = hex))
-                onConfigCommit()
-            }
-        )
-
-        Spacer(modifier = Modifier.height(14.dp))
-
-        // Stroke / Outline Section
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(text = stringResource(R.string.text_stroke_width), color = Color.White, fontSize = 12.sp)
-            Text(text = "${config.strokeWidthDp.toInt()}dp", color = IndigoPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-        }
-        Slider(
-            value = config.strokeWidthDp,
-            onValueChange = { onConfigChange(config.copy(strokeWidthDp = it)) },
-            onValueChangeFinished = onConfigCommit,
-            valueRange = 0f..20f
-        )
-        if (config.strokeWidthDp > 0f) {
-            Spacer(modifier = Modifier.height(4.dp))
-            ColorSwatchesRow(
-                selectedColorHex = config.strokeColorHex,
-                onColorSelect = { hex ->
-                    onConfigChange(config.copy(strokeColorHex = hex))
-                    onConfigCommit()
-                }
-            )
-        }
-
-        Spacer(modifier = Modifier.height(14.dp))
-
-        // Outer Glow Section (glow radius & color)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(text = stringResource(R.string.text_outer_glow), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            Text(text = "${config.outerGlowRadiusDp.toInt()}dp", color = IndigoPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-        }
-        Slider(
-            value = config.outerGlowRadiusDp,
-            onValueChange = { onConfigChange(config.copy(outerGlowRadiusDp = it)) },
-            onValueChangeFinished = onConfigCommit,
-            valueRange = 0f..40f
-        )
-        if (config.outerGlowRadiusDp > 0f) {
-            Spacer(modifier = Modifier.height(4.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(text = stringResource(R.string.text_glow_color), color = Color.LightGray, fontSize = 11.sp)
-                TextButton(
-                    onClick = { showColorPickerTarget = "glow" },
-                    modifier = Modifier.heightIn(min = 48.dp)
-                ) {
-                    Icon(Icons.Default.ColorLens, contentDescription = null, modifier = Modifier.size(16.dp), tint = IndigoPrimary)
-                    Spacer(Modifier.width(4.dp))
-                    Text(stringResource(R.string.text_custom_color), fontSize = 11.sp, color = IndigoPrimary)
-                }
-            }
-            ColorSwatchesRow(
-                selectedColorHex = config.outerGlowColorHex,
-                onColorSelect = { hex ->
-                    onConfigChange(config.copy(outerGlowColorHex = hex))
-                    onConfigCommit()
-                }
-            )
-        }
-
-        Spacer(modifier = Modifier.height(14.dp))
-
-        // Drop Shadow Section (radius, offset dx/dy, color)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(text = stringResource(R.string.text_drop_shadow), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            Text(text = "${config.shadowRadiusDp.toInt()}dp", color = IndigoPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-        }
-        Slider(
-            value = config.shadowRadiusDp,
-            onValueChange = { onConfigChange(config.copy(shadowRadiusDp = it)) },
-            onValueChangeFinished = onConfigCommit,
-            valueRange = 0f..35f
-        )
-        if (config.shadowRadiusDp > 0f) {
-            Spacer(modifier = Modifier.height(4.dp))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(stringResource(R.string.text_shadow_offset_x), color = Color.LightGray, fontSize = 11.sp)
-                Text("${config.shadowDxDp.toInt()}dp", color = IndigoPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            }
-            Slider(
-                value = config.shadowDxDp,
-                onValueChange = { onConfigChange(config.copy(shadowDxDp = it)) },
-                onValueChangeFinished = onConfigCommit,
-                valueRange = -30f..30f
-            )
-
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                Text(stringResource(R.string.text_shadow_offset_y), color = Color.LightGray, fontSize = 11.sp)
-                Text("${config.shadowDyDp.toInt()}dp", color = IndigoPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-            }
-            Slider(
-                value = config.shadowDyDp,
-                onValueChange = { onConfigChange(config.copy(shadowDyDp = it)) },
-                onValueChangeFinished = onConfigCommit,
-                valueRange = -30f..30f
-            )
-
-            Spacer(modifier = Modifier.height(4.dp))
-            ColorSwatchesRow(
-                selectedColorHex = config.shadowColorHex,
-                onColorSelect = { hex ->
-                    onConfigChange(config.copy(shadowColorHex = hex))
-                    onConfigCommit()
-                }
-            )
-        }
-
-        Spacer(modifier = Modifier.height(14.dp))
-
-        // Text Position Controls
-        Text(text = stringResource(R.string.text_position), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(modifier = Modifier.height(4.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(stringResource(R.string.transform_pos_x), color = Color.LightGray, fontSize = 11.sp)
-            Text("${positionX.toInt()} px", color = IndigoPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-        }
-        Slider(
-            value = positionX,
-            onValueChange = { newX -> onPositionChange(newX, positionY) },
-            onValueChangeFinished = onConfigCommit,
-            valueRange = -600f..600f
-        )
-
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(stringResource(R.string.transform_pos_y), color = Color.LightGray, fontSize = 11.sp)
-            Text("${positionY.toInt()} px", color = IndigoPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-        }
-        Slider(
-            value = positionY,
-            onValueChange = { newY -> onPositionChange(positionX, newY) },
-            onValueChangeFinished = onConfigCommit,
-            valueRange = -600f..600f
-        )
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        // Line Spacing Multiplier Slider
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(text = stringResource(R.string.text_line_spacing), color = Color.White, fontSize = 12.sp)
-            Text(text = String.format("%.1fx", config.lineSpacingMultiplier), color = IndigoPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-        }
-        Slider(
-            value = config.lineSpacingMultiplier,
-            onValueChange = { onConfigChange(config.copy(lineSpacingMultiplier = it)) },
-            onValueChangeFinished = onConfigCommit,
-            valueRange = 0.8f..2.5f
-        )
-
-        Spacer(modifier = Modifier.height(10.dp))
-
-        // Letter Spacing Slider
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(text = stringResource(R.string.text_letter_spacing), color = Color.White, fontSize = 12.sp)
-            Text(text = String.format("%.2fem", config.letterSpacingEm), color = IndigoPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-        }
-        Slider(
-            value = config.letterSpacingEm,
-            onValueChange = { onConfigChange(config.copy(letterSpacingEm = it)) },
-            onValueChangeFinished = onConfigCommit,
-            valueRange = -0.05f..0.3f
-        )
+        LabeledSlider(stringResource(R.string.text_line_spacing), String.format(Locale.US, "%.1fx", config.lineSpacingMultiplier), config.lineSpacingMultiplier, 0.8f..2.5f,
+            { change(config.copy(lineSpacingMultiplier = it)) }, onConfigCommit)
+        LabeledSlider(stringResource(R.string.text_letter_spacing), String.format(Locale.US, "%.2f", config.letterSpacingEm), config.letterSpacingEm, -0.05f..0.5f,
+            { change(config.copy(letterSpacingEm = it)) }, onConfigCommit)
     }
 
     // Custom Color Dialog
-    showColorPickerTarget?.let { target ->
+    colorTarget?.let { target ->
         val currentColor = when (target) {
-            "text" -> config.colorHex
-            "stroke" -> config.strokeColorHex
-            "shadow" -> config.shadowColorHex
-            "glow" -> config.outerGlowColorHex
-            else -> config.colorHex
+            ColorTarget.TEXT -> config.colorHex
+            ColorTarget.GRADIENT -> config.gradientEndColorHex
+            ColorTarget.STROKE -> config.strokeColorHex
+            ColorTarget.BACKGROUND -> config.backgroundColorHex
+            ColorTarget.GLOW -> config.outerGlowColorHex
+            ColorTarget.SHADOW -> config.shadowColorHex
         }
-
         CustomColorPickerDialog(
             initialColorHex = currentColor,
-            onDismiss = { showColorPickerTarget = null },
-            onColorConfirmed = { selectedHex ->
-                when (target) {
-                    "text" -> onConfigChange(config.copy(colorHex = selectedHex))
-                    "stroke" -> onConfigChange(config.copy(strokeColorHex = selectedHex))
-                    "shadow" -> onConfigChange(config.copy(shadowColorHex = selectedHex))
-                    "glow" -> onConfigChange(config.copy(outerGlowColorHex = selectedHex))
-                }
-                onConfigCommit()
-                showColorPickerTarget = null
+            onDismiss = { colorTarget = null },
+            onColorConfirmed = { hex ->
+                changeAndCommit(
+                    when (target) {
+                        ColorTarget.TEXT -> config.copy(colorHex = hex)
+                        ColorTarget.GRADIENT -> config.copy(gradientEndColorHex = hex)
+                        ColorTarget.STROKE -> config.copy(strokeColorHex = hex)
+                        ColorTarget.BACKGROUND -> config.copy(backgroundColorHex = hex)
+                        ColorTarget.GLOW -> config.copy(outerGlowColorHex = hex)
+                        ColorTarget.SHADOW -> config.copy(shadowColorHex = hex)
+                    }
+                )
+                colorTarget = null
             }
         )
+    }
+}
+
+@Composable
+private fun SectionTitle(text: String) {
+    Text(text = text, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+    Spacer(modifier = Modifier.height(6.dp))
+}
+
+@Composable
+private fun SectionDivider() {
+    Spacer(Modifier.height(8.dp))
+    HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+    Spacer(Modifier.height(8.dp))
+}
+
+@Composable
+private fun ToggleIcon(icon: ImageVector, description: String, selected: Boolean, onClick: () -> Unit) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier
+            .size(44.dp)
+            .background(if (selected) IndigoPrimary else StudioSurfaceVariant, RoundedCornerShape(8.dp))
+    ) {
+        Icon(icon, contentDescription = description, tint = Color.White)
+    }
+}
+
+@Composable
+private fun LabeledSlider(
+    label: String,
+    valueLabel: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    onChange: (Float) -> Unit,
+    onFinished: () -> Unit,
+    bold: Boolean = false
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            color = if (bold) Color.White else Color.LightGray,
+            fontSize = if (bold) 12.sp else 11.sp,
+            fontWeight = if (bold) FontWeight.SemiBold else FontWeight.Normal
+        )
+        Text(text = valueLabel, color = IndigoPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+    }
+    Slider(
+        value = value.coerceIn(range.start, range.endInclusive),
+        onValueChange = onChange,
+        onValueChangeFinished = onFinished,
+        valueRange = range
+    )
+}
+
+@Composable
+private fun SwitchRow(label: String, checked: Boolean, bold: Boolean = false, onChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            label,
+            color = if (bold) Color.White else Color.LightGray,
+            fontSize = 12.sp,
+            fontWeight = if (bold) FontWeight.SemiBold else FontWeight.Normal
+        )
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+@Composable
+private fun ColorHeader(label: String, small: Boolean = false, onCustom: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            color = if (small) Color.LightGray else Color.White,
+            fontSize = if (small) 11.sp else 12.sp,
+            fontWeight = if (small) FontWeight.Normal else FontWeight.SemiBold
+        )
+        TextButton(onClick = onCustom, modifier = Modifier.heightIn(min = 44.dp)) {
+            Icon(Icons.Default.ColorLens, contentDescription = null, modifier = Modifier.size(16.dp), tint = IndigoPrimary)
+            Spacer(Modifier.width(4.dp))
+            Text(stringResource(R.string.text_custom_color), fontSize = 11.sp, color = IndigoPrimary)
+        }
     }
 }
 
@@ -494,10 +506,11 @@ private fun ColorSwatchesRow(
         contentPadding = PaddingValues(vertical = 4.dp)
     ) {
         items(RichPresetColors) { hexColor ->
-            val isSelected = selectedColorHex == hexColor
+            // Compare the colour only: effect transparency is a separate setting.
+            val isSelected = (selectedColorHex and 0x00FFFFFF) == (hexColor and 0x00FFFFFF)
             Box(
                 modifier = Modifier
-                    .size(48.dp)
+                    .size(44.dp)
                     .clip(CircleShape)
                     .background(Color(hexColor))
                     .border(
@@ -529,7 +542,6 @@ private fun CustomColorPickerDialog(
         containerColor = StudioSurface,
         text = {
             Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
-                // Color Preview Box
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -538,29 +550,10 @@ private fun CustomColorPickerDialog(
                         .background(resultingColor)
                         .border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(12.dp))
                 )
-
                 Spacer(Modifier.height(16.dp))
-
-                // Red Slider
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(stringResource(R.string.curves_channel_red), color = Color(0xFFEF4444), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    Text("${(r * 255).toInt()}", color = Color.White, fontSize = 12.sp)
-                }
-                Slider(value = r, onValueChange = { r = it }, valueRange = 0f..1f)
-
-                // Green Slider
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(stringResource(R.string.curves_channel_green), color = Color(0xFF10B981), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    Text("${(g * 255).toInt()}", color = Color.White, fontSize = 12.sp)
-                }
-                Slider(value = g, onValueChange = { g = it }, valueRange = 0f..1f)
-
-                // Blue Slider
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(stringResource(R.string.curves_channel_blue), color = Color(0xFF3B82F6), fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    Text("${(b * 255).toInt()}", color = Color.White, fontSize = 12.sp)
-                }
-                Slider(value = b, onValueChange = { b = it }, valueRange = 0f..1f)
+                ChannelSlider(stringResource(R.string.curves_channel_red), Color(0xFFEF4444), r) { r = it }
+                ChannelSlider(stringResource(R.string.curves_channel_green), Color(0xFF10B981), g) { g = it }
+                ChannelSlider(stringResource(R.string.curves_channel_blue), Color(0xFF3B82F6), b) { b = it }
             }
         },
         confirmButton = {
@@ -581,4 +574,13 @@ private fun CustomColorPickerDialog(
             }
         }
     )
+}
+
+@Composable
+private fun ChannelSlider(label: String, color: Color, value: Float, onChange: (Float) -> Unit) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, color = color, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        Text("${(value * 255).roundToInt()}", color = Color.White, fontSize = 12.sp)
+    }
+    Slider(value = value, onValueChange = onChange, valueRange = 0f..1f)
 }

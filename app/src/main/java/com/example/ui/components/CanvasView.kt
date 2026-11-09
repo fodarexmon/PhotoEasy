@@ -26,14 +26,12 @@ import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material.icons.filled.CompareArrows
-import androidx.compose.material.icons.filled.FitScreen
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material3.Button
@@ -71,6 +69,8 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.nativeCanvas
 import kotlinx.coroutines.coroutineScope
 import androidx.compose.animation.core.animate
@@ -84,6 +84,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import kotlin.math.max
+import kotlin.math.roundToInt
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -220,7 +221,30 @@ fun CanvasView(
     onShapeEdited: ((RectF) -> Unit)? = null,
     onMoveSelection: ((Float, Float) -> Unit)? = null,
     isQuickMaskView: Boolean = false,
-    onTemporarySubtract: ((Boolean) -> Unit)? = null
+    onTemporarySubtract: ((Boolean) -> Unit)? = null,
+    /** Pro effect shown live on the selected layer before it is applied. */
+    proEffectPreview: com.example.engine.ProEffectPreview? = null,
+    /** Double tap on a text layer (Text tool): open its text for typing. */
+    onRequestTextEdit: (() -> Unit)? = null,
+    /** When set, a tap on the image reports its document point (curves picking) instead of panning. */
+    onCanvasSample: ((Float, Float) -> Unit)? = null,
+    /** Object removal: area protected from being copied (shown in green). */
+    protectMask: Bitmap? = null,
+    protectRevision: Long = 0L,
+    /** Crop: straighten angle (degrees) previewed live, overlay grid and canvas expansion. */
+    cropStraighten: Float = 0f,
+    cropGrid: String = "THIRDS",
+    cropExpandCanvas: Boolean = false,
+    /** Transform tool: FREE (move / scale / rotate), SKEW or DISTORT, and its options. */
+    transformMode: String = "FREE",
+    /** Reference point 0..8 (TL, T, TR, L, centre, R, BL, B, BR) for rotation. */
+    transformPivot: Int = 4,
+    transformFromCenter: Boolean = false,
+    transformLockAspect: Boolean = true,
+    transformSnap: Boolean = true,
+    /** HSL targeted adjustment: drag on the image to change the colour under the finger. */
+    targetedAdjustActive: Boolean = false,
+    onTargetedDrag: ((docX: Float, docY: Float, dxDp: Float, phase: com.example.ui.viewmodel.StrokePhase) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val canvasAccessibilityDescription = stringResource(R.string.cd_editor_canvas)
@@ -249,6 +273,24 @@ fun CanvasView(
     val latestOnUpdatePerspectiveCorners by rememberUpdatedState(onUpdatePerspectiveCorners)
     val latestOnUpdateLayerTransient by rememberUpdatedState(onUpdateLayerTransient)
     val latestOnCommitHistoryState by rememberUpdatedState(onCommitHistoryState)
+    val latestOnSelectLayerForText by rememberUpdatedState(onSelectLayer)
+    val latestOnRequestTextEdit by rememberUpdatedState(onRequestTextEdit)
+    val latestOnCanvasSample by rememberUpdatedState(onCanvasSample)
+    val latestCropStraighten by rememberUpdatedState(cropStraighten)
+    val latestCropExpand by rememberUpdatedState(cropExpandCanvas)
+    val latestCropRatio by rememberUpdatedState(selectedAspectRatio)
+    val latestTransformMode by rememberUpdatedState(transformMode)
+    val latestTransformPivot by rememberUpdatedState(transformPivot)
+    val latestTransformFromCenter by rememberUpdatedState(transformFromCenter)
+    val latestTransformLock by rememberUpdatedState(transformLockAspect)
+    val latestTransformSnap by rememberUpdatedState(transformSnap)
+    val latestOnTargetedDrag by rememberUpdatedState(onTargetedDrag)
+    // Smart guides (document coordinates) and the live value bubble shown while transforming.
+    var guideXs by remember { mutableStateOf<List<Float>>(emptyList()) }
+    var guideYs by remember { mutableStateOf<List<Float>>(emptyList()) }
+    var transformBubble by remember { mutableStateOf<Pair<Offset, String>?>(null) }
+    // Last tap on a text layer (time, layer index) for double-tap detection across detector restarts.
+    val textTapState = remember { longArrayOf(0L, -1L) }
     val latestOnApplyCropRect by rememberUpdatedState(onApplyCropRect)
     val latestOnSplitComparePositionChange by rememberUpdatedState(onSplitComparePositionChange)
     val latestOnStrokeSegment by rememberUpdatedState(onStrokeSegment)
@@ -336,21 +378,6 @@ fun CanvasView(
         return Offset(o.x.coerceIn(-limitX, limitX), o.y.coerceIn(-limitY, limitY))
     }
 
-    /**
-     * Zoom buttons: keep whatever is in the middle of the screen in the middle. The offset is a
-     * screen-space distance, so it must scale with the zoom factor or the view drifts.
-     */
-    fun zoomAroundViewportCenter(factor: Float) {
-        focusAnimationJob?.cancel()
-        val oldScale = scale
-        val newScale = (oldScale * factor).coerceIn(minScale, maxScale)
-        val applied = if (oldScale > 0f) newScale / oldScale else 1f
-        scale = newScale
-        val clamped = clampViewportOffset(Offset(offsetX * applied, offsetY * applied), newScale)
-        offsetX = clamped.x
-        offsetY = clamped.y
-    }
-
     // While the user remains in Fit mode, keep the whole document visible when
     // contextual panels open/close or the window size changes.
     LaunchedEffect(fitScale, project.id, autoFit) {
@@ -428,28 +455,45 @@ fun CanvasView(
     var cropDragStartTouch by remember { mutableStateOf(Offset.Zero) }
     var cropDragStartRect by remember { mutableStateOf(RectF()) }
 
-    // Synchronize cropRectState when selectedAspectRatio changes
-    LaunchedEffect(selectedAspectRatio, project.width, project.height) {
+    // Synchronize the crop frame with the ratio and the straighten angle: the largest frame of that
+    // ratio, centred, that still lies completely inside the (rotated) image, so no empty corners.
+    LaunchedEffect(selectedAspectRatio, project.width, project.height, cropStraighten) {
         if (activeTool == ActiveTool.CROP_PERSPECTIVE && !isPerspectiveActive) {
             val pWidth = project.width.toFloat()
             val pHeight = project.height.toFloat()
-            if (selectedAspectRatio != null && selectedAspectRatio > 0f) {
-                val targetW: Float
-                val targetH: Float
-                if (selectedAspectRatio >= (pWidth / pHeight)) {
-                    targetW = pWidth
-                    targetH = (pWidth / selectedAspectRatio).coerceAtMost(pHeight)
-                } else {
-                    targetH = pHeight
-                    targetW = (pHeight * selectedAspectRatio).coerceAtMost(pWidth)
-                }
-                val left = (pWidth - targetW) / 2f
-                val top = (pHeight - targetH) / 2f
-                cropRectState = RectF(left, top, left + targetW, top + targetH)
-            } else {
-                cropRectState = RectF(0f, 0f, pWidth, pHeight)
-            }
+            val a = selectedAspectRatio?.takeIf { it > 0f } ?: (pWidth / pHeight)
+            val rad = Math.toRadians(cropStraighten.toDouble())
+            val c = abs(kotlin.math.cos(rad)).toFloat()
+            val sn = abs(kotlin.math.sin(rad)).toFloat()
+            val ch = minOf(pWidth / (a * c + sn), pHeight / (a * sn + c))
+            val cw = ch * a
+            val left = (pWidth - cw) / 2f
+            val top = (pHeight - ch) / 2f
+            cropRectState = RectF(left, top, left + cw, top + ch)
+            latestOnApplyCropRect?.invoke(RectF(cropRectState))
         }
+    }
+
+    /** Crop frame allowed area: inside the image (rotated by the straighten angle), or beyond it when expanding. */
+    fun cropFrameFits(rect: RectF): Boolean {
+        val pW = latestProject.width.toFloat()
+        val pH = latestProject.height.toFloat()
+        if (latestCropExpand) return rect.left >= -pW && rect.top >= -pH && rect.right <= pW * 2f && rect.bottom <= pH * 2f
+        val angle = latestCropStraighten
+        if (abs(angle) < 0.01f) return rect.left >= -0.5f && rect.top >= -0.5f && rect.right <= pW + 0.5f && rect.bottom <= pH + 0.5f
+        val rad = Math.toRadians(-angle.toDouble())
+        val cosA = kotlin.math.cos(rad).toFloat()
+        val sinA = kotlin.math.sin(rad).toFloat()
+        val cx = pW / 2f
+        val cy = pH / 2f
+        for ((x, y) in listOf(rect.left to rect.top, rect.right to rect.top, rect.right to rect.bottom, rect.left to rect.bottom)) {
+            val dx = x - cx
+            val dy = y - cy
+            val ux = dx * cosA - dy * sinA + cx
+            val uy = dx * sinA + dy * cosA + cy
+            if (ux < -0.5f || uy < -0.5f || ux > pW + 0.5f || uy > pH + 0.5f) return false
+        }
+        return true
     }
 
     // Snapping alignment guides
@@ -485,7 +529,7 @@ fun CanvasView(
 
     // Render composite layer stack asynchronously on Dispatchers.Default (Proxy Preview)
     // Conflates rapid slider movements and provides cooperative cancellation checks
-    LaunchedEffect(project.id, project.width, project.height, renderRevision, previewMaxDimension, showSelectedLayerOriginal, showGeneralOriginal, isSplitCompareActive, selectedLayerIndex, selectionMask) {
+    LaunchedEffect(project.id, project.width, project.height, renderRevision, previewMaxDimension, showSelectedLayerOriginal, showGeneralOriginal, isSplitCompareActive, selectedLayerIndex, selectionMask, proEffectPreview) {
         val gen = renderGeneration.incrementAndGet()
 
         // 1. Conflate/Debounce rapid slider micro-updates (~16ms = 1 frame window)
@@ -498,9 +542,11 @@ fun CanvasView(
             layer.previewSnapshot().also { snapshot ->
                 if (showGeneralOriginal) {
                     snapshot.filter = com.example.data.model.FilterType.NONE
+                    snapshot.lutId = null
                     snapshot.adjustments = com.example.data.model.ColorAdjustments()
                 } else if (showSelectedLayerOriginal && index == selectedLayerIndex) {
                     snapshot.filter = com.example.data.model.FilterType.NONE
+                    snapshot.lutId = null
                     snapshot.adjustments = com.example.data.model.ColorAdjustments()
                 }
             }
@@ -537,7 +583,10 @@ fun CanvasView(
                     // Non-destructive adjustments/filters are stored per layer and always apply to the
                     // whole layer on save/export, so the preview must not scope them to the selection.
                     activeSelectionMask = null,
-                    selectedLayerId = null
+                    selectedLayerId = null,
+                    // The live Pro effect is limited to the selection, exactly like the applied effect.
+                    proEffectPreview = if (showGeneralOriginal || showSelectedLayerOriginal) null else proEffectPreview,
+                    proEffectMask = selectionMask
                 )
             }
 
@@ -552,6 +601,7 @@ fun CanvasView(
                 val originalLayersSnapshot = project.layers.map { layer ->
                     layer.previewSnapshot().also { snapshot ->
                         snapshot.filter = com.example.data.model.FilterType.NONE
+                        snapshot.lutId = null
                         snapshot.adjustments = com.example.data.model.ColorAdjustments()
                     }
                 }
@@ -581,31 +631,70 @@ fun CanvasView(
      * for [layer]. Text layers are measured with the same StaticLayout the renderer uses and are
      * centred on their position; bitmap layers use the layer matrix.
      */
-    fun layerCornersDoc(layer: Layer): FloatArray {
+    /** True when the document point lies inside [layer]'s (possibly rotated) box. */
+    fun layerContainsDoc(layer: Layer, x: Float, y: Float): Boolean {
+        val c = layerCornersDoc(layer)
+        var sign = 0
+        for (i in 0 until 4) {
+            val ax = c[i * 2]; val ay = c[i * 2 + 1]
+            val bx = c[((i + 1) % 4) * 2]; val by = c[((i + 1) % 4) * 2 + 1]
+            val cross = (bx - ax) * (y - ay) - (by - ay) * (x - ax)
+            val s = if (cross > 0f) 1 else if (cross < 0f) -1 else 0
+            if (s != 0) {
+                if (sign == 0) sign = s else if (s != sign) return false
+            }
+        }
+        return true
+    }
+
+    /** Topmost visible text layer under a document point, or -1. */
+    fun textLayerIndexAt(x: Float, y: Float): Int {
+        val layers = latestProject.layers
+        for (i in layers.indices.reversed()) {
+            val l = layers[i]
+            if (l.isVisible && l.type == com.example.data.model.LayerType.TEXT && layerContainsDoc(l, x, y)) return i
+        }
+        return -1
+    }
+
+    /**
+     * Placement of the layer's box WITHOUT its skew / distort: local -> document matrix and the
+     * local box size (bitmap pixels, or the text layout / canvas size).
+     */
+    fun layerBase(layer: Layer): Triple<android.graphics.Matrix, Float, Float> {
         val p = latestProject
+        val plain = layer.copy(skewX = 0f, skewY = 0f, distort = null)
         val bmp = layer.bitmap
-        val w: Float
-        val h: Float
-        val matrix: android.graphics.Matrix
-        if (bmp != null) {
-            w = bmp.width.toFloat()
-            h = bmp.height.toFloat()
-            matrix = SelectionEngine.getLayerMatrix(layer, p.width, p.height)
+        return if (bmp != null) {
+            Triple(SelectionEngine.getLayerMatrix(plain, p.width, p.height), bmp.width.toFloat(), bmp.height.toFloat())
         } else {
             val size = if (layer.type == com.example.data.model.LayerType.TEXT) {
                 LayerRenderer.measureTextLayer(context, layer, p.width.toFloat())
             } else {
                 p.width.toFloat() to p.height.toFloat()
             }
-            w = size.first
-            h = size.second
-            matrix = android.graphics.Matrix().apply {
-                postTranslate(-w / 2f, -h / 2f)
+            val m = android.graphics.Matrix().apply {
+                postTranslate(-size.first / 2f, -size.second / 2f)
                 postScale(layer.scaleX, layer.scaleY)
                 postRotate(layer.rotation)
                 postTranslate(p.width / 2f + layer.positionX, p.height / 2f + layer.positionY)
             }
+            Triple(m, size.first, size.second)
         }
+    }
+
+    /** Unscaled box size of the layer in document units. */
+    fun layerBoxDoc(layer: Layer): Pair<Float, Float> = when {
+        layer.bitmap != null -> layer.intrinsicDocumentWidth() to layer.intrinsicDocumentHeight()
+        layer.type == com.example.data.model.LayerType.TEXT -> LayerRenderer.measureTextLayer(context, layer, latestProject.width.toFloat())
+        else -> latestProject.width.toFloat() to latestProject.height.toFloat()
+    }
+
+    fun layerCornersDoc(layer: Layer): FloatArray {
+        val (base, w, h) = layerBase(layer)
+        val matrix = SelectionEngine.layerShapeMatrix(layer, w, h)?.let { shape ->
+            android.graphics.Matrix(shape).apply { postConcat(base) }
+        } ?: base
         val pts = floatArrayOf(0f, 0f, w, 0f, w, h, 0f, h)
         matrix.mapPoints(pts)
         return pts
@@ -627,15 +716,66 @@ fun CanvasView(
                     focusAnimationJob?.cancel()
                     var pinchFocusDoc: Offset? = null   // document point the user started pinching on
                     var pinchStartScale = scale
+                    // Text tool: a gesture that starts on the selected text layer moves it with one
+                    // finger and scales / rotates it with two; anywhere else it pans / zooms the view.
+                    var gestureOnText: Boolean? = null
+                    var textTransformed = false
+                    // Tap detection for on-image sampling (curves): one finger that barely moved.
+                    var tapStart: Offset? = null
+                    var tapCancelled = false
                     do {
                         val event = awaitPointerEvent()
                         val pressed = event.changes.count { it.pressed }
+                        if (tapStart == null) event.changes.firstOrNull { it.pressed }?.let { tapStart = it.position }
+                        if (pressed > 1) tapCancelled = true
+                        tapStart?.let { ts ->
+                            event.changes.firstOrNull()?.let { c ->
+                                if ((c.position - ts).getDistance() > viewConfiguration.touchSlop) tapCancelled = true
+                            }
+                        }
+                        if (gestureOnText == null) {
+                            val first = event.changes.firstOrNull { it.pressed }
+                            val sel = latestProject.layers.getOrNull(latestSelectedLayerIndex)
+                            gestureOnText = first != null && sel != null &&
+                                ((activeTool == ActiveTool.TEXT && sel.type == com.example.data.model.LayerType.TEXT) ||
+                                    (activeTool == ActiveTool.TRANSFORM && sel.type != com.example.data.model.LayerType.ADJUSTMENT)) &&
+                                sel.isVisible && !sel.isLocked && run {
+                                    val d = screenToDoc(first.position, Offset(size.width / 2f, size.height / 2f))
+                                    layerContainsDoc(sel, d.x, d.y)
+                                }
+                        }
+                        if (gestureOnText == true && pressed >= 2) {
+                            val stable = event.changes.filter { it.pressed && it.previousPressed }
+                            if (stable.size >= 2) {
+                                val a = stable[0]
+                                val b = stable[1]
+                                val cur = b.position - a.position
+                                val prev = b.previousPosition - a.previousPosition
+                                val prevLen = prev.getDistance()
+                                val zoom = if (prevLen > 1f) (cur.getDistance() / prevLen) else 1f
+                                val deg = Math.toDegrees((atan2(cur.y, cur.x) - atan2(prev.y, prev.x)).toDouble()).toFloat()
+                                val move = (a.position + b.position) / 2f - (a.previousPosition + b.previousPosition) / 2f
+                                val s = scale.coerceAtLeast(0.0001f)
+                                latestOnUpdateLayerTransient?.invoke { l ->
+                                    l.scaleX = (l.scaleX * zoom).coerceIn(0.05f, 40f)
+                                    l.scaleY = (l.scaleY * zoom).coerceIn(0.05f, 40f)
+                                    l.rotation = (((l.rotation + deg) % 360f) + 360f) % 360f
+                                    l.positionX += move.x / s
+                                    l.positionY += move.y / s
+                                }
+                                textTransformed = true
+                            }
+                            multiTouchActive = true
+                            event.changes.forEach { change -> if (change.pressed) change.consume() }
+                            continue
+                        }
                         // One finger pans the viewport only when the active tool has no one-finger
                         // gesture of its own: painting a layer mask (Layers) and dragging a text
                         // layer (Text) must receive the drag instead.
                         val liveLayer = latestProject.layers.getOrNull(latestSelectedLayerIndex)
-                        val toolOwnsOneFinger = (activeTool == ActiveTool.LAYERS && liveLayer?.isEditingMask == true) ||
-                            (activeTool == ActiveTool.TEXT && liveLayer?.type == com.example.data.model.LayerType.TEXT)
+                        val toolOwnsOneFinger = (activeTool == ActiveTool.ADJUST && targetedAdjustActive) ||
+                            (activeTool == ActiveTool.LAYERS && liveLayer?.isEditingMask == true) ||
+                            (activeTool == ActiveTool.TEXT && gestureOnText == true)
                         val oneFingerViewportPan = !isSplitCompareActive && !toolOwnsOneFinger && (activeTool == ActiveTool.NONE ||
                             activeTool == ActiveTool.ADJUST || activeTool == ActiveTool.FILTERS ||
                             activeTool == ActiveTool.LAYERS || activeTool == ActiveTool.TEXT)
@@ -690,6 +830,13 @@ fun CanvasView(
                         }
                     } while (event.changes.any { it.pressed })
                     multiTouchActive = false
+                    if (textTransformed) latestOnCommitHistoryState?.invoke()
+                    val sampler = latestOnCanvasSample
+                    val ts = tapStart
+                    if (sampler != null && ts != null && !tapCancelled) {
+                        val d = screenToDoc(ts, Offset(size.width / 2f, size.height / 2f))
+                        if (d.x in 0f..latestProject.width.toFloat() && d.y in 0f..latestProject.height.toFloat()) sampler(d.x, d.y)
+                    }
 
                     // After a zoom-in pinch, bring the area the user pinched on to the centre of the view.
                     val focus = pinchFocusDoc
@@ -725,7 +872,8 @@ fun CanvasView(
                     selectedAspectRatio,
                     multiTouchActive,
                     isSplitCompareActive,
-                    project.id
+                    project.id,
+                    targetedAdjustActive
                 ) {
                     if (multiTouchActive) return@pointerInput
                     // Viewport geometry is evaluated on every event so zoom/pan changes apply immediately.
@@ -824,6 +972,7 @@ fun CanvasView(
                                     }
                                 }
                                 activeDraggingCorner = activePerspectiveHandle
+                                if (activePerspectiveHandle in 0..3) liveTouchCursor = startOffset
                             },
                             onDrag = { change, _ ->
                                 if (activePerspectiveHandle != -1 && perspectiveDragStartCorners.size >= 4) {
@@ -863,6 +1012,7 @@ fun CanvasView(
                                         }
                                     }
 
+                                    if (activePerspectiveHandle in 0..3) liveTouchCursor = change.position
                                     val updateAll = latestOnUpdatePerspectiveCorners
                                     if (updateAll != null) {
                                         updateAll(newCorners)
@@ -876,6 +1026,7 @@ fun CanvasView(
                             onDragEnd = {
                                 activePerspectiveHandle = -1
                                 activeDraggingCorner = -1
+                                liveTouchCursor = null
                             }
                         )
                     } else if (activeTool == ActiveTool.CROP_PERSPECTIVE && !isPerspectiveActive) {
@@ -899,10 +1050,10 @@ fun CanvasView(
                                     sqrt((startOffset.x - scR) * (startOffset.x - scR) + (startOffset.y - scT) * (startOffset.y - scT)) < hitThreshold -> CropHandle.CORNER_TR
                                     sqrt((startOffset.x - scR) * (startOffset.x - scR) + (startOffset.y - scB) * (startOffset.y - scB)) < hitThreshold -> CropHandle.CORNER_BR
                                     sqrt((startOffset.x - scL) * (startOffset.x - scL) + (startOffset.y - scB) * (startOffset.y - scB)) < hitThreshold -> CropHandle.CORNER_BL
-                                    selectedAspectRatio == null && abs(startOffset.y - scT) < hitThreshold && startOffset.x in scL..scR -> CropHandle.EDGE_T
-                                    selectedAspectRatio == null && abs(startOffset.y - scB) < hitThreshold && startOffset.x in scL..scR -> CropHandle.EDGE_B
-                                    selectedAspectRatio == null && abs(startOffset.x - scL) < hitThreshold && startOffset.y in scT..scB -> CropHandle.EDGE_L
-                                    selectedAspectRatio == null && abs(startOffset.x - scR) < hitThreshold && startOffset.y in scT..scB -> CropHandle.EDGE_R
+                                    abs(startOffset.y - scT) < hitThreshold && startOffset.x in scL..scR -> CropHandle.EDGE_T
+                                    abs(startOffset.y - scB) < hitThreshold && startOffset.x in scL..scR -> CropHandle.EDGE_B
+                                    abs(startOffset.x - scL) < hitThreshold && startOffset.y in scT..scB -> CropHandle.EDGE_L
+                                    abs(startOffset.x - scR) < hitThreshold && startOffset.y in scT..scB -> CropHandle.EDGE_R
                                     startOffset.x in scL..scR && startOffset.y in scT..scB -> CropHandle.BODY
                                     else -> CropHandle.NONE
                                 }
@@ -920,99 +1071,56 @@ fun CanvasView(
                                     }
 
                                     val minCropSize = 40f
+                                    val ratio = latestCropRatio?.takeIf { it > 0f }
+                                    val cur = cropRectState
+                                    val bounds = if (latestCropExpand) RectF(-pWidth, -pHeight, pWidth * 2f, pHeight * 2f) else RectF(0f, 0f, pWidth, pHeight)
 
-                                    when (activeCropHandle) {
+                                    // Resize keeping the opposite corner (or edge centre) fixed; with a ratio the
+                                    // frame is scaled down as a whole at the limits, so the ratio always holds.
+                                    fun fromAnchor(ax: Float, ay: Float, dirX: Int, dirY: Int, wantW: Float, wantH: Float): RectF {
+                                        var w = wantW.coerceAtLeast(minCropSize)
+                                        var h = wantH.coerceAtLeast(minCropSize)
+                                        if (ratio != null) {
+                                            if (w / h > ratio) h = w / ratio else w = h * ratio
+                                        }
+                                        val maxW = if (dirX > 0) bounds.right - ax else if (dirX < 0) ax - bounds.left else w
+                                        val maxH = if (dirY > 0) bounds.bottom - ay else if (dirY < 0) ay - bounds.top else h
+                                        if (ratio != null) {
+                                            val k = minOf(1f, maxW / w, maxH / h)
+                                            w *= k; h *= k
+                                        } else {
+                                            w = w.coerceAtMost(maxW); h = h.coerceAtMost(maxH)
+                                        }
+                                        val left = if (dirX > 0) ax else if (dirX < 0) ax - w else ax - w / 2f
+                                        val top = if (dirY > 0) ay else if (dirY < 0) ay - h else ay - h / 2f
+                                        return RectF(left, top, left + w, top + h)
+                                    }
+
+                                    val candidate: RectF? = when (activeCropHandle) {
                                         CropHandle.BODY -> {
-                                            val w = cropRectState.width().coerceIn(minCropSize, pWidth)
-                                            val h = cropRectState.height().coerceIn(minCropSize, pHeight)
-                                            val maxL = (pWidth - w).coerceAtLeast(0f)
-                                            val maxT = (pHeight - h).coerceAtLeast(0f)
-                                            val left = (cropRectState.left + dxDoc).coerceIn(0f, maxL)
-                                            val top = (cropRectState.top + dyDoc).coerceIn(0f, maxT)
-                                            cropRectState = RectF(left, top, left + w, top + h)
+                                            val w = cur.width()
+                                            val h = cur.height()
+                                            val left = (cur.left + dxDoc).coerceIn(bounds.left, (bounds.right - w).coerceAtLeast(bounds.left))
+                                            val top = (cur.top + dyDoc).coerceIn(bounds.top, (bounds.bottom - h).coerceAtLeast(bounds.top))
+                                            RectF(left, top, left + w, top + h)
                                         }
-
-                                        CropHandle.CORNER_TL -> {
-                                            val maxL = (cropRectState.right - minCropSize).coerceAtLeast(0f)
-                                            val newL = (cropRectState.left + dxDoc).coerceIn(0f, maxL)
-                                            val maxT = (cropRectState.bottom - minCropSize).coerceAtLeast(0f)
-                                            val newT = if (selectedAspectRatio != null && selectedAspectRatio > 0f) {
-                                                val currW = (cropRectState.right - newL).coerceAtLeast(minCropSize)
-                                                val targetH = currW / selectedAspectRatio
-                                                (cropRectState.bottom - targetH).coerceIn(0f, maxT)
-                                            } else {
-                                                (cropRectState.top + dyDoc).coerceIn(0f, maxT)
-                                            }
-                                            cropRectState = RectF(newL, newT, cropRectState.right, cropRectState.bottom)
-                                        }
-
-                                        CropHandle.CORNER_TR -> {
-                                            val minR = (cropRectState.left + minCropSize).coerceAtMost(pWidth)
-                                            val newR = (cropRectState.right + dxDoc).coerceIn(minR, pWidth)
-                                            val maxT = (cropRectState.bottom - minCropSize).coerceAtLeast(0f)
-                                            val newT = if (selectedAspectRatio != null && selectedAspectRatio > 0f) {
-                                                val currW = (newR - cropRectState.left).coerceAtLeast(minCropSize)
-                                                val targetH = currW / selectedAspectRatio
-                                                (cropRectState.bottom - targetH).coerceIn(0f, maxT)
-                                            } else {
-                                                (cropRectState.top + dyDoc).coerceIn(0f, maxT)
-                                            }
-                                            cropRectState = RectF(cropRectState.left, newT, newR, cropRectState.bottom)
-                                        }
-
-                                        CropHandle.CORNER_BR -> {
-                                            val minR = (cropRectState.left + minCropSize).coerceAtMost(pWidth)
-                                            val newR = (cropRectState.right + dxDoc).coerceIn(minR, pWidth)
-                                            val minB = (cropRectState.top + minCropSize).coerceAtMost(pHeight)
-                                            val newB = if (selectedAspectRatio != null && selectedAspectRatio > 0f) {
-                                                val currW = (newR - cropRectState.left).coerceAtLeast(minCropSize)
-                                                val targetH = currW / selectedAspectRatio
-                                                (cropRectState.top + targetH).coerceIn(minB, pHeight)
-                                            } else {
-                                                (cropRectState.bottom + dyDoc).coerceIn(minB, pHeight)
-                                            }
-                                            cropRectState = RectF(cropRectState.left, cropRectState.top, newR, newB)
-                                        }
-
-                                        CropHandle.CORNER_BL -> {
-                                            val maxL = (cropRectState.right - minCropSize).coerceAtLeast(0f)
-                                            val newL = (cropRectState.left + dxDoc).coerceIn(0f, maxL)
-                                            val minB = (cropRectState.top + minCropSize).coerceAtMost(pHeight)
-                                            val newB = if (selectedAspectRatio != null && selectedAspectRatio > 0f) {
-                                                val currW = (cropRectState.right - newL).coerceAtLeast(minCropSize)
-                                                val targetH = currW / selectedAspectRatio
-                                                (cropRectState.top + targetH).coerceIn(minB, pHeight)
-                                            } else {
-                                                (cropRectState.bottom + dyDoc).coerceIn(minB, pHeight)
-                                            }
-                                            cropRectState = RectF(newL, cropRectState.top, cropRectState.right, newB)
-                                        }
-
-                                        CropHandle.EDGE_T -> {
-                                            val maxT = (cropRectState.bottom - minCropSize).coerceAtLeast(0f)
-                                            val newT = (cropRectState.top + dyDoc).coerceIn(0f, maxT)
-                                            cropRectState = RectF(cropRectState.left, newT, cropRectState.right, cropRectState.bottom)
-                                        }
-
-                                        CropHandle.EDGE_B -> {
-                                            val minB = (cropRectState.top + minCropSize).coerceAtMost(pHeight)
-                                            val newB = (cropRectState.bottom + dyDoc).coerceIn(minB, pHeight)
-                                            cropRectState = RectF(cropRectState.left, cropRectState.top, cropRectState.right, newB)
-                                        }
-
-                                        CropHandle.EDGE_L -> {
-                                            val maxL = (cropRectState.right - minCropSize).coerceAtLeast(0f)
-                                            val newL = (cropRectState.left + dxDoc).coerceIn(0f, maxL)
-                                            cropRectState = RectF(newL, cropRectState.top, cropRectState.right, cropRectState.bottom)
-                                        }
-
-                                        CropHandle.EDGE_R -> {
-                                            val minR = (cropRectState.left + minCropSize).coerceAtMost(pWidth)
-                                            val newR = (cropRectState.right + dxDoc).coerceIn(minR, pWidth)
-                                            cropRectState = RectF(cropRectState.left, cropRectState.top, newR, cropRectState.bottom)
-                                        }
-
-                                        else -> {}
+                                        CropHandle.CORNER_TL -> fromAnchor(cur.right, cur.bottom, -1, -1, cur.right - (cur.left + dxDoc), cur.bottom - (cur.top + dyDoc))
+                                        CropHandle.CORNER_TR -> fromAnchor(cur.left, cur.bottom, 1, -1, (cur.right + dxDoc) - cur.left, cur.bottom - (cur.top + dyDoc))
+                                        CropHandle.CORNER_BR -> fromAnchor(cur.left, cur.top, 1, 1, (cur.right + dxDoc) - cur.left, (cur.bottom + dyDoc) - cur.top)
+                                        CropHandle.CORNER_BL -> fromAnchor(cur.right, cur.top, -1, 1, cur.right - (cur.left + dxDoc), (cur.bottom + dyDoc) - cur.top)
+                                        CropHandle.EDGE_T -> if (ratio == null) RectF(cur.left, (cur.top + dyDoc).coerceIn(bounds.top, cur.bottom - minCropSize), cur.right, cur.bottom)
+                                            else fromAnchor(cur.centerX(), cur.bottom, 0, -1, 0f, cur.bottom - (cur.top + dyDoc))
+                                        CropHandle.EDGE_B -> if (ratio == null) RectF(cur.left, cur.top, cur.right, (cur.bottom + dyDoc).coerceIn(cur.top + minCropSize, bounds.bottom))
+                                            else fromAnchor(cur.centerX(), cur.top, 0, 1, 0f, (cur.bottom + dyDoc) - cur.top)
+                                        CropHandle.EDGE_L -> if (ratio == null) RectF((cur.left + dxDoc).coerceIn(bounds.left, cur.right - minCropSize), cur.top, cur.right, cur.bottom)
+                                            else fromAnchor(cur.right, cur.centerY(), -1, 0, cur.right - (cur.left + dxDoc), 0f)
+                                        CropHandle.EDGE_R -> if (ratio == null) RectF(cur.left, cur.top, (cur.right + dxDoc).coerceIn(cur.left + minCropSize, bounds.right), cur.bottom)
+                                            else fromAnchor(cur.left, cur.centerY(), 1, 0, (cur.right + dxDoc) - cur.left, 0f)
+                                        else -> null
+                                    }
+                                    // A frame that would leave the (straightened) image keeps its last valid shape.
+                                    if (candidate != null && candidate.width() >= minCropSize - 0.5f && candidate.height() >= minCropSize - 0.5f && cropFrameFits(candidate)) {
+                                        cropRectState = candidate
                                     }
                                 }
                             },
@@ -1038,7 +1146,14 @@ fun CanvasView(
                                 while (!released) {
                                     val event = awaitPointerEvent()
                                     val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                    if (event.changes.count { it.pressed } > 1) { wandBubble = null; return@awaitEachGesture }
+                                    if (event.changes.count { it.pressed } > 1) {
+                                        wandBubble = null
+                                        // A second finger (pinch) ends a tolerance drag cleanly at its last value.
+                                        if (dragging) {
+                                            latestOnMagicWandDrag?.invoke(downDoc.x.toInt(), downDoc.y.toInt(), lastTolerance, com.example.ui.viewmodel.StrokePhase.END)
+                                        }
+                                        return@awaitEachGesture
+                                    }
                                     if (!change.pressed) { released = true; break }
                                     val dx = change.position.x - down.position.x
                                     if (!dragging && abs(dx) > slop && insideDoc) {
@@ -1292,201 +1407,345 @@ fun CanvasView(
                                 }
                             )
                         }
+                    } else if (activeTool == ActiveTool.ADJUST && targetedAdjustActive) {
+                        // Targeted adjustment: press on a colour, drag right / left to raise / lower it.
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val d = toDoc(down.position)
+                            if (d.x !in 0f..latestProject.width.toFloat() || d.y !in 0f..latestProject.height.toFloat()) return@awaitEachGesture
+                            latestOnTargetedDrag?.invoke(d.x, d.y, 0f, com.example.ui.viewmodel.StrokePhase.START)
+                            var lastDx = 0f
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                if (event.changes.count { it.pressed } > 1) break
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (!change.pressed) break
+                                change.consume()
+                                val dx = (change.position.x - down.position.x) / density
+                                if (abs(dx - lastDx) >= 0.5f) {
+                                    lastDx = dx
+                                    latestOnTargetedDrag?.invoke(d.x, d.y, dx, com.example.ui.viewmodel.StrokePhase.MOVE)
+                                }
+                            }
+                            latestOnTargetedDrag?.invoke(d.x, d.y, lastDx, com.example.ui.viewmodel.StrokePhase.END)
+                        }
                     } else if (activeTool == ActiveTool.TRANSFORM && selectedLayerIndex in latestProject.layers.indices) {
-                        // Interactive Layer Bounding Box & Transform Gestures
-                        // Re-resolved on every drag start: undo/redo can replace the Layer instance
-                        // without restarting this detector.
-                        var selectedLayer = latestProject.layers[selectedLayerIndex]
+                        // Professional transform: corners scale from the opposite corner (or the centre),
+                        // edges along the layer's own axes, rotation is relative with angle snapping and
+                        // a movable reference point, smart guides while moving, plus skew and distort.
+                        class Start(
+                            val layer: Layer,
+                            val handle: TransformHandle,
+                            val startDoc: PointF,
+                            val hw: Float,
+                            val hh: Float,
+                            val baseInv: android.graphics.Matrix,
+                            val bw: Float,
+                            val bh: Float,
+                            val pivot: PointF,
+                            val angle0: Float,
+                            val corners: FloatArray
+                        )
+                        var st: Start? = null
+                        fun rotVec(x: Float, y: Float, deg: Float): PointF {
+                            val r = Math.toRadians(deg.toDouble())
+                            val c = kotlin.math.cos(r).toFloat()
+                            val sn = kotlin.math.sin(r).toFloat()
+                            return PointF(x * c - y * sn, x * sn + y * c)
+                        }
+                        fun toLocal(m: android.graphics.Matrix, p: PointF): PointF {
+                            val a = floatArrayOf(p.x, p.y)
+                            m.mapPoints(a)
+                            return PointF(a[0], a[1])
+                        }
 
                         detectDragGestures(
                             onDragStart = { startOffset ->
-                                latestProject.layers.getOrNull(selectedLayerIndex)?.let { selectedLayer = it }
-                                initialTouchPos = startOffset
-                                lastTouchPos = startOffset
-                                initialLayerScaleX = selectedLayer.scaleX
-                                initialLayerScaleY = selectedLayer.scaleY
-
-                                if (!selectedLayer.isLocked && selectedLayer.isVisible) {
-                                    val pts = layerCornersDoc(selectedLayer)
-
-                                    val scP0 = Offset(curStartX() + (pts[0] / latestProject.width) * curDrawW(), curStartY() + (pts[1] / latestProject.height) * curDrawH())
-                                    val scP1 = Offset(curStartX() + (pts[2] / latestProject.width) * curDrawW(), curStartY() + (pts[3] / latestProject.height) * curDrawH())
-                                    val scP2 = Offset(curStartX() + (pts[4] / latestProject.width) * curDrawW(), curStartY() + (pts[5] / latestProject.height) * curDrawH())
-                                    val scP3 = Offset(curStartX() + (pts[6] / latestProject.width) * curDrawW(), curStartY() + (pts[7] / latestProject.height) * curDrawH())
-                                    val scCenter = Offset((scP0.x + scP2.x) / 2f, (scP0.y + scP2.y) / 2f)
-
-                                    val scTopMid = Offset((scP0.x + scP1.x) / 2f, (scP0.y + scP1.y) / 2f)
-                                    val scRightMid = Offset((scP1.x + scP2.x) / 2f, (scP1.y + scP2.y) / 2f)
-                                    val scBottomMid = Offset((scP2.x + scP3.x) / 2f, (scP2.y + scP3.y) / 2f)
-                                    val scLeftMid = Offset((scP3.x + scP0.x) / 2f, (scP3.y + scP0.y) / 2f)
-
-                                    val vX = scTopMid.x - scCenter.x
-                                    val vY = scTopMid.y - scCenter.y
-                                    val vLen = sqrt(vX * vX + vY * vY)
-                                    val scRotOffset = if (vLen > 0) Offset(scTopMid.x + (vX / vLen) * 36.dp.toPx(), scTopMid.y + (vY / vLen) * 36.dp.toPx()) else Offset(scTopMid.x, scTopMid.y - 36.dp.toPx())
-
-                                    val threshold = 36.dp.toPx()
-
-                                    fun ptInQuad(pt: Offset, a: Offset, b: Offset, c: Offset, d: Offset): Boolean {
-                                        val poly = listOf(a, b, c, d)
-                                        var ins = false
-                                        var j = poly.size - 1
-                                        for (i in poly.indices) {
-                                            if ((poly[i].y > pt.y) != (poly[j].y > pt.y) &&
-                                                (pt.x < (poly[j].x - poly[i].x) * (pt.y - poly[i].y) / (poly[j].y - poly[i].y) + poly[i].x)
-                                            ) {
-                                                ins = !ins
-                                            }
-                                            j = i
-                                        }
-                                        return ins
-                                    }
-
-                                    activeTransformHandle = when {
-                                        sqrt((startOffset.x - scRotOffset.x) * (startOffset.x - scRotOffset.x) + (startOffset.y - scRotOffset.y) * (startOffset.y - scRotOffset.y)) < threshold -> TransformHandle.ROTATION
-                                        sqrt((startOffset.x - scP0.x) * (startOffset.x - scP0.x) + (startOffset.y - scP0.y) * (startOffset.y - scP0.y)) < threshold -> TransformHandle.CORNER_TL
-                                        sqrt((startOffset.x - scP1.x) * (startOffset.x - scP1.x) + (startOffset.y - scP1.y) * (startOffset.y - scP1.y)) < threshold -> TransformHandle.CORNER_TR
-                                        sqrt((startOffset.x - scP2.x) * (startOffset.x - scP2.x) + (startOffset.y - scP2.y) * (startOffset.y - scP2.y)) < threshold -> TransformHandle.CORNER_BR
-                                        sqrt((startOffset.x - scP3.x) * (startOffset.x - scP3.x) + (startOffset.y - scP3.y) * (startOffset.y - scP3.y)) < threshold -> TransformHandle.CORNER_BL
-                                        sqrt((startOffset.x - scTopMid.x) * (startOffset.x - scTopMid.x) + (startOffset.y - scTopMid.y) * (startOffset.y - scTopMid.y)) < threshold -> TransformHandle.EDGE_T
-                                        sqrt((startOffset.x - scRightMid.x) * (startOffset.x - scRightMid.x) + (startOffset.y - scRightMid.y) * (startOffset.y - scRightMid.y)) < threshold -> TransformHandle.EDGE_R
-                                        sqrt((startOffset.x - scBottomMid.x) * (startOffset.x - scBottomMid.x) + (startOffset.y - scBottomMid.y) * (startOffset.y - scBottomMid.y)) < threshold -> TransformHandle.EDGE_B
-                                        sqrt((startOffset.x - scLeftMid.x) * (startOffset.x - scLeftMid.x) + (startOffset.y - scLeftMid.y) * (startOffset.y - scLeftMid.y)) < threshold -> TransformHandle.EDGE_L
-                                        ptInQuad(startOffset, scP0, scP1, scP2, scP3) || sqrt((startOffset.x - scCenter.x) * (startOffset.x - scCenter.x) + (startOffset.y - scCenter.y) * (startOffset.y - scCenter.y)) < 60.dp.toPx() -> TransformHandle.BODY
+                                st = null
+                                val layer = latestProject.layers.getOrNull(latestSelectedLayerIndex)
+                                if (layer != null && !layer.isLocked && layer.isVisible) {
+                                    val pts = layerCornersDoc(layer)
+                                    fun sc(i: Int) = Offset(curStartX() + (pts[i * 2] / latestProject.width) * curDrawW(), curStartY() + (pts[i * 2 + 1] / latestProject.height) * curDrawH())
+                                    val c0 = sc(0); val c1 = sc(1); val c2 = sc(2); val c3 = sc(3)
+                                    val center = Offset((c0.x + c1.x + c2.x + c3.x) / 4f, (c0.y + c1.y + c2.y + c3.y) / 4f)
+                                    val topMid = Offset((c0.x + c1.x) / 2f, (c0.y + c1.y) / 2f)
+                                    val rightMid = Offset((c1.x + c2.x) / 2f, (c1.y + c2.y) / 2f)
+                                    val bottomMid = Offset((c2.x + c3.x) / 2f, (c2.y + c3.y) / 2f)
+                                    val leftMid = Offset((c3.x + c0.x) / 2f, (c3.y + c0.y) / 2f)
+                                    val v = topMid - center
+                                    val vl = v.getDistance()
+                                    val rotHandle = if (vl > 0f) topMid + v / vl * 36.dp.toPx() else Offset(topMid.x, topMid.y - 36.dp.toPx())
+                                    val th = 36.dp.toPx()
+                                    fun near(a: Offset) = (startOffset - a).getDistance() < th
+                                    val mode = latestTransformMode
+                                    val startDocPt = toDoc(startOffset)
+                                    val handle = when {
+                                        mode == "FREE" && near(rotHandle) -> TransformHandle.ROTATION
+                                        mode != "SKEW" && near(c0) -> TransformHandle.CORNER_TL
+                                        mode != "SKEW" && near(c1) -> TransformHandle.CORNER_TR
+                                        mode != "SKEW" && near(c2) -> TransformHandle.CORNER_BR
+                                        mode != "SKEW" && near(c3) -> TransformHandle.CORNER_BL
+                                        mode != "DISTORT" && near(topMid) -> TransformHandle.EDGE_T
+                                        mode != "DISTORT" && near(rightMid) -> TransformHandle.EDGE_R
+                                        mode != "DISTORT" && near(bottomMid) -> TransformHandle.EDGE_B
+                                        mode != "DISTORT" && near(leftMid) -> TransformHandle.EDGE_L
+                                        layerContainsDoc(layer, startDocPt.x, startDocPt.y) || (startOffset - center).getDistance() < 60.dp.toPx() -> TransformHandle.BODY
                                         else -> TransformHandle.NONE
                                     }
+                                    if (handle != TransformHandle.NONE) {
+                                        val (base, bw, bh) = layerBase(layer)
+                                        val inv = android.graphics.Matrix()
+                                        base.invert(inv)
+                                        val (boxW, boxH) = layerBoxDoc(layer)
+                                        val cx = latestProject.width / 2f + layer.positionX
+                                        val cy = latestProject.height / 2f + layer.positionY
+                                        val pv = latestTransformPivot.coerceIn(0, 8)
+                                        val pvOff = rotVec(layer.scaleX * boxW / 2f * ((pv % 3) - 1), layer.scaleY * boxH / 2f * ((pv / 3) - 1), layer.rotation)
+                                        val pivot = PointF(cx + pvOff.x, cy + pvOff.y)
+                                        val angle0 = Math.toDegrees(atan2((startDocPt.y - pivot.y).toDouble(), (startDocPt.x - pivot.x).toDouble())).toFloat()
+                                        st = Start(layer.copy(distort = layer.distort?.copyOf()), handle, startDocPt, boxW / 2f, boxH / 2f, inv, bw, bh, pivot, angle0, pts)
+                                    }
+                                    activeTransformHandle = handle
                                 } else {
                                     activeTransformHandle = TransformHandle.NONE
                                 }
                             },
                             onDrag = { change, _ ->
-                                if (!selectedLayer.isLocked && selectedLayer.isVisible && activeTransformHandle != TransformHandle.NONE) {
-                                    val pos = change.position
-                                    val pts = layerCornersDoc(selectedLayer)
-
-                                    val scP0 = Offset(curStartX() + (pts[0] / latestProject.width) * curDrawW(), curStartY() + (pts[1] / latestProject.height) * curDrawH())
-                                    val scP2 = Offset(curStartX() + (pts[4] / latestProject.width) * curDrawW(), curStartY() + (pts[5] / latestProject.height) * curDrawH())
-                                    val scCenter = Offset((scP0.x + scP2.x) / 2f, (scP0.y + scP2.y) / 2f)
-
-                                    when (activeTransformHandle) {
+                                val s0 = st
+                                if (s0 != null) {
+                                    change.consume()
+                                    val p = toDoc(change.position)
+                                    val l0 = s0.layer
+                                    val docW = latestProject.width.toFloat()
+                                    val docH = latestProject.height.toFloat()
+                                    val c0x = docW / 2f + l0.positionX
+                                    val c0y = docH / 2f + l0.positionY
+                                    val mode = latestTransformMode
+                                    when (s0.handle) {
                                         TransformHandle.BODY -> {
-                                            val screenDx = pos.x - lastTouchPos.x
-                                            val screenDy = pos.y - lastTouchPos.y
-                                            val docDx = (screenDx / curDrawW()) * latestProject.width
-                                            val docDy = (screenDy / curDrawH()) * latestProject.height
-
-                                            var newPosX = selectedLayer.positionX + docDx
-                                            var newPosY = selectedLayer.positionY + docDy
-
-                                            // Snapping to Canvas Center
-                                            val snapThresholdDoc = 15f
-
-                                            if (abs(newPosX) < snapThresholdDoc) {
-                                                newPosX = 0f
-                                                showSnapV = true
-                                            } else {
-                                                showSnapV = false
+                                            var dx = p.x - s0.startDoc.x
+                                            var dy = p.y - s0.startDoc.y
+                                            val gx = ArrayList<Float>()
+                                            val gy = ArrayList<Float>()
+                                            if (latestTransformSnap) {
+                                                // Smart guides: canvas edges / centre and other layers' edges / centres.
+                                                val thr = 8.dp.toPx() / (curDrawW() / docW).coerceAtLeast(0.0001f)
+                                                val xs = floatArrayOf(s0.corners[0], s0.corners[2], s0.corners[4], s0.corners[6])
+                                                val ys = floatArrayOf(s0.corners[1], s0.corners[3], s0.corners[5], s0.corners[7])
+                                                val minX = xs.min(); val maxX = xs.max(); val minY = ys.min(); val maxY = ys.max()
+                                                val tx = arrayListOf(0f, docW / 2f, docW)
+                                                val ty = arrayListOf(0f, docH / 2f, docH)
+                                                latestProject.layers.forEachIndexed { i, other ->
+                                                    if (i == latestSelectedLayerIndex || !other.isVisible || other.type == com.example.data.model.LayerType.ADJUSTMENT ||
+                                                        other.type == com.example.data.model.LayerType.COLOR_FILL) return@forEachIndexed
+                                                    val oc = layerCornersDoc(other)
+                                                    val ox = floatArrayOf(oc[0], oc[2], oc[4], oc[6]); val oy = floatArrayOf(oc[1], oc[3], oc[5], oc[7])
+                                                    tx.add(ox.min()); tx.add((ox.min() + ox.max()) / 2f); tx.add(ox.max())
+                                                    ty.add(oy.min()); ty.add((oy.min() + oy.max()) / 2f); ty.add(oy.max())
+                                                }
+                                                var bestX = thr; var snapX = 0f; var lineX: Float? = null
+                                                for (m in floatArrayOf(minX + dx, (minX + maxX) / 2f + dx, maxX + dx)) for (t in tx) {
+                                                    val d = t - m
+                                                    if (abs(d) < bestX) { bestX = abs(d); snapX = d; lineX = t }
+                                                }
+                                                var bestY = thr; var snapY = 0f; var lineY: Float? = null
+                                                for (m in floatArrayOf(minY + dy, (minY + maxY) / 2f + dy, maxY + dy)) for (t in ty) {
+                                                    val d = t - m
+                                                    if (abs(d) < bestY) { bestY = abs(d); snapY = d; lineY = t }
+                                                }
+                                                dx += snapX; dy += snapY
+                                                lineX?.let { gx.add(it) }
+                                                lineY?.let { gy.add(it) }
                                             }
-
-                                            if (abs(newPosY) < snapThresholdDoc) {
-                                                newPosY = 0f
-                                                showSnapH = true
-                                            } else {
-                                                showSnapH = false
-                                            }
-
-                                            latestOnUpdateLayerTransient?.invoke { l ->
-                                                l.positionX = newPosX
-                                                l.positionY = newPosY
-                                            }
+                                            guideXs = gx
+                                            guideYs = gy
+                                            val nx = l0.positionX + dx
+                                            val ny = l0.positionY + dy
+                                            latestOnUpdateLayerTransient?.invoke { l -> l.positionX = nx; l.positionY = ny }
+                                            transformBubble = change.position to "X ${nx.roundToInt()}  Y ${ny.roundToInt()}"
                                         }
 
                                         TransformHandle.ROTATION -> {
-                                            val dx = pos.x - scCenter.x
-                                            val dy = pos.y - scCenter.y
-                                            val angleDeg = Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat() + 90f
-                                            val normAngle = (angleDeg % 360f + 360f) % 360f
-
-                                            latestOnUpdateLayerTransient?.invoke { l ->
-                                                l.rotation = normAngle
+                                            val a = Math.toDegrees(atan2((p.y - s0.pivot.y).toDouble(), (p.x - s0.pivot.x).toDouble())).toFloat()
+                                            var newRot = l0.rotation + (a - s0.angle0)
+                                            newRot = ((newRot % 360f) + 360f) % 360f
+                                            if (latestTransformSnap) {
+                                                val step = (newRot / 15f).roundToInt() * 15f
+                                                val limit = if (step % 90f == 0f) 5f else 2.5f
+                                                if (abs(newRot - step) < limit) newRot = ((step % 360f) + 360f) % 360f
                                             }
+                                            var delta = newRot - l0.rotation
+                                            delta = ((delta % 360f) + 540f) % 360f - 180f
+                                            val off = rotVec(c0x - s0.pivot.x, c0y - s0.pivot.y, delta)
+                                            val nx = s0.pivot.x + off.x - docW / 2f
+                                            val ny = s0.pivot.y + off.y - docH / 2f
+                                            latestOnUpdateLayerTransient?.invoke { l -> l.rotation = newRot; l.positionX = nx; l.positionY = ny }
+                                            val shown = if (newRot > 180f) newRot - 360f else newRot
+                                            transformBubble = change.position to String.format(java.util.Locale.US, "%.1f°", shown)
                                         }
 
                                         TransformHandle.CORNER_TL, TransformHandle.CORNER_TR, TransformHandle.CORNER_BR, TransformHandle.CORNER_BL -> {
-                                            val initDist = sqrt((initialTouchPos.x - scCenter.x) * (initialTouchPos.x - scCenter.x) + (initialTouchPos.y - scCenter.y) * (initialTouchPos.y - scCenter.y))
-                                            val currDist = sqrt((pos.x - scCenter.x) * (pos.x - scCenter.x) + (pos.y - scCenter.y) * (pos.y - scCenter.y))
-
-                                            val scaleFactor = if (initDist > 5f) currDist / initDist else 1f
-                                            val newScaleX = (initialLayerScaleX * scaleFactor).coerceIn(-10f, 10f)
-                                            val newScaleY = (initialLayerScaleY * scaleFactor).coerceIn(-10f, 10f)
-
-                                            latestOnUpdateLayerTransient?.invoke { l ->
-                                                l.scaleX = newScaleX
-                                                l.scaleY = newScaleY
+                                            val idx = when (s0.handle) { TransformHandle.CORNER_TL -> 0; TransformHandle.CORNER_TR -> 1; TransformHandle.CORNER_BR -> 2; else -> 3 }
+                                            if (mode == "DISTORT") {
+                                                // Move one corner freely (in the layer's own units, non-destructive).
+                                                val lp = toLocal(s0.baseInv, p)
+                                                val ls = toLocal(s0.baseInv, s0.startDoc)
+                                                val d = l0.distort?.copyOf() ?: floatArrayOf(0f, 0f, 1f, 0f, 1f, 1f, 0f, 1f)
+                                                d[idx * 2] = (d[idx * 2] + (lp.x - ls.x) / s0.bw.coerceAtLeast(1f)).coerceIn(-3f, 4f)
+                                                d[idx * 2 + 1] = (d[idx * 2 + 1] + (lp.y - ls.y) / s0.bh.coerceAtLeast(1f)).coerceIn(-3f, 4f)
+                                                latestOnUpdateLayerTransient?.invoke { l -> l.distort = d }
+                                            } else {
+                                                val sx = if (idx == 1 || idx == 2) 1f else -1f
+                                                val sy = if (idx >= 2) 1f else -1f
+                                                val fromCenter = latestTransformFromCenter
+                                                // Anchor = opposite corner (or the centre); vector to the finger in the layer's frame.
+                                                val anchorOff = if (fromCenter) PointF(0f, 0f) else rotVec(l0.scaleX * s0.hw * -sx, l0.scaleY * s0.hh * -sy, l0.rotation)
+                                                val ax = c0x + anchorOff.x
+                                                val ay = c0y + anchorOff.y
+                                                val v = rotVec(p.x - ax, p.y - ay, -l0.rotation)
+                                                val span = if (fromCenter) 1f else 2f
+                                                val dX = l0.scaleX * s0.hw * span * sx
+                                                val dY = l0.scaleY * s0.hh * span * sy
+                                                var fx: Float
+                                                var fy: Float
+                                                if (latestTransformLock) {
+                                                    val f = ((v.x * dX + v.y * dY) / (dX * dX + dY * dY).coerceAtLeast(1e-6f)).coerceAtLeast(0.02f)
+                                                    fx = f; fy = f
+                                                } else {
+                                                    fx = (v.x / dX.takeIf { abs(it) > 1e-4f }.let { it ?: 1f }).coerceAtLeast(0.02f)
+                                                    fy = (v.y / dY.takeIf { abs(it) > 1e-4f }.let { it ?: 1f }).coerceAtLeast(0.02f)
+                                                }
+                                                val nsx = (l0.scaleX * fx).coerceIn(-50f, 50f)
+                                                val nsy = (l0.scaleY * fy).coerceIn(-50f, 50f)
+                                                val cOff = if (fromCenter) PointF(0f, 0f) else rotVec(nsx * s0.hw * sx, nsy * s0.hh * sy, l0.rotation)
+                                                val ncx = ax + cOff.x
+                                                val ncy = ay + cOff.y
+                                                latestOnUpdateLayerTransient?.invoke { l ->
+                                                    l.scaleX = nsx; l.scaleY = nsy
+                                                    l.positionX = ncx - docW / 2f; l.positionY = ncy - docH / 2f
+                                                }
+                                                transformBubble = change.position to "${(abs(nsx) * s0.hw * 2f).roundToInt()} × ${(abs(nsy) * s0.hh * 2f).roundToInt()}"
                                             }
                                         }
 
-                                        TransformHandle.EDGE_T, TransformHandle.EDGE_B -> {
-                                            val initDistY = abs(initialTouchPos.y - scCenter.y)
-                                            val currDistY = abs(pos.y - scCenter.y)
-                                            val scaleFactor = if (initDistY > 5f) currDistY / initDistY else 1f
-                                            val newScaleY = (initialLayerScaleY * scaleFactor).coerceIn(-10f, 10f)
-                                            latestOnUpdateLayerTransient?.invoke { l -> l.scaleY = newScaleY }
-                                        }
-
-                                        TransformHandle.EDGE_L, TransformHandle.EDGE_R -> {
-                                            val initDistX = abs(initialTouchPos.x - scCenter.x)
-                                            val currDistX = abs(pos.x - scCenter.x)
-                                            val scaleFactor = if (initDistX > 5f) currDistX / initDistX else 1f
-                                            val newScaleX = (initialLayerScaleX * scaleFactor).coerceIn(-10f, 10f)
-                                            latestOnUpdateLayerTransient?.invoke { l -> l.scaleX = newScaleX }
+                                        TransformHandle.EDGE_T, TransformHandle.EDGE_B, TransformHandle.EDGE_L, TransformHandle.EDGE_R -> {
+                                            val horizontalEdge = s0.handle == TransformHandle.EDGE_T || s0.handle == TransformHandle.EDGE_B
+                                            val sign = if (s0.handle == TransformHandle.EDGE_B || s0.handle == TransformHandle.EDGE_R) 1f else -1f
+                                            if (mode == "SKEW") {
+                                                // Slide an edge along itself: skew (in the layer's own axes).
+                                                val lp = toLocal(s0.baseInv, p)
+                                                val ls = toLocal(s0.baseInv, s0.startDoc)
+                                                if (horizontalEdge) {
+                                                    val k0 = kotlin.math.tan(Math.toRadians(l0.skewX.toDouble())).toFloat()
+                                                    val k = k0 + sign * (lp.x - ls.x) / (s0.bh / 2f).coerceAtLeast(1f)
+                                                    val deg = Math.toDegrees(kotlin.math.atan(k.toDouble())).toFloat().coerceIn(-60f, 60f)
+                                                    latestOnUpdateLayerTransient?.invoke { l -> l.skewX = deg }
+                                                    transformBubble = change.position to String.format(java.util.Locale.US, "%.1f°", deg)
+                                                } else {
+                                                    val k0 = kotlin.math.tan(Math.toRadians(l0.skewY.toDouble())).toFloat()
+                                                    val k = k0 + sign * (lp.y - ls.y) / (s0.bw / 2f).coerceAtLeast(1f)
+                                                    val deg = Math.toDegrees(kotlin.math.atan(k.toDouble())).toFloat().coerceIn(-60f, 60f)
+                                                    latestOnUpdateLayerTransient?.invoke { l -> l.skewY = deg }
+                                                    transformBubble = change.position to String.format(java.util.Locale.US, "%.1f°", deg)
+                                                }
+                                            } else {
+                                                // Scale along the layer's own axis, opposite edge fixed (or the centre).
+                                                val fromCenter = latestTransformFromCenter
+                                                val ex = if (horizontalEdge) 0f else sign
+                                                val ey = if (horizontalEdge) sign else 0f
+                                                val anchorOff = if (fromCenter) PointF(0f, 0f) else rotVec(l0.scaleX * s0.hw * -ex, l0.scaleY * s0.hh * -ey, l0.rotation)
+                                                val ax = c0x + anchorOff.x
+                                                val ay = c0y + anchorOff.y
+                                                val v = rotVec(p.x - ax, p.y - ay, -l0.rotation)
+                                                val span = if (fromCenter) 1f else 2f
+                                                val f = if (horizontalEdge) {
+                                                    (v.y / (l0.scaleY * s0.hh * span * ey).let { if (abs(it) < 1e-4f) 1f else it }).coerceAtLeast(0.02f)
+                                                } else {
+                                                    (v.x / (l0.scaleX * s0.hw * span * ex).let { if (abs(it) < 1e-4f) 1f else it }).coerceAtLeast(0.02f)
+                                                }
+                                                val lock = latestTransformLock
+                                                val nsx = if (!horizontalEdge || lock) (l0.scaleX * f).coerceIn(-50f, 50f) else l0.scaleX
+                                                val nsy = if (horizontalEdge || lock) (l0.scaleY * f).coerceIn(-50f, 50f) else l0.scaleY
+                                                val cOff = if (fromCenter) PointF(0f, 0f) else rotVec(nsx * s0.hw * ex, nsy * s0.hh * ey, l0.rotation)
+                                                val ncx = ax + cOff.x
+                                                val ncy = ay + cOff.y
+                                                latestOnUpdateLayerTransient?.invoke { l ->
+                                                    l.scaleX = nsx; l.scaleY = nsy
+                                                    l.positionX = ncx - docW / 2f; l.positionY = ncy - docH / 2f
+                                                }
+                                                transformBubble = change.position to "${(abs(nsx) * s0.hw * 2f).roundToInt()} × ${(abs(nsy) * s0.hh * 2f).roundToInt()}"
+                                            }
                                         }
 
                                         else -> {}
                                     }
-
-                                    lastTouchPos = pos
                                 }
                             },
                             onDragEnd = {
-                                if (activeTransformHandle != TransformHandle.NONE) {
-                                    latestOnCommitHistoryState?.invoke()
-                                }
+                                if (st != null) latestOnCommitHistoryState?.invoke()
+                                st = null
                                 activeTransformHandle = TransformHandle.NONE
+                                guideXs = emptyList()
+                                guideYs = emptyList()
+                                transformBubble = null
                                 showSnapV = false
                                 showSnapH = false
+                            },
+                            onDragCancel = {
+                                if (st != null) latestOnCommitHistoryState?.invoke()
+                                st = null
+                                activeTransformHandle = TransformHandle.NONE
+                                guideXs = emptyList()
+                                guideYs = emptyList()
+                                transformBubble = null
                             }
                         )
-                    } else if (activeTool == ActiveTool.TEXT && selectedLayerType == com.example.data.model.LayerType.TEXT &&
-                        selectedLayerIndex in latestProject.layers.indices
-                    ) {
-                        // Direct on-canvas touch-and-drag for Text layers (only text layers move with the Text tool)
-                        var selectedLayer = latestProject.layers[selectedLayerIndex]
-
-                        detectDragGestures(
-                            onDragStart = { startOffset ->
-                                latestProject.layers.getOrNull(selectedLayerIndex)?.let { selectedLayer = it }
-                                lastTouchPos = startOffset
-                            },
-                            onDrag = { change, _ ->
-                                if (!selectedLayer.isLocked && selectedLayer.isVisible) {
-                                    val pos = change.position
-                                    val screenDx = pos.x - lastTouchPos.x
-                                    val screenDy = pos.y - lastTouchPos.y
-                                    val docDx = (screenDx / curDrawW()) * latestProject.width
-                                    val docDy = (screenDy / curDrawH()) * latestProject.height
-
+                    } else if (activeTool == ActiveTool.TEXT) {
+                        // Text tool: tap a text layer to select it, double tap to edit its text, and
+                        // drag the selected text when the drag starts on it (elsewhere the view pans).
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            val downDoc = toDoc(down.position)
+                            val sel = latestProject.layers.getOrNull(latestSelectedLayerIndex)
+                            val onSelectedText = sel != null && sel.type == com.example.data.model.LayerType.TEXT &&
+                                sel.isVisible && !sel.isLocked && layerContainsDoc(sel, downDoc.x, downDoc.y)
+                            val slop = viewConfiguration.touchSlop
+                            var last = down.position
+                            var moved = false
+                            var dragged = false
+                            var multi = false
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                if (event.changes.count { it.pressed } > 1) { multi = true; break }
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (!change.pressed) break
+                                if (!moved && (change.position - down.position).getDistance() > slop) moved = true
+                                if (moved && onSelectedText) {
+                                    val d = change.position - last
+                                    val s = scale.coerceAtLeast(0.0001f)
                                     latestOnUpdateLayerTransient?.invoke { l ->
-                                        l.positionX += docDx
-                                        l.positionY += docDy
+                                        l.positionX += d.x / s
+                                        l.positionY += d.y / s
                                     }
-                                    lastTouchPos = pos
+                                    dragged = true
+                                    change.consume()
                                 }
-                            },
-                            onDragEnd = {
-                                latestOnCommitHistoryState?.invoke()
+                                last = change.position
                             }
-                        )
+                            if (dragged) {
+                                latestOnCommitHistoryState?.invoke()
+                            } else if (!moved && !multi) {
+                                val hit = textLayerIndexAt(downDoc.x, downDoc.y)
+                                if (hit >= 0) {
+                                    val now = System.currentTimeMillis()
+                                    val isDouble = hit.toLong() == textTapState[1] && now - textTapState[0] < 350L
+                                    if (hit != latestSelectedLayerIndex) latestOnSelectLayerForText?.invoke(hit)
+                                    if (isDouble) latestOnRequestTextEdit?.invoke()
+                                    textTapState[0] = if (isDouble) 0L else now
+                                    textTapState[1] = hit.toLong()
+                                }
+                            }
+                        }
                     }
                 }
         ) {
@@ -1565,6 +1824,14 @@ fun CanvasView(
                     drawCircle(color = IndigoPrimary, radius = 13.dp.toPx(), center = Offset(splitX, handleCenterY))
                     drawCircle(color = Color.White, radius = 3.dp.toPx(), center = Offset(splitX - 5.dp.toPx(), handleCenterY))
                     drawCircle(color = Color.White, radius = 3.dp.toPx(), center = Offset(splitX + 5.dp.toPx(), handleCenterY))
+                } else if (activeTool == ActiveTool.CROP_PERSPECTIVE && !isPerspectiveActive && abs(cropStraighten) >= 0.01f) {
+                    rotate(cropStraighten, pivot = Offset(startX + targetDrawW / 2f, startY + targetDrawH / 2f)) {
+                        drawImage(
+                            image = bmp.asImageBitmap(),
+                            dstOffset = androidx.compose.ui.unit.IntOffset(startX.toInt(), startY.toInt()),
+                            dstSize = androidx.compose.ui.unit.IntSize(targetDrawW.toInt(), targetDrawH.toInt())
+                        )
+                    }
                 } else {
                     drawImage(
                         image = bmp.asImageBitmap(),
@@ -1611,15 +1878,37 @@ fun CanvasView(
             if (showMaskRubyOverlay) {
                 val curLayer = project.layers.getOrNull(selectedLayerIndex)
                 val lMask = curLayer?.maskBitmap
-                if (lMask != null && !lMask.isRecycled) {
-                    drawImage(
-                        image = lMask.asImageBitmap(),
-                        dstOffset = androidx.compose.ui.unit.IntOffset(startX.toInt(), startY.toInt()),
-                        dstSize = androidx.compose.ui.unit.IntSize(targetDrawW.toInt(), targetDrawH.toInt()),
-                        alpha = 0.50f,
-                        colorFilter = ColorFilter.tint(Color(0xFFE53935))
-                    )
+                if (curLayer != null && lMask != null && !lMask.isRecycled) {
+                    // Hidden (black) mask areas are covered in red, revealed areas stay clear, and a
+                    // linked mask is shown where it currently is (moved with its layer).
+                    drawIntoCanvas { c ->
+                        val nc = c.nativeCanvas
+                        val bounds = android.graphics.RectF(startX, startY, startX + targetDrawW, startY + targetDrawH)
+                        val saved = nc.saveLayer(bounds, null)
+                        nc.drawRect(bounds, android.graphics.Paint().apply { color = 0x80E53935.toInt() })
+                        val m = android.graphics.Matrix().apply {
+                            setScale(project.width.toFloat() / lMask.width, project.height.toFloat() / lMask.height)
+                            com.example.engine.LayerRenderer.linkedMaskMatrix(curLayer, project.width, project.height)?.let { postConcat(it) }
+                            postScale(targetDrawW / project.width, targetDrawH / project.height)
+                            postTranslate(startX, startY)
+                        }
+                        nc.drawBitmap(lMask, m, android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG).apply {
+                            xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_OUT)
+                        })
+                        nc.restoreToCount(saved)
+                    }
                 }
+            }
+
+            // 4.52. Object removal: protected area (never used as texture source) in green.
+            if (protectMask != null && !protectMask.isRecycled && protectRevision >= 0L) {
+                drawImage(
+                    image = protectMask.asImageBitmap(),
+                    dstOffset = androidx.compose.ui.unit.IntOffset(startX.toInt(), startY.toInt()),
+                    dstSize = androidx.compose.ui.unit.IntSize(targetDrawW.toInt(), targetDrawH.toInt()),
+                    alpha = 0.45f,
+                    colorFilter = ColorFilter.tint(Color(0xFF22C55E))
+                )
             }
 
             // 4.55. Quick Mask view: everything NOT selected is covered in translucent red.
@@ -1836,7 +2125,8 @@ fun CanvasView(
             // never hides what is being selected.
             val loupeTouch = liveTouchCursor
             val loupeBmp = compositeBitmap
-            val loupeTool = activeTool == ActiveTool.SELECTION || activeTool == ActiveTool.OBJECT_REMOVAL || isEditingSelectedMask
+            val loupeTool = activeTool == ActiveTool.SELECTION || activeTool == ActiveTool.OBJECT_REMOVAL || isEditingSelectedMask ||
+                (activeTool == ActiveTool.CROP_PERSPECTIVE && isPerspectiveActive)
             if (loupeTouch != null && loupeTool && loupeBmp != null && !loupeBmp.isRecycled) {
                 val loupeR = 58.dp.toPx()
                 val margin = 14.dp.toPx()
@@ -1919,6 +2209,56 @@ fun CanvasView(
             )
 
             // 7. Interactive Bounding Box & Handles Overlay for Selected Layer
+            // Smart guides and the live value bubble (transform tool).
+            if (activeTool == ActiveTool.TRANSFORM) {
+                val guideColor = Color(0xFFFF4FD8)
+                guideXs.forEach { gx ->
+                    val x = startX + gx / project.width * targetDrawW
+                    drawLine(guideColor, Offset(x, startY), Offset(x, startY + targetDrawH), strokeWidth = 1.dp.toPx())
+                }
+                guideYs.forEach { gy ->
+                    val y = startY + gy / project.height * targetDrawH
+                    drawLine(guideColor, Offset(startX, y), Offset(startX + targetDrawW, y), strokeWidth = 1.dp.toPx())
+                }
+                transformBubble?.let { (pos, label) ->
+                    drawIntoCanvas { c ->
+                        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                            color = android.graphics.Color.WHITE
+                            textSize = 13.sp.toPx()
+                            textAlign = android.graphics.Paint.Align.CENTER
+                        }
+                        val tw = paint.measureText(label)
+                        val bx = pos.x
+                        val by = (pos.y - 44.dp.toPx()).coerceAtLeast(20.dp.toPx())
+                        c.nativeCanvas.drawRoundRect(
+                            bx - tw / 2f - 8.dp.toPx(), by - 16.dp.toPx(), bx + tw / 2f + 8.dp.toPx(), by + 6.dp.toPx(),
+                            8.dp.toPx(), 8.dp.toPx(),
+                            android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = 0xCC000000.toInt() }
+                        )
+                        c.nativeCanvas.drawText(label, bx, by, paint)
+                    }
+                }
+                // Reference point used for rotation.
+                project.layers.getOrNull(selectedLayerIndex)?.takeIf { it.isVisible }?.let { layer ->
+                    val pv = transformPivot.coerceIn(0, 8)
+                    if (pv != 4 && transformMode == "FREE") {
+                        val pts = layerCornersDoc(layer)
+                        val cx = (pts[0] + pts[2] + pts[4] + pts[6]) / 4f
+                        val cy = (pts[1] + pts[3] + pts[5] + pts[7]) / 4f
+                        val (bw, bh) = layerBoxDoc(layer)
+                        val r = Math.toRadians(layer.rotation.toDouble())
+                        val ox = layer.scaleX * bw / 2f * ((pv % 3) - 1)
+                        val oy = layer.scaleY * bh / 2f * ((pv / 3) - 1)
+                        val px = cx + (ox * kotlin.math.cos(r) - oy * kotlin.math.sin(r)).toFloat()
+                        val py = cy + (ox * kotlin.math.sin(r) + oy * kotlin.math.cos(r)).toFloat()
+                        val sp = Offset(startX + px / project.width * targetDrawW, startY + py / project.height * targetDrawH)
+                        drawCircle(Color.White, radius = 7.dp.toPx(), center = sp, style = Stroke(width = 2.dp.toPx()))
+                        drawLine(Color.White, Offset(sp.x - 10.dp.toPx(), sp.y), Offset(sp.x + 10.dp.toPx(), sp.y), strokeWidth = 1.5.dp.toPx())
+                        drawLine(Color.White, Offset(sp.x, sp.y - 10.dp.toPx()), Offset(sp.x, sp.y + 10.dp.toPx()), strokeWidth = 1.5.dp.toPx())
+                    }
+                }
+            }
+
             if (!isPerspectiveActive && activeTool == ActiveTool.TRANSFORM && selectedLayerIndex in project.layers.indices) {
                 val layer = project.layers[selectedLayerIndex]
                 if (layer.isVisible) {
@@ -2166,18 +2506,31 @@ fun CanvasView(
                         )
                     }
 
-                    // 3x3 Rule-of-Thirds Grid Lines
+                    // Composition grid (thirds / golden ratio / diagonals); a fine grid while straightening.
                     val gridColor = Color.White.copy(alpha = 0.5f)
                     val gridStroke = 1.dp.toPx()
-                    val dW1 = cropW / 3f
-                    val dW2 = cropW * 2f / 3f
-                    val dH1 = cropH / 3f
-                    val dH2 = cropH * 2f / 3f
-
-                    drawLine(gridColor, Offset(scL + dW1, scT), Offset(scL + dW1, scB), strokeWidth = gridStroke)
-                    drawLine(gridColor, Offset(scL + dW2, scT), Offset(scL + dW2, scB), strokeWidth = gridStroke)
-                    drawLine(gridColor, Offset(scL, scT + dH1), Offset(scR, scT + dH1), strokeWidth = gridStroke)
-                    drawLine(gridColor, Offset(scL, scT + dH2), Offset(scR, scT + dH2), strokeWidth = gridStroke)
+                    if (abs(cropStraighten) >= 0.01f) {
+                        val fine = Color.White.copy(alpha = 0.22f)
+                        for (k in 1 until 8) {
+                            drawLine(fine, Offset(scL + cropW * k / 8f, scT), Offset(scL + cropW * k / 8f, scB), strokeWidth = gridStroke)
+                            drawLine(fine, Offset(scL, scT + cropH * k / 8f), Offset(scR, scT + cropH * k / 8f), strokeWidth = gridStroke)
+                        }
+                    }
+                    when (cropGrid) {
+                        "GOLDEN" -> for (fr in floatArrayOf(0.382f, 0.618f)) {
+                            drawLine(gridColor, Offset(scL + cropW * fr, scT), Offset(scL + cropW * fr, scB), strokeWidth = gridStroke)
+                            drawLine(gridColor, Offset(scL, scT + cropH * fr), Offset(scR, scT + cropH * fr), strokeWidth = gridStroke)
+                        }
+                        "DIAGONAL" -> {
+                            drawLine(gridColor, Offset(scL, scT), Offset(scR, scB), strokeWidth = gridStroke)
+                            drawLine(gridColor, Offset(scR, scT), Offset(scL, scB), strokeWidth = gridStroke)
+                        }
+                        "NONE" -> {}
+                        else -> for (fr in floatArrayOf(1f / 3f, 2f / 3f)) {
+                            drawLine(gridColor, Offset(scL + cropW * fr, scT), Offset(scL + cropW * fr, scB), strokeWidth = gridStroke)
+                            drawLine(gridColor, Offset(scL, scT + cropH * fr), Offset(scR, scT + cropH * fr), strokeWidth = gridStroke)
+                        }
+                    }
 
                 // Corner L-Brackets & Edge Handles
                 val bracketLen = 20.dp.toPx()
@@ -2368,77 +2721,43 @@ fun CanvasView(
             }
         }
 
-        // Floating Viewport Zoom Controls & Percentage Badge
+        // Zoom percentage: a small, unobtrusive badge (pinch to zoom). It dims when the zoom is not
+        // changing so it never hides the image; tapping it fits the image to the screen.
+        val zoomPercent = (scale * 100).roundToInt()
+        var zoomRecentlyChanged by remember { mutableStateOf(false) }
+        LaunchedEffect(zoomPercent) {
+            zoomRecentlyChanged = true
+            delay(1500)
+            zoomRecentlyChanged = false
+        }
+        val badgeAlpha by androidx.compose.animation.core.animateFloatAsState(
+            targetValue = if (zoomRecentlyChanged) 1f else 0.55f,
+            label = "zoomBadgeAlpha"
+        )
+        val fitDescription = stringResource(R.string.cd_fit_screen)
         Surface(
-            shape = RoundedCornerShape(20.dp),
-            color = StudioSurface.copy(alpha = 0.88f),
-            shadowElevation = 4.dp,
+            shape = RoundedCornerShape(12.dp),
+            color = Color.Black.copy(alpha = 0.45f),
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(top = 12.dp, end = 12.dp)
+                .padding(top = 8.dp, end = 8.dp)
+                .graphicsLayer { alpha = badgeAlpha }
+                .clip(RoundedCornerShape(12.dp))
+                .clickable(onClickLabel = fitDescription, enabled = !autoFit) {
+                    autoFit = true
+                    scale = fitScale
+                    offsetX = 0f
+                    offsetY = 0f
+                }
+                .testTag("badge_zoom_percent")
         ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                IconButton(
-                    onClick = { autoFit = false; zoomAroundViewportCenter(0.8f) },
-                    modifier = Modifier.size(48.dp)
-                ) {
-                    Icon(
-                        Icons.Default.Remove,
-                        contentDescription = stringResource(R.string.cd_zoom_out),
-                        tint = Color.White,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-
-                Text(
-                    text = "${(scale * 100).toInt()}%",
-                    color = Color.White,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier
-                        .sizeIn(minWidth = 52.dp, minHeight = 48.dp)
-                        .clickable {
-                            autoFit = true
-                            scale = fitScale
-                            offsetX = 0f
-                            offsetY = 0f
-                        }
-                        .padding(horizontal = 4.dp)
-                )
-
-                IconButton(
-                    onClick = { autoFit = false; zoomAroundViewportCenter(1.25f) },
-                    modifier = Modifier.size(48.dp)
-                ) {
-                    Icon(
-                        Icons.Default.Add,
-                        contentDescription = stringResource(R.string.cd_zoom_in),
-                        tint = Color.White,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-
-                IconButton(
-                    onClick = {
-                        autoFit = true
-                        scale = fitScale
-                        offsetX = 0f
-                        offsetY = 0f
-                    },
-                    modifier = Modifier.size(48.dp)
-                ) {
-                    Icon(
-                        Icons.Default.FitScreen,
-                        contentDescription = stringResource(R.string.cd_fit_screen),
-                        tint = CyanAccent,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-            }
+            Text(
+                text = "$zoomPercent%",
+                color = Color.White,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+            )
         }
     }
 }

@@ -124,6 +124,11 @@
     <string name="select_grow">Grow</string>
     <string name="select_shrink">Shrink</string>
     <string name="select_smooth">Smooth</string>
+    <string name="select_shift_edge">Shift edge</string>
+    <string name="select_edge_contrast">Edge contrast</string>
+    <string name="select_cleanup">Remove specks & holes</string>
+    <string name="select_border">Border width</string>
+    <string name="select_border_width">Border %1$d px</string>
     <string name="select_refine">Refine Edge</string>
     
     <!-- Object Removal / Inpainting -->
@@ -163,6 +168,39 @@
     <string name="blend_hard_light">Hard Light</string>
     <string name="blend_difference">Difference</string>
     <string name="blend_add">Add / Plus</string>
+    <string name="blend_color_dodge">Color Dodge</string>
+    <string name="blend_color_burn">Color Burn</string>
+    <string name="blend_exclusion">Exclusion</string>
+    <string name="blend_hue">Hue</string>
+    <string name="blend_saturation">Saturation</string>
+    <string name="blend_color">Color</string>
+    <string name="blend_luminosity">Luminosity</string>
+    <string name="layer_rename_title">Rename layer</string>
+    <string name="layer_clip_create">Create clipping mask</string>
+    <string name="layer_clip_release">Release clipping mask</string>
+    <string name="layer_select_pixels">Select layer pixels</string>
+    <string name="layer_mask_link">Link mask to layer</string>
+    <string name="layer_mask_unlink">Unlink mask from layer</string>
+    <string name="layer_mask_hardness">Brush hardness</string>
+    <string name="layer_mask_opacity">Brush opacity</string>
+    <string name="layer_mask_gradient">Gradient</string>
+    <string name="layer_mask_gradient_in_selection">Gradient (in selection)</string>
+    <string name="mask_gradient_down">Gradient top to bottom</string>
+    <string name="mask_gradient_up">Gradient bottom to top</string>
+    <string name="mask_gradient_right">Gradient left to right</string>
+    <string name="mask_gradient_left">Gradient right to left</string>
+    <string name="mask_gradient_radial">Radial gradient</string>
+    <string name="layer_reorder_hint">Drag the handle to reorder layers</string>
+    <string name="cd_layer_drag">Drag to reorder</string>
+    <string name="cd_layer_clipped">Clipped to the layer below</string>
+    <string name="status_merge_into_adjustment">Cannot merge into an adjustment layer</string>
+    <string name="status_merge_hidden">Show both layers before merging</string>
+    <string name="status_mask_linked">Mask linked: it moves with the layer</string>
+    <string name="status_mask_unlinked">Mask unlinked: it stays in place</string>
+    <string name="status_clip_needs_layer_below">A clipping mask needs a layer below</string>
+    <string name="status_clip_on">Clipped to the layer below</string>
+    <string name="status_clip_off">Clipping mask released</string>
+    <string name="status_mask_gradient_applied">Mask gradient applied</string>
     
     <!-- Text Tool & Fonts -->
     <string name="text_edit_title">Edit Text</string>
@@ -258,8 +296,6 @@
     <string name="cd_smart_auto">Smart Auto</string>
     <string name="cd_save">Save project</string>
     <string name="cd_export">Export image</string>
-    <string name="cd_zoom_out">Zoom out</string>
-    <string name="cd_zoom_in">Zoom in</string>
     <string name="cd_fit_screen">Fit to screen</string>
     <string name="cd_undo_point">Undo point</string>
     <string name="cd_clear_points">Clear points</string>
@@ -273,7 +309,8 @@
     <string name="filter_apply">Apply Filter</string>
     <string name="filter_cancel">Cancel Preview</string>
     <string name="filter_preview_instruction">Tap a filter to preview it. Apply when you are happy with the result.</string>
-    <string name="filter_original_compare">Original</string>
+    <string name="filter_original_compare">Original (tap or hold)</string>
+    <string name="filter_showing_original">Showing original · tap to return</string>
     <string name="adj_reset_all">Reset all</string>
     <string name="selection_refine_group">Refine Selection</string>
     <string name="selection_actions">Selection Actions</string>
@@ -285,12 +322,49 @@
     <string name="select_wand_short">Wand</string>
     <string name="select_wand_contiguous">Contiguous</string>
     <string name="select_wand_all_colors">All Colors</string>
+    <string name="select_wand_sample">Sample</string>
+    <string name="select_wand_sample_point">Point</string>
+    <string name="select_wand_sample_3">3×3</string>
+    <string name="select_wand_sample_5">5×5</string>
+    <string name="select_wand_smart_gradient">Smart gradient</string>
+    <string name="select_wand_clean_noise">Clean noise</string>
+    <string name="select_wand_soft_edges">Soft edges</string>
     <string name="inpaint_add_mask">Paint</string>
     <string name="inpaint_erase_mask">Erase mask</string>
     <string name="inpaint_clear_mask">Clear mask</string>
     <string name="inpaint_undo_mask">Undo mask</string>
     <string name="inpaint_mode_hint">Paint over the object. Use Erase mask to correct the selection before removing it.</string>
     <string name="crop_current_size">Crop: %1$d × %2$d px</string>
+    <string name="crop_straighten">Straighten</string>
+    <string name="crop_rotate_left">Rotate left</string>
+    <string name="crop_rotate_right">Rotate right</string>
+    <string name="crop_flip_h">Flip H</string>
+    <string name="crop_flip_v">Flip V</string>
+    <string name="crop_swap_orientation">Swap portrait / landscape</string>
+    <string name="crop_size_post_square">Post</string>
+    <string name="crop_size_post_portrait">Portrait post</string>
+    <string name="crop_size_story">Story</string>
+    <string name="crop_size_full_hd">Full HD</string>
+    <string name="crop_size_4k">4K</string>
+    <string name="crop_size_custom">Custom size</string>
+    <string name="crop_width">Width</string>
+    <string name="crop_height">Height</string>
+    <string name="crop_size_to">Crop: %1$d × %2$d px → %3$d × %4$d px</string>
+    <string name="crop_grid">Grid</string>
+    <string name="crop_grid_thirds">Thirds</string>
+    <string name="crop_grid_golden">Golden</string>
+    <string name="crop_grid_diagonal">Diagonal</string>
+    <string name="crop_grid_none">None</string>
+    <string name="crop_expand_canvas">Expand canvas</string>
+    <string name="perspective_auto_detect">Detect document automatically</string>
+    <string name="perspective_vertical">Vertical</string>
+    <string name="perspective_horizontal">Horizontal</string>
+    <string name="perspective_true_ratio_hint">The output keeps the real proportions of the rectangle</string>
+    <string name="status_canvas_rotated">Image rotated</string>
+    <string name="status_canvas_flipped">Image flipped</string>
+    <string name="status_detecting_document">Detecting document…</string>
+    <string name="status_document_detected">Document corners placed</string>
+    <string name="status_document_not_found">No document found, place the corners by hand</string>
     <string name="crop_ratio_selected">Selected ratio: %1$s</string>
     <string name="layer_actions">Layer actions</string>
     <string name="layer_thumbnail">Layer thumbnail</string>
@@ -349,6 +423,20 @@
     <string name="status_analyzing_image">Analyzing image…</string>
     <string name="status_smart_auto_applied">Smart Auto applied</string>
     <string name="status_smart_auto_failed">Smart Auto failed</string>
+    <string name="adj_whites">Whites</string>
+    <string name="adj_blacks">Blacks</string>
+    <string name="adj_vibrance">Vibrance</string>
+    <string name="adj_clarity">Clarity</string>
+    <string name="adj_dehaze">Dehaze</string>
+    <string name="adj_group_light">Light</string>
+    <string name="adj_group_color">Color</string>
+    <string name="adj_group_detail">Detail</string>
+    <string name="adj_group_effects">Effects</string>
+    <string name="adj_smart_auto_strength">Smart Auto strength</string>
+    <string name="adj_double_tap_reset_hint">Double-tap a slider name to reset it</string>
+    <string name="adj_layer_from_selection">Adjust selection only</string>
+    <string name="status_smart_auto_nothing">The image already looks balanced</string>
+    <string name="status_adjustment_layer_from_selection">Adjustment layer added for the selection</string>
     <string name="status_select_object_first">Paint over the object first.</string>
     <string name="status_content_aware_removal">Removing object…</string>
     <string name="status_object_removed">Object removed</string>
@@ -391,6 +479,8 @@
     <string name="select_sample_all_layers">All Layers</string>
     <string name="select_auto_enhance">Auto-Enhance</string>
     <string name="select_quick_mode_hint">Brush over object to intelligently snap to edges</string>
+    <string name="select_quick_edge_sensitivity">Edge sensitivity</string>
+    <string name="select_quick_subtract_hint">Grows to the object edge from a short stroke. Use Subtract (or hold) to remove parts the same way.</string>
 
     <!-- Perspective Crop Strings -->
     <string name="perspective_fit_canvas">Fit to Image</string>
@@ -431,6 +521,30 @@
     <string name="refine_view_white">On white</string>
     <string name="refine_view_mask">Mask</string>
     <string name="refine_decontaminate_amount">Halo removal amount</string>
+    <string name="filter_portra_film">Portra Film</string>
+    <string name="filter_fuji_film">Fuji Film</string>
+    <string name="filter_tri_x_bw">Tri-X B&amp;W</string>
+    <string name="filter_faded_matte">Faded Matte</string>
+    <string name="filter_light_leak">Light Leak</string>
+    <string name="filter_cat_all">All</string>
+    <string name="filter_cat_favorites">Favourites</string>
+    <string name="filter_cat_portrait">Portrait</string>
+    <string name="filter_cat_landscape">Landscape</string>
+    <string name="filter_cat_film">Film</string>
+    <string name="filter_cat_bw">B&amp;W</string>
+    <string name="filter_cat_creative">Creative</string>
+    <string name="filter_cat_luts">LUTs</string>
+    <string name="filter_cat_my_looks">My looks</string>
+    <string name="filter_luts_empty">No LUTs yet. Import a .cube file to add film and cinema looks.</string>
+    <string name="filter_looks_empty">No saved looks yet. Adjust a photo, then tap “Save look”.</string>
+    <string name="filter_favorites_empty">Tap the star on any filter to add it here.</string>
+    <string name="filter_toggle_favorite">Add to / remove from favourites</string>
+    <string name="filter_save_look">Save look</string>
+    <string name="filter_import_lut">Import LUT (.cube)</string>
+    <string name="filter_look_name">Look name</string>
+    <string name="status_lut_imported">LUT “%1$s” imported</string>
+    <string name="status_lut_invalid">This file is not a valid 3D .cube LUT</string>
+    <string name="status_preset_saved">Look “%1$s” saved</string>
     <string name="canvas_error_numeric">Please enter valid numeric dimensions.</string>
     <string name="canvas_error_min">Minimum canvas dimension is %1$d px.</string>
     <string name="canvas_error_max">Maximum canvas dimension is %1$d px.</string>
@@ -462,6 +576,19 @@
     <string name="transform_center_canvas">Center on Canvas</string>
     <string name="transform_fit_canvas">Fit to Canvas</string>
     <string name="transform_fill_canvas">Fill Canvas</string>
+    <string name="transform_exact_values">Exact values</string>
+    <string name="transform_mode_free">Free</string>
+    <string name="transform_mode_skew">Skew</string>
+    <string name="transform_mode_distort">Distort</string>
+    <string name="transform_hint_free">Corners scale from the opposite corner, edges along the layer, the top handle rotates. Two fingers on the layer: scale and rotate.</string>
+    <string name="transform_hint_skew">Drag an edge along itself to slant the layer.</string>
+    <string name="transform_hint_distort">Drag each corner freely, e.g. to place an image on a screen or a sign.</string>
+    <string name="transform_from_center">From center</string>
+    <string name="transform_snap">Snap & guides</string>
+    <string name="transform_skew_h">Horizontal skew</string>
+    <string name="transform_skew_v">Vertical skew</string>
+    <string name="transform_reset_distort">Reset distortion</string>
+    <string name="transform_pivot">Reference point (rotation)</string>
 
     <!-- Professional Inpaint / Remove Selection -->
     <string name="inpaint_mode_brush">Brush</string>
@@ -480,6 +607,18 @@
     <string name="text_shadow_offset_y">Shadow Offset Y</string>
     <string name="text_custom_color">Custom Color</string>
     <string name="text_pick_color">Select Color</string>
+    <string name="text_default_content">Your text</string>
+    <string name="text_bold">Bold</string>
+    <string name="text_italic">Italic</string>
+    <string name="text_underline">Underline</string>
+    <string name="text_gradient">Gradient fill</string>
+    <string name="text_gradient_end">Gradient end color</string>
+    <string name="text_gradient_angle">Gradient angle</string>
+    <string name="text_background">Background box</string>
+    <string name="text_background_color">Background color</string>
+    <string name="text_background_padding">Padding</string>
+    <string name="text_background_corner">Corner radius</string>
+    <string name="text_opacity">Opacity</string>
 
     <!-- Professional Blur & Effects Strings -->
     <string name="filter_tab_presets">Presets</string>
@@ -499,6 +638,7 @@
     <string name="effect_distance">Motion Distance</string>
     <string name="effect_angle">Angle</string>
     <string name="effect_apply_layer">Apply Effect to Layer</string>
+    <string name="effect_live_preview_hint">Previewed live on the image. Nothing changes until you apply.</string>
     <string name="status_effect_applied">Effect applied to layer</string>
 
     <!-- Layer Mask Advanced Controls -->
@@ -524,6 +664,22 @@
     <string name="curves_preset_lift_shadows">Lift Shadows</string>
     <string name="curves_preset_deep_blacks">Deep Blacks</string>
     <string name="curves_preset_linear">Reset Linear</string>
+    <string name="curves_hint">Tap the curve to add a point · drag it off the graph or double-tap to remove</string>
+    <string name="curves_delete_point">Delete point</string>
+    <string name="curves_input_minus">Input -1</string>
+    <string name="curves_input_plus">Input +1</string>
+    <string name="curves_output_minus">Output -1</string>
+    <string name="curves_output_plus">Output +1</string>
+    <string name="curves_pick_point">Point on image</string>
+    <string name="curves_pick_black">Black point</string>
+    <string name="curves_pick_gray">Gray point</string>
+    <string name="curves_pick_white">White point</string>
+    <string name="curves_pick_hint">Tap the image to pick a tone</string>
+    <string name="curves_preset_strong_contrast">Strong Contrast</string>
+    <string name="curves_preset_brighten">Brighten</string>
+    <string name="curves_preset_darken">Darken</string>
+    <string name="curves_preset_matte">Matte</string>
+    <string name="curves_reset_all">Reset All Curves</string>
     <string name="hue_shift">Hue Shift</string>
     <string name="hue_saturation">Saturation</string>
     <string name="hue_lightness">Lightness</string>
@@ -534,10 +690,26 @@
     <string name="color_range_cyans">Cyans</string>
     <string name="color_range_blues">Blues</string>
     <string name="color_range_magentas">Magentas</string>
+    <string name="color_range_oranges">Oranges</string>
+    <string name="color_range_aquas">Aquas</string>
+    <string name="color_range_purples">Purples</string>
+    <string name="hsl_target_tool">Adjust by dragging on the image</string>
+    <string name="hsl_target_hint">Press on a colour in the image and drag right / left</string>
+    <string name="hsl_range_width">Range width</string>
+    <string name="hsl_colorize">Colorize</string>
     <string name="replace_source_color">Color to Replace</string>
     <string name="replace_tolerance">Fuzziness / Tolerance</string>
     <string name="replace_target_color">Replacement Color</string>
     <string name="replace_enabled">Active Replacement</string>
+    <string name="replace_add">+ Add</string>
+    <string name="replace_remove">Remove</string>
+    <string name="replace_empty_hint">Add a replacement, then pick the colour to change from the image.</string>
+    <string name="replace_pick_from_image">Pick from image</string>
+    <string name="replace_pick_hint">Tap the image to pick the colour</string>
+    <string name="replace_target_hue">Target hue</string>
+    <string name="replace_softness">Edge softness</string>
+    <string name="replace_show_area">Hold to see the affected area</string>
+    <string name="replace_selection_only_hint">Change the colour only inside the selection</string>
     <string name="status_selection_adjust_whole_layer">Selection active • Adjustments apply to the whole layer. To limit them, add an adjustment layer and give it a mask from the selection.</string>
     <string name="status_selection_filters_scope">Selection active • Pro effects apply inside the selection; filter presets apply to the whole layer.</string>
 
@@ -556,13 +728,23 @@
 
     <!-- Upgraded AI Inpaint & Object Removal -->
     <string name="inpaint_engine_title">Removal Algorithm</string>
-    <string name="inpaint_engine_ai">AI Texture Synthesis</string>
+    <string name="inpaint_engine_ai">Texture Synthesis (Content-Aware)</string>
     <string name="inpaint_engine_telea">Fast Marching (Telea)</string>
+    <string name="inpaint_engine_smart">Smart Removal</string>
+    <string name="inpaint_engine_desc_smart">Picks the best technique for each part: seamless blending for scratches and thin lines, edge continuation and real texture for larger objects</string>
+    <string name="inpaint_advanced">Advanced</string>
+    <string name="inpaint_engine_smart_short">Smart</string>
+    <string name="inpaint_engine_texture_short">Texture</string>
+    <string name="inpaint_engine_fast_short">Fast</string>
+    <string name="inpaint_protect_area">Protect area (do not copy from here)</string>
+    <string name="inpaint_clear_protect">Clear protected</string>
+    <string name="inpaint_protect_hint">Paint over people, logos or details that must not be cloned into the removed area</string>
+    <string name="inpaint_another_result">Another result</string>
     <string name="inpaint_smart_snap">Smart Edge Snapping</string>
     <string name="inpaint_smart_snap_hint">Snaps mask tightly to object contours to prevent color halo fringes</string>
     <string name="inpaint_seamless_blend">Seamless Poisson Blending</string>
     <string name="inpaint_seamless_blend_hint">Eliminates visible boundaries between new texture and background</string>
-    <string name="inpaint_engine_desc_ai">Synthesizes real texture and continues structural edges without blurring</string>
+    <string name="inpaint_engine_desc_ai">Copies real texture from the surroundings; best for objects on grass, sand, sky or walls</string>
     <string name="inpaint_engine_desc_telea">Smooth color propagation suitable for small scratches and blemishes</string>
 
     <!-- Professional Edge & Hair Refine (Select & Mask) -->

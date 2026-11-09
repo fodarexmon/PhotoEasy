@@ -138,9 +138,18 @@ fun EditorScreen(
     brushSizeDp: Float,
     magicWandTolerance: Int,
     isMagicWandContiguous: Boolean = true,
+    wandOptions: com.example.engine.WandOptions = com.example.engine.WandOptions(),
+    onWandOptionsChange: (com.example.engine.WandOptions) -> Unit = {},
     inpaintRadiusPx: Float = 5f,
     inpaintFeatherPx: Int = 4,
-    inpaintEngineMode: com.example.engine.InpaintEngineMode = com.example.engine.InpaintEngineMode.AI_PATCH_SYNTHESIS,
+    inpaintEngineMode: com.example.engine.InpaintEngineMode = com.example.engine.InpaintEngineMode.SMART,
+    isInpaintProtectMode: Boolean = false,
+    onToggleInpaintProtect: () -> Unit = {},
+    onClearInpaintProtect: () -> Unit = {},
+    inpaintProtectMask: android.graphics.Bitmap? = null,
+    inpaintProtectRevision: Long = 0L,
+    canRetryRemoval: Boolean = false,
+    onRetryRemoval: () -> Unit = {},
     isSmartEdgeSnapEnabled: Boolean = true,
     isSeamlessBlendEnabled: Boolean = true,
     canUndo: Boolean,
@@ -217,6 +226,14 @@ fun EditorScreen(
     onRedoSelection: () -> Unit = {},
     onSaveProject: () -> Unit,
     onExportConfirm: (isPng: Boolean, quality: Int) -> Unit,
+    luts: List<com.example.engine.LutInfo> = emptyList(),
+    customPresets: List<com.example.engine.CustomPreset> = emptyList(),
+    favoriteFilters: Set<String> = emptySet(),
+    onToggleFavoriteFilter: (String) -> Unit = {},
+    onImportLut: (Uri) -> Unit = {},
+    onDeleteLut: (String) -> Unit = {},
+    onSaveLook: (String) -> Unit = {},
+    onDeleteCustomPreset: (String) -> Unit = {},
     onStrokeSegment: ((List<PointF>, Float, com.example.ui.viewmodel.StrokePhase) -> Unit)? = null,
     selectionRevision: Long = 0L,
     onMagicWandDrag: ((Int, Int, Int, com.example.ui.viewmodel.StrokePhase) -> Unit)? = null,
@@ -235,10 +252,20 @@ fun EditorScreen(
     modifierAmount: Float = 0f,
     onModifierPreview: (com.example.ui.viewmodel.SelectionModifierOp, Float) -> Unit = { _, _ -> },
     onModifierCommit: () -> Unit = {},
+    selectionRefine: com.example.ui.viewmodel.SelectionRefineParams = com.example.ui.viewmodel.SelectionRefineParams(),
+    onSelectionRefinePreview: (com.example.ui.viewmodel.SelectionRefineParams) -> Unit = {},
+    onSelectionRefineApply: () -> Unit = {},
+    onSelectionRefineReset: () -> Unit = {},
+    onBorderSelection: (Float) -> Unit = {},
+    onCleanupSelection: () -> Unit = {},
     isQuickAutoEnhance: Boolean = true,
     onToggleQuickAutoEnhance: (Boolean) -> Unit = {},
     isQuickSampleAll: Boolean = false,
     onToggleQuickSampleAll: (Boolean) -> Unit = {},
+    quickSelectionTolerance: Int = 35,
+    onQuickSelectionToleranceChange: (Int) -> Unit = {},
+    quickSelectionEdgeSensitivity: Int = 60,
+    onQuickSelectionEdgeSensitivityChange: (Int) -> Unit = {},
     refinePreview: Bitmap? = null,
     refinePreviewMode: com.example.ui.viewmodel.RefinePreviewMode = com.example.ui.viewmodel.RefinePreviewMode.OVERLAY,
     onRefinePreviewModeChange: (com.example.ui.viewmodel.RefinePreviewMode) -> Unit = {},
@@ -286,7 +313,44 @@ fun EditorScreen(
     onToggleRubyOverlay: (() -> Unit)? = null,
     showMaskRubyOverlay: Boolean = false,
     maskBrushSizeDp: Float = 24f,
-    onMaskBrushSizeChange: ((Float) -> Unit)? = null
+    onMaskBrushSizeChange: ((Float) -> Unit)? = null,
+    layerActions: com.example.ui.components.LayerPanelActions = com.example.ui.components.LayerPanelActions(),
+    maskBrushHardness: Float = 0.6f,
+    maskBrushOpacity: Float = 1f,
+    onTextConfigChange: ((com.example.data.model.TextLayerConfig) -> Unit)? = null,
+    smartAutoStrength: Float? = null,
+    onSmartAutoStrengthChange: (Float) -> Unit = {},
+    onCreateAdjustmentLayerFromSelection: (() -> Unit)? = null,
+    /** Colour of the image at a document point as it enters the curves (null = nothing there). */
+    onSampleCurveColor: ((Float, Float) -> Int?)? = null,
+    onSampleReplaceColor: ((Float, Float) -> Int?)? = null,
+    onSampleHslColor: ((Float, Float) -> Int?)? = null,
+    cropStraighten: Float = 0f,
+    onCropStraightenChange: (Float) -> Unit = {},
+    cropGrid: String = "THIRDS",
+    onCropGridChange: (String) -> Unit = {},
+    cropExpandCanvas: Boolean = false,
+    onToggleCropExpandCanvas: () -> Unit = {},
+    cropTargetWidth: Int = 0,
+    cropTargetHeight: Int = 0,
+    onCropTargetSize: (Int, Int) -> Unit = { _, _ -> },
+    onSwapCropOrientation: () -> Unit = {},
+    onRotateCanvas: (Boolean) -> Unit = {},
+    onFlipCanvas: (Boolean) -> Unit = {},
+    perspectiveVertical: Float = 0f,
+    perspectiveHorizontal: Float = 0f,
+    onKeystoneChange: (Float, Float) -> Unit = { _, _ -> },
+    onAutoDetectDocument: () -> Unit = {},
+    transformMode: String = "FREE",
+    onTransformModeChange: (String) -> Unit = {},
+    transformPivot: Int = 4,
+    onTransformPivotChange: (Int) -> Unit = {},
+    transformFromCenter: Boolean = false,
+    onToggleTransformFromCenter: () -> Unit = {},
+    transformLockAspect: Boolean = true,
+    onToggleTransformLockAspect: () -> Unit = {},
+    transformSnap: Boolean = true,
+    onToggleTransformSnap: () -> Unit = {}
 ) {
     var currentCropRect by remember { mutableStateOf<android.graphics.RectF?>(null) }
     var showExportDialog by remember { mutableStateOf(false) }
@@ -306,6 +370,103 @@ fun EditorScreen(
 
     LaunchedEffect(activeTool) {
         if (activeTool != ActiveTool.ADJUST && activeTool != ActiveTool.FILTERS) compareOriginal = false
+    }
+
+    // Curves: tapping the image adds a point / sets black, grey or white points.
+    var curvePickMode by remember { mutableStateOf<com.example.ui.components.CurvePickMode?>(null) }
+    var curveSample by remember { mutableStateOf<com.example.ui.components.CurveSample?>(null) }
+    // HSL targeted adjustment: property changed by dragging on the image (HUE / SAT / LIGHT) or null.
+    var hslTargetProperty by remember { mutableStateOf<String?>(null) }
+    var hslDragStart by remember { mutableStateOf<Pair<com.example.data.model.ColorAdjustments, Map<String, Float>>?>(null) }
+    LaunchedEffect(activeTool) { if (activeTool != ActiveTool.ADJUST) hslTargetProperty = null }
+    val onTargetedDrag: (Float, Float, Float, com.example.ui.viewmodel.StrokePhase) -> Unit = { x, y, dxDp, phase ->
+        val prop = hslTargetProperty
+        val layer = project.layers.getOrNull(selectedLayerIndex)
+        if (prop != null && layer != null) {
+            when (phase) {
+                com.example.ui.viewmodel.StrokePhase.START -> {
+                    val color = onSampleHslColor?.invoke(x, y)
+                    val weights = color?.let { com.example.engine.ImageProcessor.hslRangeWeights(it) } ?: emptyMap()
+                    val maxW = weights.values.maxOrNull() ?: 0f
+                    hslDragStart = if (maxW > 0f) layer.adjustments.migrateHsl() to weights.mapValues { it.value / maxW } else null
+                }
+                else -> {
+                    val start = hslDragStart
+                    if (start != null) {
+                        // 2 dp of drag = 1 unit; the colour's main range moves fully, its neighbour by weight.
+                        val amount = dxDp / 2f
+                        var adj = start.first
+                        start.second.forEach { (key, w) ->
+                            val band = start.first.hslBand(key)
+                            val changed = when (prop) {
+                                "HUE" -> band.copy(hue = (band.hue + amount * w * 0.5f).coerceIn(-60f, 60f))
+                                "SAT" -> band.copy(saturation = (band.saturation + amount * w).coerceIn(-100f, 100f))
+                                else -> band.copy(lightness = (band.lightness + amount * w).coerceIn(-100f, 100f))
+                            }
+                            adj = adj.withHslBand(key, changed)
+                        }
+                        val main = start.second.maxByOrNull { it.value }?.key
+                        if (main != null) adj = adj.copy(hslColorRange = main)
+                        onUpdateLayerTransient { l -> l.adjustments = adj }
+                        if (phase == com.example.ui.viewmodel.StrokePhase.END) {
+                            onCommitHistoryState()
+                            hslDragStart = null
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Replace colour: eyedropper for (replacement index, source?).
+    var replacePick by remember { mutableStateOf<Pair<Int, Boolean>?>(null) }
+    LaunchedEffect(activeTool) { if (activeTool != ActiveTool.ADJUST) { curvePickMode = null; curveSample = null; replacePick = null } }
+    val canvasSampler: ((Float, Float) -> Unit)? = when {
+        activeTool == ActiveTool.ADJUST && replacePick != null -> { x, y ->
+            val target = replacePick
+            val color = onSampleReplaceColor?.invoke(x, y)
+            if (target != null && color != null) {
+                onUpdateLayerTransient { l ->
+                    val list = l.adjustments.effectiveReplacements().toMutableList()
+                    if (target.first in list.indices) {
+                        list[target.first] = if (target.second) list[target.first].copy(sourceColor = color) else list[target.first].copy(targetColor = color)
+                        l.adjustments = l.adjustments.withReplacements(list)
+                    }
+                }
+                onCommitHistoryState()
+            }
+            replacePick = null
+        }
+        activeTool == ActiveTool.ADJUST && curvePickMode != null -> { x, y ->
+            onSampleCurveColor?.invoke(x, y)?.let { color ->
+                curveSample = com.example.ui.components.CurveSample(color, System.nanoTime())
+            }
+        }
+        else -> null
+    }
+
+    // Set by "add text" and by double-tapping a text layer: the text panel focuses its field.
+    var textEditFocusRequested by remember { mutableStateOf(false) }
+
+    // Pro effect shown live on the canvas while its panel is open.
+    var proEffectPreview by remember { mutableStateOf<com.example.engine.ProEffectPreview?>(null) }
+    // 0 = idle, 1 = Apply pressed, 2 = the effect is being applied. The live preview stays on screen
+    // until the real result replaces it, so the image never flashes back to the original meanwhile.
+    var proApplyPhase by remember { mutableStateOf(0) }
+    LaunchedEffect(proApplyPhase, isProcessing) {
+        when {
+            proApplyPhase == 1 && isProcessing -> proApplyPhase = 2
+            proApplyPhase == 2 && !isProcessing -> { proEffectPreview = null; proApplyPhase = 0 }
+            proApplyPhase == 1 -> {
+                // The apply did not start (e.g. locked layer): drop the preview.
+                kotlinx.coroutines.delay(1500)
+                proEffectPreview = null
+                proApplyPhase = 0
+            }
+        }
+    }
+    LaunchedEffect(proEffectPreview == null) {
+        if (proEffectPreview == null) com.example.engine.LayerRenderer.clearProEffectCache()
     }
 
     BackHandler {
@@ -571,6 +732,19 @@ fun EditorScreen(
                                     onCommitHistoryState()
                                 },
                                 onCompareChange = { compareOriginal = it },
+                                smartAutoStrength = smartAutoStrength,
+                                onSmartAutoStrengthChange = onSmartAutoStrengthChange,
+                                onSmartAutoStrengthCommit = onCommitHistoryState,
+                                onCreateAdjustmentLayerFromSelection = onCreateAdjustmentLayerFromSelection,
+                                sourceBitmap = layer.bitmap,
+                                curvePickMode = curvePickMode,
+                                onCurvePickModeChange = { curvePickMode = it },
+                                curvePickedSample = curveSample,
+                                onCurveSampleConsumed = { curveSample = null },
+                                replacePickTarget = replacePick,
+                                hslTargetProperty = hslTargetProperty,
+                                onHslTargetPropertyChange = { hslTargetProperty = it; if (it != null) { curvePickMode = null; replacePick = null } },
+                                onReplacePickChange = { replacePick = it; if (it != null) curvePickMode = null },
                                 hasActiveSelection = hasSel,
                                 onClearSelection = onClearSelection
                             )
@@ -580,30 +754,84 @@ fun EditorScreen(
                     ActiveTool.FILTERS -> {
                         val hasSel = hasActiveSelectionCached
                         selectedLayer?.let { layer ->
+                            // Same size the ViewModel decodes for destructive effects (authoritative source),
+                            // so the live preview scales pixel radii to look like the applied result.
+                            val fullResMaxDimension = run {
+                                val bmpMax = layer.bitmap?.let { maxOf(it.width, it.height) } ?: 0
+                                if (layer.sourceAssetPath != null) {
+                                    val intrinsic = maxOf(layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight()).toInt().coerceIn(64, 4096)
+                                    val original = maxOf(layer.originalWidth, layer.originalHeight)
+                                    if (original > 0) minOf(intrinsic, original) else intrinsic
+                                } else bmpMax
+                            }
+                            // Thumbnails need an image: a layer without its own pixels (adjustment / text /
+                            // fill) previews on the image it affects, rendered small in the background.
+                            val filtersContext = androidx.compose.ui.platform.LocalContext.current
+                            val previewSource by androidx.compose.runtime.produceState<android.graphics.Bitmap?>(
+                                initialValue = layer.bitmap?.takeIf { !it.isRecycled },
+                                layer.id, layer.bitmap, project.id
+                            ) {
+                                val own = layer.bitmap?.takeIf { !it.isRecycled }
+                                if (own != null) { value = own; return@produceState }
+                                value = try {
+                                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                                        val idx = project.layers.indexOfFirst { it.id == layer.id }
+                                        val below = if (layer.type == com.example.data.model.LayerType.ADJUSTMENT && idx > 0) project.layers.subList(0, idx).toList() else project.layers.toList()
+                                        com.example.engine.LayerRenderer.renderCompositeCanvas(
+                                            filtersContext, below, project.width, project.height,
+                                            includeBackground = true, maxPreviewDimension = 480
+                                        )
+                                    }
+                                } catch (e: kotlinx.coroutines.CancellationException) {
+                                    throw e
+                                } catch (e: Throwable) {
+                                    null
+                                }
+                            }
                             FiltersPanel(
                                 selectedFilter = layer.filter,
                                 filterIntensity = layer.filterIntensity,
-                                sourceBitmap = layer.bitmap,
+                                sourceBitmap = previewSource,
                                 adjustments = layer.adjustments,
-                                onPreviewFilter = { filter -> onUpdateLayerTransient { l -> l.filter = filter } },
+                                // A preset filter and an imported LUT are alternative looks.
+                                onPreviewFilter = { filter -> onUpdateLayerTransient { l -> l.filter = filter; l.lutId = null } },
+                                selectedLutId = layer.lutId,
+                                luts = luts,
+                                customPresets = customPresets,
+                                favorites = favoriteFilters,
+                                onPreviewLut = { id -> onUpdateLayerTransient { l -> l.filter = FilterType.NONE; l.lutId = id } },
+                                onApplyCustomPreset = { p ->
+                                    onUpdateLayerTransient { l ->
+                                        l.adjustments = p.adjustments.copy()
+                                        l.filter = p.filter
+                                        l.filterIntensity = p.intensity
+                                        l.lutId = p.lutId
+                                    }
+                                },
+                                onToggleFavorite = onToggleFavoriteFilter,
+                                onImportLut = onImportLut,
+                                onDeleteLut = onDeleteLut,
+                                onSaveLook = onSaveLook,
+                                onDeleteCustomPreset = onDeleteCustomPreset,
                                 onIntensityChange = { intensity -> onUpdateLayerTransient { l -> l.filterIntensity = intensity } },
                                 onCompareChange = { compareOriginal = it },
                                 onApply = { onCommitHistoryState(); onToolSelect(ActiveTool.NONE) },
                                 onCancel = { onCancelHistoryState(); onToolSelect(ActiveTool.NONE) },
                                 onApplyProEffect = { effect, p1, p2 ->
+                                    // Keep showing exactly what is being applied until the result arrives.
+                                    proEffectPreview = com.example.engine.ProEffectPreview(layer.id, layer.bitmap, effect, p1, p2, fullResMaxDimension)
+                                    proApplyPhase = 1
                                     onApplyProEffect?.invoke(effect, p1, p2)
                                     onToolSelect(ActiveTool.NONE)
                                 },
                                 hasActiveSelection = hasSel,
                                 onClearSelection = onClearSelection,
-                                // Same size the ViewModel decodes for destructive effects (authoritative source).
-                                fullResMaxDimension = run {
-                                    val bmpMax = layer.bitmap?.let { maxOf(it.width, it.height) } ?: 0
-                                    if (layer.sourceAssetPath != null) {
-                                        val intrinsic = maxOf(layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight()).toInt().coerceIn(64, 4096)
-                                        val original = maxOf(layer.originalWidth, layer.originalHeight)
-                                        if (original > 0) minOf(intrinsic, original) else intrinsic
-                                    } else bmpMax
+                                onPreviewProEffect = { effect, p1, p2 ->
+                                    if (proApplyPhase == 0) {
+                                        proEffectPreview = effect?.let {
+                                            com.example.engine.ProEffectPreview(layer.id, layer.bitmap, it, p1, p2, fullResMaxDimension)
+                                        }
+                                    }
                                 }
                             )
                         }
@@ -624,7 +852,23 @@ fun EditorScreen(
                             onResetCrop = { currentCropRect = null; onResetCrop() },
                             onApplyPerspective = { onApplyPerspective(); onToolSelect(ActiveTool.NONE) },
                             onResetPerspective = onResetPerspective,
-                            onFitPerspectiveToCanvas = onFitPerspectiveToCanvas
+                            onFitPerspectiveToCanvas = onFitPerspectiveToCanvas,
+                            cropStraighten = cropStraighten,
+                            onStraightenChange = { currentCropRect = null; onCropStraightenChange(it) },
+                            cropGrid = cropGrid,
+                            onGridChange = onCropGridChange,
+                            expandCanvas = cropExpandCanvas,
+                            onToggleExpandCanvas = onToggleCropExpandCanvas,
+                            targetWidth = cropTargetWidth,
+                            targetHeight = cropTargetHeight,
+                            onTargetSize = { w, h -> currentCropRect = null; onCropTargetSize(w, h) },
+                            onSwapOrientation = { currentCropRect = null; onSwapCropOrientation() },
+                            onRotateCanvas = { currentCropRect = null; onRotateCanvas(it) },
+                            onFlipCanvas = onFlipCanvas,
+                            perspectiveVertical = perspectiveVertical,
+                            perspectiveHorizontal = perspectiveHorizontal,
+                            onKeystoneChange = onKeystoneChange,
+                            onAutoDetectDocument = onAutoDetectDocument
                         )
                     }
 
@@ -635,6 +879,8 @@ fun EditorScreen(
                             brushSizeDp = brushSizeDp,
                             tolerance = magicWandTolerance,
                             isContiguous = isMagicWandContiguous,
+                            wandOptions = wandOptions,
+                            onWandOptionsChange = onWandOptionsChange,
                             canUndoSelection = canUndoSelection,
                             canRedoSelection = canRedoSelection,
                             onToolSelect = onSelectionToolSelect,
@@ -661,6 +907,10 @@ fun EditorScreen(
                             onToggleQuickAutoEnhance = onToggleQuickAutoEnhance,
                             isQuickSampleAll = isQuickSampleAll,
                             onToggleQuickSampleAll = onToggleQuickSampleAll,
+                            quickTolerance = quickSelectionTolerance,
+                            onQuickToleranceChange = onQuickSelectionToleranceChange,
+                            quickEdgeSensitivity = quickSelectionEdgeSensitivity,
+                            onQuickEdgeSensitivityChange = onQuickSelectionEdgeSensitivityChange,
                             isQuickMaskView = isQuickMaskView,
                             onToggleQuickMask = onToggleQuickMask,
                             shapeFromCenter = shapeFromCenter,
@@ -670,13 +920,61 @@ fun EditorScreen(
                             modifierOp = modifierOp,
                             modifierAmount = modifierAmount,
                             onModifierPreview = onModifierPreview,
-                            onModifierCommit = onModifierCommit
+                            onModifierCommit = onModifierCommit,
+                            refineParams = selectionRefine,
+                            onRefinePreview = onSelectionRefinePreview,
+                            onRefineApply = onSelectionRefineApply,
+                            onRefineReset = onSelectionRefineReset,
+                            onBorderSelection = onBorderSelection,
+                            onCleanupSelection = onCleanupSelection,
+                            documentMaxDim = maxOf(project.width, project.height)
                         )
                     }
 
                     ActiveTool.TRANSFORM -> {
                         selectedLayer?.let { layer ->
+                            val transformContext = androidx.compose.ui.platform.LocalContext.current
+                            val box = remember(layer.id, layer.bitmap, layer.textConfig, project.width, project.height) {
+                                when {
+                                    layer.bitmap != null -> layer.intrinsicDocumentWidth() to layer.intrinsicDocumentHeight()
+                                    layer.type == com.example.data.model.LayerType.TEXT ->
+                                        com.example.engine.LayerRenderer.measureTextLayer(transformContext, layer, project.width.toFloat())
+                                    else -> project.width.toFloat() to project.height.toFloat()
+                                }
+                            }
                             TransformPanel(
+                                boxWidth = box.first,
+                                boxHeight = box.second,
+                                documentWidth = project.width,
+                                documentHeight = project.height,
+                                mode = transformMode,
+                                onModeChange = onTransformModeChange,
+                                pivot = transformPivot,
+                                onPivotChange = onTransformPivotChange,
+                                fromCenter = transformFromCenter,
+                                onToggleFromCenter = onToggleTransformFromCenter,
+                                lockAspect = transformLockAspect,
+                                onToggleLockAspect = onToggleTransformLockAspect,
+                                snap = transformSnap,
+                                onToggleSnap = onToggleTransformSnap,
+                                skewX = layer.skewX,
+                                skewY = layer.skewY,
+                                onSkewChange = { kx, ky -> onUpdateLayerTransient { l -> l.skewX = kx; l.skewY = ky } },
+                                hasDistort = layer.distort != null,
+                                onResetDistort = {
+                                    onUpdateLayerTransient { l -> l.distort = null }
+                                    onCommitHistoryState()
+                                },
+                                onApplyNumeric = { w, h, angle, x, y ->
+                                    onUpdateLayerTransient { l ->
+                                        if (box.first > 0f) l.scaleX = (if (l.scaleX < 0f) -1f else 1f) * w / box.first
+                                        if (box.second > 0f) l.scaleY = (if (l.scaleY < 0f) -1f else 1f) * h / box.second
+                                        l.rotation = ((angle % 360f) + 360f) % 360f
+                                        l.positionX = x
+                                        l.positionY = y
+                                    }
+                                    onCommitHistoryState()
+                                },
                                 rotation = layer.rotation,
                                 scaleX = layer.scaleX,
                                 scaleY = layer.scaleY,
@@ -745,7 +1043,12 @@ fun EditorScreen(
                             onToggleRubyOverlay = onToggleRubyOverlay,
                             showMaskRubyOverlay = showMaskRubyOverlay,
                             maskBrushSizeDp = maskBrushSizeDp,
-                            onMaskBrushSizeChange = onMaskBrushSizeChange
+                            onMaskBrushSizeChange = onMaskBrushSizeChange,
+                            actions = layerActions,
+                            maskBrushHardness = maskBrushHardness,
+                            maskBrushOpacity = maskBrushOpacity,
+                            documentWidth = project.width,
+                            documentHeight = project.height
                         )
                     }
 
@@ -757,8 +1060,14 @@ fun EditorScreen(
                                 positionX = textLayer.positionX,
                                 positionY = textLayer.positionY,
                                 onConfigChange = { newCfg ->
-                                    onUpdateLayerTransient { l -> l.textConfig = newCfg }
+                                    val change = onTextConfigChange
+                                    if (change != null) change(newCfg) else onUpdateLayerTransient { l -> l.textConfig = newCfg }
                                 },
+                                documentWidth = project.width,
+                                documentHeight = project.height,
+                                requestEditFocus = textEditFocusRequested,
+                                onEditFocusHandled = { textEditFocusRequested = false },
+                                layerKey = textLayer.id,
                                 onConfigCommit = onCommitHistoryState,
                                 onPositionChange = { px, py ->
                                     onUpdateLayerTransient { l ->
@@ -782,7 +1091,7 @@ fun EditorScreen(
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
                                 Button(
-                                    onClick = { onAddText("") },
+                                    onClick = { onAddText(""); textEditFocusRequested = true },
                                     colors = ButtonDefaults.buttonColors(containerColor = IndigoPrimary),
                                     shape = RoundedCornerShape(8.dp)
                                 ) {
@@ -815,7 +1124,13 @@ fun EditorScreen(
                             onToggleSeamlessBlend = onToggleSeamlessBlend,
                             onClearMask = onClearSelection,
                             onUndoMask = onUndoSelection,
-                            onRemoveClick = onObjectRemovalClick
+                            onRemoveClick = onObjectRemovalClick,
+                            isProtectMode = isInpaintProtectMode,
+                            onToggleProtectMode = onToggleInpaintProtect,
+                            hasProtectArea = inpaintProtectMask != null,
+                            onClearProtect = onClearInpaintProtect,
+                            canRetry = canRetryRemoval,
+                            onRetry = onRetryRemoval
                         )
                     }
 
@@ -923,6 +1238,21 @@ fun EditorScreen(
                             onApplyCropRect = { rect -> currentCropRect = rect },
                             modifier = Modifier.fillMaxSize(),
                             showSelectedLayerOriginal = compareOriginal,
+                            proEffectPreview = proEffectPreview,
+                            onRequestTextEdit = { textEditFocusRequested = true },
+                            onCanvasSample = canvasSampler,
+                            targetedAdjustActive = activeTool == ActiveTool.ADJUST && hslTargetProperty != null,
+                            onTargetedDrag = onTargetedDrag,
+                            protectMask = if (activeTool == ActiveTool.OBJECT_REMOVAL) inpaintProtectMask else null,
+                            protectRevision = inpaintProtectRevision,
+                            cropStraighten = cropStraighten,
+                            cropGrid = cropGrid,
+                            cropExpandCanvas = cropExpandCanvas,
+                            transformMode = transformMode,
+                            transformPivot = transformPivot,
+                            transformFromCenter = transformFromCenter,
+                            transformLockAspect = transformLockAspect,
+                            transformSnap = transformSnap,
                             showGeneralOriginal = showGeneralOriginal || isGeneralComparing,
                             isSplitCompareActive = isSplitCompareActive,
                             splitComparePosition = splitComparePosition,
@@ -1029,6 +1359,21 @@ fun EditorScreen(
                             onApplyCropRect = { currentCropRect = it },
                             modifier = Modifier.fillMaxSize(),
                             showSelectedLayerOriginal = compareOriginal,
+                            proEffectPreview = proEffectPreview,
+                            onRequestTextEdit = { textEditFocusRequested = true },
+                            onCanvasSample = canvasSampler,
+                            targetedAdjustActive = activeTool == ActiveTool.ADJUST && hslTargetProperty != null,
+                            onTargetedDrag = onTargetedDrag,
+                            protectMask = if (activeTool == ActiveTool.OBJECT_REMOVAL) inpaintProtectMask else null,
+                            protectRevision = inpaintProtectRevision,
+                            cropStraighten = cropStraighten,
+                            cropGrid = cropGrid,
+                            cropExpandCanvas = cropExpandCanvas,
+                            transformMode = transformMode,
+                            transformPivot = transformPivot,
+                            transformFromCenter = transformFromCenter,
+                            transformLockAspect = transformLockAspect,
+                            transformSnap = transformSnap,
                             showGeneralOriginal = showGeneralOriginal || isGeneralComparing,
                             isSplitCompareActive = isSplitCompareActive,
                             splitComparePosition = splitComparePosition,

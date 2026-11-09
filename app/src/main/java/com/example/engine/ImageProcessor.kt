@@ -4,8 +4,6 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.PointF
@@ -348,317 +346,749 @@ object ImageProcessor {
         isCancelled: (() -> Boolean)? = null
     ): Bitmap {
         if (adj.isIdentity()) return source
-
-        val width = source.width
-        val height = source.height
-        val output = Bitmap.createBitmap(width, height, source.config ?: Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(output)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-
-        val cm = ColorMatrix()
-
-        // Exposure (EV stops: multiplicative scaling) & Brightness (additive offset)
-        if (adj.exposure != 0f) {
-            val ev = adj.exposure / 50.0f // -100 to 100 maps to -2 EV to +2 EV
-            val expScale = 2.0f.pow(ev)
-            val expMatrix = ColorMatrix(
-                floatArrayOf(
-                    expScale, 0f, 0f, 0f, 0f,
-                    0f, expScale, 0f, 0f, 0f,
-                    0f, 0f, expScale, 0f, 0f,
-                    0f, 0f, 0f, 1f, 0f
-                )
-            )
-            cm.postConcat(expMatrix)
+        val w = source.width
+        val h = source.height
+        val n = w * h
+        if (n == 0) return source
+        val px = IntArray(n)
+        source.getPixels(px, 0, w, 0, 0, w, h)
+        fun checkCancel() {
+            if (isCancelled?.invoke() == true) throw CancellationException("Color adjustments cancelled")
         }
 
-        if (adj.brightness != 0f) {
-            val b = adj.brightness * 2.55f
-            val brightnessMatrix = ColorMatrix(
-                floatArrayOf(
-                    1f, 0f, 0f, 0f, b,
-                    0f, 1f, 0f, 0f, b,
-                    0f, 0f, 1f, 0f, b,
-                    0f, 0f, 0f, 1f, 0f
-                )
-            )
-            cm.postConcat(brightnessMatrix)
-        }
-
-        // Contrast
-        val c = (adj.contrast + 100f) / 100f
-        val contrastScale = c * c
-        val contrastTranslate = 0.5f * (1f - contrastScale) * 255f
-        val contrastMatrix = ColorMatrix(
-            floatArrayOf(
-                contrastScale, 0f, 0f, 0f, contrastTranslate,
-                0f, contrastScale, 0f, 0f, contrastTranslate,
-                0f, 0f, contrastScale, 0f, contrastTranslate,
-                0f, 0f, 0f, 1f, 0f
-            )
-        )
-        cm.postConcat(contrastMatrix)
-
-        // Saturation
-        val sat = (adj.saturation + 100f) / 100f
-        val satMatrix = ColorMatrix()
-        satMatrix.setSaturation(sat)
-        cm.postConcat(satMatrix)
-
-        // Temperature (Warm/Cool) & Tint
-        val temp = adj.temperature * 1.2f
-        val tint = adj.tint * 1.2f
-        val tempMatrix = ColorMatrix(
-            floatArrayOf(
-                1f + (temp / 250f), 0f, 0f, 0f, 0f,
-                0f, 1f + (tint / 250f), 0f, 0f, 0f,
-                0f, 0f, 1f - (temp / 250f), 0f, 0f,
-                0f, 0f, 0f, 1f, 0f
-            )
-        )
-        cm.postConcat(tempMatrix)
-
-        paint.colorFilter = ColorMatrixColorFilter(cm)
-        canvas.drawBitmap(source, 0f, 0f, paint)
-
-        // Highlights & Shadows LUT mapping
-        if (adj.highlights != 0f || adj.shadows != 0f) {
-            val lut = IntArray(256) { v ->
-                val x = v / 255.0f
-
-                // Shadow lift/push (strongest in range 0..128)
-                val shadowWeight = (1.0f - x) * (1.0f - x)
-                val shadowDelta = (adj.shadows / 100.0f) * shadowWeight * 80.0f
-
-                // Highlight dim/boost (strongest in range 128..255)
-                val highlightWeight = x * x
-                val highlightDelta = (adj.highlights / 100.0f) * highlightWeight * 80.0f
-
-                (v + shadowDelta + highlightDelta).toInt().coerceIn(0, 255)
+        // 1. Per-channel tone curves (white balance, exposure, white/black points, contrast,
+        //    brightness), built once as float LUTs so nothing is clipped to 8 bits between steps.
+        val lutR = FloatArray(256)
+        val lutG = FloatArray(256)
+        val lutB = FloatArray(256)
+        run {
+            val temp = adj.temperature / 100f
+            val tint = adj.tint / 100f
+            var gr = 1f + 0.18f * temp
+            var gb = 1f - 0.18f * temp
+            var gg = 1f + 0.12f * tint
+            val norm = 0.2126f * gr + 0.7152f * gg + 0.0722f * gb // keep overall brightness
+            gr /= norm; gg /= norm; gb /= norm
+            val expScale = 2f.pow(adj.exposure / 50f)
+            val bp = (-adj.blacks * 0.25f) / 255f
+            val wp = 1f - (adj.whites * 0.25f) / 255f
+            val contrastGain = 2f.pow(adj.contrast / 100f * 1.2f)
+            val gamma = 2f.pow(-adj.brightness / 100f * 0.9f)
+            for (v in 0 until 256) {
+                val lin = srgbToLinearF(v / 255f)
+                lutR[v] = toneCurve(lin * gr * expScale, bp, wp, contrastGain, gamma)
+                lutG[v] = toneCurve(lin * gg * expScale, bp, wp, contrastGain, gamma)
+                lutB[v] = toneCurve(lin * gb * expScale, bp, wp, contrastGain, gamma)
             }
-
-            val pixels = IntArray(width * height)
-            output.getPixels(pixels, 0, width, 0, 0, width, height)
-            for (i in pixels.indices) {
-                if (i % 32768 == 0 && isCancelled?.invoke() == true) {
-                    throw CancellationException("Color adjustments cancelled")
-                }
-                val p = pixels[i]
-                val a = (p ushr 24) and 0xFF
-                val r = lut[(p ushr 16) and 0xFF]
-                val g = lut[(p ushr 8) and 0xFF]
-                val b = lut[p and 0xFF]
-                pixels[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
-            }
-            output.setPixels(pixels, 0, width, 0, 0, width, height)
         }
 
-        // Tone Curves Mapping
-        if (adj.hasCurves()) {
-            val lutRgb = buildCurveLut(adj.curvesRgb)
-            val lutRed = buildCurveLut(adj.curvesRed)
-            val lutGreen = buildCurveLut(adj.curvesGreen)
-            val lutBlue = buildCurveLut(adj.curvesBlue)
-
-            val pixels = IntArray(width * height)
-            output.getPixels(pixels, 0, width, 0, 0, width, height)
-            for (i in pixels.indices) {
-                if (i % 32768 == 0 && isCancelled?.invoke() == true) {
-                    throw CancellationException("Curves adjustment cancelled")
+        // 2. Local luminance maps on a small grid (shadows / highlights mask, clarity base, haze).
+        val needLocal = adj.shadows != 0f || adj.highlights != 0f || adj.clarity != 0f
+        val step = max(1, kotlin.math.ceil(max(w, h) / 384.0).toInt())
+        val gw = (w + step - 1) / step
+        val gh = (h + step - 1) / step
+        var toneGrid: FloatArray? = null
+        var clarityGrid: FloatArray? = null
+        var haze = 0f
+        if (needLocal || adj.dehaze != 0f) {
+            val lum = FloatArray(gw * gh)
+            val minC = FloatArray(gw * gh)
+            val cnt = IntArray(gw * gh)
+            for (y in 0 until h) {
+                if ((y and 63) == 0) checkCancel()
+                val gy = (y / step) * gw
+                val row = y * w
+                for (x in 0 until w) {
+                    val p = px[row + x]
+                    if ((p ushr 24) == 0) continue
+                    val r = lutR[(p shr 16) and 0xFF]
+                    val g = lutG[(p shr 8) and 0xFF]
+                    val b = lutB[p and 0xFF]
+                    val gi = gy + x / step
+                    lum[gi] += 0.2126f * r + 0.7152f * g + 0.0722f * b
+                    minC[gi] += min(r, min(g, b))
+                    cnt[gi]++
                 }
-                val p = pixels[i]
-                val a = (p ushr 24) and 0xFF
-                val r0 = lutRgb[(p ushr 16) and 0xFF]
-                val g0 = lutRgb[(p ushr 8) and 0xFF]
-                val b0 = lutRgb[p and 0xFF]
-                val r = lutRed[r0]
-                val g = lutGreen[g0]
-                val b = lutBlue[b0]
-                pixels[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
             }
-            output.setPixels(pixels, 0, width, 0, 0, width, height)
+            for (i in lum.indices) if (cnt[i] > 0) { lum[i] /= cnt[i]; minC[i] /= cnt[i] }
+            if (needLocal) {
+                toneGrid = blurGrid(lum, gw, gh, max(2, max(gw, gh) / 28))
+                if (adj.clarity != 0f) clarityGrid = blurGrid(lum, gw, gh, max(1, max(gw, gh) / 90))
+            }
+            if (adj.dehaze != 0f) {
+                // Haze = the level the darkest parts of the scene are lifted to (dark channel, 10th percentile).
+                val sorted = minC.filterIndexed { i, _ -> cnt[i] > 0 }.sorted()
+                haze = if (sorted.isEmpty()) 0f else sorted[(sorted.size * 0.1f).toInt().coerceIn(0, sorted.size - 1)].coerceIn(0f, 0.4f)
+            }
+        }
+        fun sampleGrid(grid: FloatArray, x: Int, y: Int): Float {
+            val fx = ((x + 0.5f) / step - 0.5f).coerceIn(0f, (gw - 1).toFloat())
+            val fy = ((y + 0.5f) / step - 0.5f).coerceIn(0f, (gh - 1).toFloat())
+            val x0 = fx.toInt(); val y0 = fy.toInt()
+            val x1 = min(x0 + 1, gw - 1); val y1 = min(y0 + 1, gh - 1)
+            val tx = fx - x0; val ty = fy - y0
+            val a = grid[y0 * gw + x0] + (grid[y0 * gw + x1] - grid[y0 * gw + x0]) * tx
+            val b = grid[y1 * gw + x0] + (grid[y1 * gw + x1] - grid[y1 * gw + x0]) * tx
+            return a + (b - a) * ty
         }
 
-        // Hue / Saturation / Lightness (HSL)
-        if (adj.hueShift != 0f || adj.hslSaturation != 0f || adj.hslLightness != 0f) {
-            val pixels = IntArray(width * height)
-            output.getPixels(pixels, 0, width, 0, 0, width, height)
-            val hsv = FloatArray(3)
-            val shift = adj.hueShift
-            val satDelta = adj.hslSaturation / 100f
-            val valDelta = adj.hslLightness / 100f
-            val targetRange = adj.hslColorRange
+        val sh = adj.shadows / 100f
+        val hi = adj.highlights / 100f
+        val cl = adj.clarity / 100f
+        val dh = adj.dehaze / 100f
+        val sat = adj.saturation / 100f + (if (dh > 0f) dh * 0.25f else dh * 0.15f)
+        val vib = adj.vibrance / 100f
+        val curves = if (adj.hasCurves()) arrayOf(
+            curveValues(adj.curvesRgb), curveValues(adj.curvesRed), curveValues(adj.curvesGreen), curveValues(adj.curvesBlue)
+        ) else null
+        val bands = adj.effectiveHslBands().filterValues { !it.isIdentity() }
+        val bandValues = com.example.data.model.HslRanges.keys.map { bands[it] }
+        val bandWidths = FloatArray(bandValues.size) { (bandValues[it]?.width ?: 1f).coerceIn(0.3f, 3f) }
+        val anyRangeBand = bandValues.any { it != null }
+        val allBand = bands["ALL"]
+        // Colorize target in Lab: hue angle of the chosen colour, chroma from the strength.
+        val colorizeLab = FloatArray(3).also {
+            val c = Color.HSVToColor(floatArrayOf(((adj.colorizeHue % 360f) + 360f) % 360f, 1f, 1f))
+            rgbToLabF(((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f, it)
+        }
+        val colorizeAngle = kotlin.math.atan2(colorizeLab[2], colorizeLab[1])
+        val colorizeChroma = adj.colorizeSaturation.coerceIn(0f, 100f) / 100f * 70f
+        val hasHsl = bands.isNotEmpty()
+        // Colour replacements, matched and transferred in CIE Lab (perceptual).
+        val replaceSpecs = adj.effectiveReplacements().filter { it.enabled }.map { ReplaceSpec.of(it) }
+        val previewMask = adj.replacePreviewMask
+        val lab = FloatArray(3)
+        val hsv = FloatArray(3)
+        val rgb = FloatArray(3)
 
-            for (i in pixels.indices) {
-                if (i % 32768 == 0 && isCancelled?.invoke() == true) {
-                    throw CancellationException("HSL adjustment cancelled")
-                }
-                val p = pixels[i]
-                val a = (p ushr 24) and 0xFF
+        for (y in 0 until h) {
+            if ((y and 31) == 0) checkCancel()
+            val row = y * w
+            for (x in 0 until w) {
+                val i = row + x
+                val p = px[i]
+                val a = p ushr 24
                 if (a == 0) continue
+                var r = lutR[(p shr 16) and 0xFF]
+                var g = lutG[(p shr 8) and 0xFF]
+                var b = lutB[p and 0xFF]
 
-                Color.colorToHSV(p, hsv)
-                val hue = hsv[0]
-                val inRange = when (targetRange) {
-                    "REDS" -> hue >= 330f || hue <= 30f
-                    "YELLOWS" -> hue in 30f..90f
-                    "GREENS" -> hue in 90f..150f
-                    "CYANS" -> hue in 150f..210f
-                    "BLUES" -> hue in 210f..270f
-                    "MAGENTAS" -> hue in 270f..330f
-                    else -> true
-                }
-
-                if (inRange) {
-                    hsv[0] = ((hsv[0] + shift) % 360f + 360f) % 360f
-                    hsv[1] = (hsv[1] + satDelta).coerceIn(0f, 1f)
-                    hsv[2] = (hsv[2] + valDelta).coerceIn(0f, 1f)
-                    pixels[i] = Color.HSVToColor(a, hsv)
-                }
-            }
-            output.setPixels(pixels, 0, width, 0, 0, width, height)
-        }
-
-        // Selective Color Replacement
-        if (adj.replaceColorEnabled) {
-            val pixels = IntArray(width * height)
-            output.getPixels(pixels, 0, width, 0, 0, width, height)
-            val srcHsv = FloatArray(3)
-            val pxHsv = FloatArray(3)
-            Color.colorToHSV(adj.replaceSourceColorHex, srcHsv)
-
-            val maxTolerance = (adj.replaceTolerance / 100f) * 1.5f
-            val targetHue = adj.replaceTargetHue
-            val targetSatDelta = adj.replaceTargetSaturation / 100f
-            val targetValDelta = adj.replaceTargetLightness / 100f
-
-            for (i in pixels.indices) {
-                if (i % 32768 == 0 && isCancelled?.invoke() == true) {
-                    throw CancellationException("Color replacement cancelled")
-                }
-                val p = pixels[i]
-                val a = (p ushr 24) and 0xFF
-                if (a == 0) continue
-
-                Color.colorToHSV(p, pxHsv)
-                val dHue = min(abs(pxHsv[0] - srcHsv[0]), 360f - abs(pxHsv[0] - srcHsv[0])) / 180f
-                val dSat = abs(pxHsv[1] - srcHsv[1])
-                val dVal = abs(pxHsv[2] - srcHsv[2])
-                val dist = sqrt(dHue * dHue + dSat * dSat + dVal * dVal)
-
-                if (dist < maxTolerance) {
-                    val weight = (1f - dist / maxTolerance).coerceIn(0f, 1f)
-                    pxHsv[0] = (pxHsv[0] * (1f - weight) + targetHue * weight) % 360f
-                    pxHsv[1] = (pxHsv[1] + targetSatDelta * weight).coerceIn(0f, 1f)
-                    pxHsv[2] = (pxHsv[2] + targetValDelta * weight).coerceIn(0f, 1f)
-                    pixels[i] = Color.HSVToColor(a, pxHsv)
-                }
-            }
-            output.setPixels(pixels, 0, width, 0, 0, width, height)
-        }
-
-        // Sharpness Filter (Unsharp Mask / Laplacian High-Pass)
-        if (adj.sharpness > 0f) {
-            val amount = (adj.sharpness / 100.0f).coerceIn(0f, 2.0f)
-            val pixels = IntArray(width * height)
-            val sharpPixels = IntArray(width * height)
-            output.getPixels(pixels, 0, width, 0, 0, width, height)
-
-            for (y in 0 until height) {
-                if (y % 32 == 0 && isCancelled?.invoke() == true) {
-                    throw CancellationException("Sharpness adjustment cancelled")
-                }
-                for (x in 0 until width) {
-                    val idx = y * width + x
-                    val p = pixels[idx]
-                    val a = (p ushr 24) and 0xFF
-
-                    if (x == 0 || y == 0 || x == width - 1 || y == height - 1) {
-                        sharpPixels[idx] = p
-                        continue
+                // Shadows / highlights / clarity work on luminance and keep the colour.
+                if (needLocal) {
+                    val l = 0.2126f * r + 0.7152f * g + 0.0722f * b
+                    var nl = l
+                    val base = toneGrid?.let { sampleGrid(it, x, y) } ?: l
+                    if (sh != 0f) {
+                        val ws = 1f - smoothstepF(0f, 0.55f, base)
+                        nl += sh * 0.6f * ws * (1f - nl) * sqrt(nl.coerceAtLeast(0f))
                     }
-
-                    val r = (p ushr 16) and 0xFF
-                    val g = (p ushr 8) and 0xFF
-                    val b = p and 0xFF
-
-                    val nR = ((pixels[(y - 1) * width + x] ushr 16) and 0xFF) +
-                            ((pixels[(y + 1) * width + x] ushr 16) and 0xFF) +
-                            ((pixels[y * width + (x - 1)] ushr 16) and 0xFF) +
-                            ((pixels[y * width + (x + 1)] ushr 16) and 0xFF)
-                    val nG = ((pixels[(y - 1) * width + x] ushr 8) and 0xFF) +
-                            ((pixels[(y + 1) * width + x] ushr 8) and 0xFF) +
-                            ((pixels[y * width + (x - 1)] ushr 8) and 0xFF) +
-                            ((pixels[y * width + (x + 1)] ushr 8) and 0xFF)
-                    val nB = (pixels[(y - 1) * width + x] and 0xFF) +
-                            (pixels[(y + 1) * width + x] and 0xFF) +
-                            (pixels[y * width + (x - 1)] and 0xFF) +
-                            (pixels[y * width + (x + 1)] and 0xFF)
-
-                    val sharpR = (r + amount * (4 * r - nR)).toInt().coerceIn(0, 255)
-                    val sharpG = (g + amount * (4 * g - nG)).toInt().coerceIn(0, 255)
-                    val sharpB = (b + amount * (4 * b - nB)).toInt().coerceIn(0, 255)
-
-                    sharpPixels[idx] = (a shl 24) or (sharpR shl 16) or (sharpG shl 8) or sharpB
+                    if (hi != 0f) {
+                        val wh = smoothstepF(0.4f, 1f, base)
+                        nl += hi * 0.6f * wh * nl * sqrt((1f - nl).coerceAtLeast(0f) + 0.05f)
+                    }
+                    if (cl != 0f) {
+                        val detail = l - (clarityGrid?.let { sampleGrid(it, x, y) } ?: l)
+                        nl += cl * 1.2f * detail * (4f * nl * (1f - nl)).coerceIn(0f, 1f)
+                    }
+                    nl = nl.coerceIn(0f, 1f)
+                    if (l > 0.02f) {
+                        val k = nl / l
+                        r *= k; g *= k; b *= k
+                    } else {
+                        val d = nl - l
+                        r += d; g += d; b += d
+                    }
                 }
+
+                if (dh > 0f && haze > 0f) {
+                    val hz = dh * haze
+                    val inv = 1f / (1f - hz)
+                    r = (r - hz) * inv; g = (g - hz) * inv; b = (b - hz) * inv
+                } else if (dh < 0f) {
+                    val k = -dh * 0.3f
+                    r += (0.85f - r) * k; g += (0.85f - g) * k; b += (0.85f - b) * k
+                }
+
+                // Saturation (luminance preserving) and vibrance (boosts muted colours, protects skin).
+                if (sat != 0f || vib != 0f) {
+                    val l = 0.2126f * r + 0.7152f * g + 0.0722f * b
+                    var k = 1f + sat
+                    if (vib != 0f) {
+                        val mx = max(r, max(g, b))
+                        val mn = min(r, min(g, b))
+                        val chroma = (mx - mn).coerceIn(0f, 1f)
+                        var vw = (1f - chroma).let { it * it }
+                        if (vib > 0f && r >= g && g >= b && chroma > 0.05f) {
+                            // Skin tones (orange hues): gentler.
+                            val hue = 60f * (g - b) / (mx - mn + 1e-6f)
+                            if (hue < 50f) vw *= 0.45f
+                        }
+                        k += vib * vw
+                    }
+                    k = k.coerceAtLeast(0f)
+                    r = l + (r - l) * k; g = l + (g - l) * k; b = l + (b - l) * k
+                }
+
+                r = r.coerceIn(0f, 1f); g = g.coerceIn(0f, 1f); b = b.coerceIn(0f, 1f)
+
+                if (curves != null) {
+                    r = curveAt(curves[1], curveAt(curves[0], r))
+                    g = curveAt(curves[2], curveAt(curves[0], g))
+                    b = curveAt(curves[3], curveAt(curves[0], b))
+                }
+
+                if (hasHsl) {
+                    rgbToHsvF(r, g, b, hsv)
+                    var lightT = 0f
+                    var hueT = 0f
+                    var satT = 0f
+                    if (anyRangeBand) {
+                        // Eight ranges with smooth (partition-of-unity) weights; greys are left alone.
+                        val chromaW = smoothstepF(0.02f, 0.18f, hsv[1])
+                        if (chromaW > 0f) {
+                            val ws = com.example.data.model.HslRanges.weights(hsv[0], bandWidths)
+                            for (k in ws.indices) {
+                                val band = bandValues[k] ?: continue
+                                val wgt = ws[k] * chromaW
+                                if (wgt <= 0f) continue
+                                // Range hue shifts are limited so neighbouring tones never tear apart.
+                                hueT += band.hue.coerceIn(-90f, 90f) * wgt
+                                satT += band.saturation / 100f * wgt
+                                lightT += band.lightness / 100f * wgt
+                            }
+                        }
+                    }
+                    allBand?.let {
+                        hueT += it.hue
+                        satT += it.saturation / 100f
+                        lightT += it.lightness / 100f
+                    }
+                    if (hueT != 0f || satT != 0f) {
+                        hsv[0] = ((hsv[0] + hueT) % 360f + 360f) % 360f
+                        hsv[1] = (hsv[1] * (1f + satT)).coerceIn(0f, 1f)
+                        hsvToRgbF(hsv[0], hsv[1], hsv[2], rgb)
+                        r = rgb[0]; g = rgb[1]; b = rgb[2]
+                    }
+                    if (lightT != 0f || adj.colorizeEnabled) {
+                        // Lightness changes perceived brightness only (Lab L), keeping hue and
+                        // colourfulness: a darker blue sky stays blue instead of turning grey.
+                        rgbToLabF(r.coerceIn(0f, 1f), g.coerceIn(0f, 1f), b.coerceIn(0f, 1f), lab)
+                        var l = lab[0]
+                        var la = lab[1]
+                        var lb = lab[2]
+                        if (lightT != 0f) {
+                            val lt = lightT.coerceIn(-1f, 1f)
+                            l = if (lt > 0f) l + (100f - l) * lt * 0.6f else l * (1f + lt * 0.6f)
+                        }
+                        if (adj.colorizeEnabled) {
+                            la = colorizeChroma * kotlin.math.cos(colorizeAngle)
+                            lb = colorizeChroma * kotlin.math.sin(colorizeAngle)
+                            val cl = adj.colorizeLightness / 100f
+                            l = if (cl > 0f) l + (100f - l) * cl * 0.6f else l * (1f + cl * 0.6f)
+                        }
+                        labToRgbF(l.coerceIn(0f, 100f), la, lb, rgb)
+                        r = rgb[0]; g = rgb[1]; b = rgb[2]
+                    }
+                }
+
+                if (replaceSpecs.isNotEmpty() || previewMask) {
+                    r = r.coerceIn(0f, 1f); g = g.coerceIn(0f, 1f); b = b.coerceIn(0f, 1f)
+                    rgbToLabF(r, g, b, lab)
+                    val pl = lab[0]
+                    val pa = lab[1]
+                    val pb = lab[2]
+                    val pc = sqrt(pa * pa + pb * pb)
+                    var nl = pl
+                    var na = pa
+                    var nb = pb
+                    var maxW = 0f
+                    for (spec in replaceSpecs) {
+                        // Lightness counts half: the same fabric in light and shadow still matches.
+                        val dl = (pl - spec.l) * 0.5f
+                        val da = pa - spec.a
+                        val db = pb - spec.b
+                        val d = sqrt(dl * dl + da * da + db * db)
+                        var wgt = 1f - smoothstepF(spec.inner, spec.outer, d)
+                        // Greys and near-blacks have no reliable hue: leave them alone (unless a grey was picked).
+                        if (spec.protectGray) wgt *= smoothstepF(3f, 12f, pc)
+                        if (wgt <= 0.001f) continue
+                        if (wgt > maxW) maxW = wgt
+                        // Keep the pixel's own shading and colourfulness relative to the source,
+                        // take the target's hue / colourfulness and its brightness offset.
+                        val k = if (spec.srcChroma > 2f) (pc / spec.srcChroma).coerceIn(0f, 2.5f) else 1f
+                        val ta = spec.ta * k * spec.satK
+                        val tb = spec.tb * k * spec.satK
+                        val tl = (pl + (spec.tl - spec.l) + spec.lightAdd).coerceIn(0f, 100f)
+                        nl += (tl - nl) * wgt
+                        na += (ta - na) * wgt
+                        nb += (tb - nb) * wgt
+                    }
+                    if (previewMask) {
+                        r = maxW; g = maxW; b = maxW
+                    } else if (maxW > 0f) {
+                        labToRgbF(nl, na, nb, rgb)
+                        r = rgb[0]; g = rgb[1]; b = rgb[2]
+                    }
+                }
+
+                val ri = (r * 255f + 0.5f).toInt().coerceIn(0, 255)
+                val gi = (g * 255f + 0.5f).toInt().coerceIn(0, 255)
+                val bi = (b * 255f + 0.5f).toInt().coerceIn(0, 255)
+                px[i] = (a shl 24) or (ri shl 16) or (gi shl 8) or bi
             }
-            output.setPixels(sharpPixels, 0, width, 0, 0, width, height)
         }
 
-        // Apply Vignette if specified
-        if (adj.vignette > 0f) {
-            applyVignetteEffect(output, adj.vignette, isCancelled)
-        }
+        if (adj.sharpness > 0f) sharpenLuminance(px, w, h, adj.sharpness, ::checkCancel)
+        if (adj.vignette != 0f) applyVignettePixels(px, w, h, adj.vignette, ::checkCancel)
 
+        val output = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        output.setPixels(px, 0, w, 0, 0, w, h)
         return output
     }
 
+    /** HSL range weights for a colour (targeted adjustment): keys of [com.example.data.model.HslRanges]. */
+    fun hslRangeWeights(color: Int): Map<String, Float> {
+        val hsv = FloatArray(3)
+        Color.colorToHSV(color, hsv)
+        if (hsv[1] < 0.05f) return emptyMap()
+        val ws = com.example.data.model.HslRanges.weights(hsv[0])
+        return com.example.data.model.HslRanges.keys.indices.filter { ws[it] > 0.01f }
+            .associate { com.example.data.model.HslRanges.keys[it] to ws[it] }
+    }
+
+    /** One colour replacement prepared for the pixel loop (Lab values, thresholds). */
+    private class ReplaceSpec(
+        val l: Float, val a: Float, val b: Float, val srcChroma: Float,
+        val tl: Float, val ta: Float, val tb: Float,
+        val inner: Float, val outer: Float, val protectGray: Boolean,
+        val satK: Float, val lightAdd: Float
+    ) {
+        companion object {
+            fun of(c: com.example.data.model.ColorReplacement): ReplaceSpec {
+                val src = FloatArray(3)
+                val tgt = FloatArray(3)
+                ImageProcessor.rgbToLabF(((c.sourceColor shr 16) and 0xFF) / 255f, ((c.sourceColor shr 8) and 0xFF) / 255f, (c.sourceColor and 0xFF) / 255f, src)
+                ImageProcessor.rgbToLabF(((c.targetColor shr 16) and 0xFF) / 255f, ((c.targetColor shr 8) and 0xFF) / 255f, (c.targetColor and 0xFF) / 255f, tgt)
+                val t = c.tolerance.coerceIn(1f, 100f) * 1.2f
+                val soft = 0.1f + c.softness.coerceIn(0f, 100f) / 100f * 0.8f
+                val srcChroma = sqrt(src[1] * src[1] + src[2] * src[2])
+                return ReplaceSpec(
+                    src[0], src[1], src[2], srcChroma,
+                    tgt[0], tgt[1], tgt[2],
+                    t * (1f - soft), t * (1f + soft), srcChroma > 8f,
+                    (1f + c.saturation / 100f).coerceAtLeast(0f), c.lightness / 100f * 40f
+                )
+            }
+        }
+    }
+
+    private val srgbToLinearLut = FloatArray(1025) { i ->
+        val c = i / 1024f
+        if (c <= 0.04045f) c / 12.92f else ((c + 0.055f) / 1.055f).toDouble().pow(2.4).toFloat()
+    }
+
+    private fun srgbToLinearFast(c: Float): Float {
+        val x = c.coerceIn(0f, 1f) * 1024f
+        val i = x.toInt().coerceAtMost(1023)
+        return srgbToLinearLut[i] + (srgbToLinearLut[i + 1] - srgbToLinearLut[i]) * (x - i)
+    }
+
+    private fun labFwd(t: Float): Float = if (t > 0.008856f) Math.cbrt(t.toDouble()).toFloat() else 7.787f * t + 16f / 116f
+    private fun labInv(t: Float): Float { val t3 = t * t * t; return if (t3 > 0.008856f) t3 else (t - 16f / 116f) / 7.787f }
+
+    /** sRGB (0..1) to CIE Lab (D65): L 0..100, a / b about -128..127. */
+    internal fun rgbToLabF(r: Float, g: Float, b: Float, out: FloatArray) {
+        val rl = srgbToLinearFast(r)
+        val gl = srgbToLinearFast(g)
+        val bl = srgbToLinearFast(b)
+        val fx = labFwd((0.4124f * rl + 0.3576f * gl + 0.1805f * bl) / 0.95047f)
+        val fy = labFwd(0.2126f * rl + 0.7152f * gl + 0.0722f * bl)
+        val fz = labFwd((0.0193f * rl + 0.1192f * gl + 0.9505f * bl) / 1.08883f)
+        out[0] = 116f * fy - 16f
+        out[1] = 500f * (fx - fy)
+        out[2] = 200f * (fy - fz)
+    }
+
+    /** CIE Lab (D65) back to sRGB 0..1 (clamped). */
+    internal fun labToRgbF(l: Float, a: Float, b: Float, out: FloatArray) {
+        val fy = (l + 16f) / 116f
+        val fx = fy + a / 500f
+        val fz = fy - b / 200f
+        val x = 0.95047f * labInv(fx)
+        val y = labInv(fy)
+        val z = 1.08883f * labInv(fz)
+        out[0] = linearToSrgbF(3.2406f * x - 1.5372f * y - 0.4986f * z)
+        out[1] = linearToSrgbF(-0.9689f * x + 1.8758f * y + 0.0415f * z)
+        out[2] = linearToSrgbF(0.0557f * x - 0.2040f * y + 1.0570f * z)
+    }
+
+    private fun srgbToLinearF(c: Float): Float =
+        if (c <= 0.04045f) c / 12.92f else ((c + 0.055f) / 1.055f).toDouble().pow(2.4).toFloat()
+
+    private fun linearToSrgbF(c: Float): Float {
+        val v = c.coerceIn(0f, 1f)
+        return if (v <= 0.0031308f) v * 12.92f else (1.055 * v.toDouble().pow(1.0 / 2.4) - 0.055).toFloat()
+    }
+
+    private fun smoothstepF(e0: Float, e1: Float, x: Float): Float {
+        val t = ((x - e0) / (e1 - e0)).coerceIn(0f, 1f)
+        return t * t * (3f - 2f * t)
+    }
+
     /**
-     * Computes intelligent smart auto-corrections: contrast, brightness, white-balance, highlights & shadows.
-     * Returns a non-destructive ColorAdjustments model so sliders in the UI move dynamically.
+     * One channel of the tone pipeline: linear value -> sRGB -> white/black points -> contrast
+     * S-curve (end points fixed) -> brightness as a mid-tone gamma (black and white unchanged).
      */
-    fun computeSmartAutoAdjustments(source: Bitmap): ColorAdjustments {
-        val width = source.width
-        val height = source.height
-        val pixels = IntArray(width * height)
-        source.getPixels(pixels, 0, width, 0, 0, width, height)
+    private fun toneCurve(linear: Float, bp: Float, wp: Float, contrastGain: Float, gamma: Float): Float {
+        var x = linearToSrgbF(linear)
+        x = ((x - bp) / (wp - bp).coerceAtLeast(0.05f)).coerceIn(0f, 1f)
+        if (contrastGain != 1f) {
+            x = if (x < 0.5f) 0.5f * (2f * x).pow(contrastGain) else 1f - 0.5f * (2f - 2f * x).pow(contrastGain)
+        }
+        if (gamma != 1f) x = x.pow(gamma)
+        return x.coerceIn(0f, 1f)
+    }
 
-        var totalR = 0L
-        var totalG = 0L
-        var totalB = 0L
+    private fun curveAt(lut: FloatArray, v: Float): Float {
+        val f = v.coerceIn(0f, 1f) * 255f
+        val i = f.toInt().coerceAtMost(254)
+        val t = f - i
+        return (lut[i] + (lut[i + 1] - lut[i]) * t) / 255f
+    }
 
-        // Sample 1 in 4 pixels for high speed calculation
-        val step = 4
-        var sampledCount = 0
-        for (i in pixels.indices step step) {
-            val p = pixels[i]
-            totalR += (p shr 16) and 0xFF
-            totalG += (p shr 8) and 0xFF
-            totalB += p and 0xFF
-            sampledCount++
+    private fun hueDistance(a: Float, b: Float): Float {
+        val d = abs(a - b) % 360f
+        return if (d > 180f) 360f - d else d
+    }
+
+    private fun rgbToHsvF(r: Float, g: Float, b: Float, out: FloatArray) {
+        val mx = max(r, max(g, b))
+        val mn = min(r, min(g, b))
+        val d = mx - mn
+        var hue = 0f
+        if (d > 1e-6f) {
+            hue = when (mx) {
+                r -> 60f * (((g - b) / d) % 6f)
+                g -> 60f * ((b - r) / d + 2f)
+                else -> 60f * ((r - g) / d + 4f)
+            }
+            if (hue < 0f) hue += 360f
+        }
+        out[0] = hue
+        out[1] = if (mx > 1e-6f) d / mx else 0f
+        out[2] = mx
+    }
+
+    private fun hsvToRgbF(hue: Float, s: Float, v: Float, out: FloatArray) {
+        val c = v * s
+        val hp = (hue % 360f) / 60f
+        val xx = c * (1f - abs(hp % 2f - 1f))
+        val m = v - c
+        val (r, g, b) = when (hp.toInt()) {
+            0 -> Triple(c, xx, 0f)
+            1 -> Triple(xx, c, 0f)
+            2 -> Triple(0f, c, xx)
+            3 -> Triple(0f, xx, c)
+            4 -> Triple(xx, 0f, c)
+            else -> Triple(c, 0f, xx)
+        }
+        out[0] = r + m; out[1] = g + m; out[2] = b + m
+    }
+
+    /** Separable box blur (3 passes ~ Gaussian) of a small float grid. */
+    private fun blurGrid(src: FloatArray, w: Int, h: Int, radius: Int): FloatArray {
+        var a = src.copyOf()
+        var b = FloatArray(a.size)
+        repeat(3) {
+            for (y in 0 until h) {
+                val row = y * w
+                for (x in 0 until w) {
+                    var sum = 0f
+                    var c = 0
+                    for (k in -radius..radius) {
+                        val xx = x + k
+                        if (xx in 0 until w) { sum += a[row + xx]; c++ }
+                    }
+                    b[row + x] = sum / c
+                }
+            }
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    var sum = 0f
+                    var c = 0
+                    for (k in -radius..radius) {
+                        val yy = y + k
+                        if (yy in 0 until h) { sum += b[yy * w + x]; c++ }
+                    }
+                    a[y * w + x] = sum / c
+                }
+            }
+        }
+        return a
+    }
+
+    /**
+     * Unsharp mask on luminance only (no colour fringes). The radius scales with the image so the
+     * downscaled preview looks like the full-resolution export; a small threshold keeps flat areas
+     * (sky, skin) from turning noisy.
+     */
+    private fun sharpenLuminance(px: IntArray, w: Int, h: Int, sharpness: Float, checkCancel: () -> Unit) {
+        val radius = max(1, (max(w, h) / 1600f).roundToIntCompat())
+        val amount = (sharpness / 100f) * 1.6f
+        val n = w * h
+        val lum = IntArray(n)
+        for (i in 0 until n) {
+            val p = px[i]
+            lum[i] = (((p shr 16) and 0xFF) * 54 + ((p shr 8) and 0xFF) * 183 + (p and 0xFF) * 19) shr 8
+        }
+        val tmp = IntArray(n)
+        val blur = IntArray(n)
+        // Horizontal then vertical box blur.
+        for (y in 0 until h) {
+            if ((y and 63) == 0) checkCancel()
+            val row = y * w
+            for (x in 0 until w) {
+                var s = 0; var c = 0
+                for (k in -radius..radius) { val xx = x + k; if (xx in 0 until w) { s += lum[row + xx]; c++ } }
+                tmp[row + x] = s / c
+            }
+        }
+        for (y in 0 until h) {
+            if ((y and 63) == 0) checkCancel()
+            for (x in 0 until w) {
+                var s = 0; var c = 0
+                for (k in -radius..radius) { val yy = y + k; if (yy in 0 until h) { s += tmp[yy * w + x]; c++ } }
+                blur[y * w + x] = s / c
+            }
+        }
+        val threshold = 2
+        for (i in 0 until n) {
+            val p = px[i]
+            if ((p ushr 24) == 0) continue
+            val d = lum[i] - blur[i]
+            if (abs(d) <= threshold) continue
+            val add = (d * amount).toInt()
+            val r = (((p shr 16) and 0xFF) + add).coerceIn(0, 255)
+            val g = (((p shr 8) and 0xFF) + add).coerceIn(0, 255)
+            val b = ((p and 0xFF) + add).coerceIn(0, 255)
+            px[i] = (p and 0xFF000000.toInt()) or (r shl 16) or (g shl 8) or b
+        }
+    }
+
+    private fun Float.roundToIntCompat(): Int = kotlin.math.round(this).toInt()
+
+    /**
+     * Elliptical vignette centred on the image. Positive [amount] darkens the edges, negative
+     * lightens them; the centre is untouched and the transition is smooth.
+     */
+    private fun applyVignettePixels(px: IntArray, w: Int, h: Int, amount: Float, checkCancel: () -> Unit) {
+        val cx = w / 2f
+        val cy = h / 2f
+        val strength = (amount / 100f).coerceIn(-1f, 1f) * 0.9f
+        for (y in 0 until h) {
+            if ((y and 63) == 0) checkCancel()
+            val dy = (y + 0.5f - cy) / cy
+            for (x in 0 until w) {
+                val i = y * w + x
+                val p = px[i]
+                if ((p ushr 24) == 0) continue
+                val dx = (x + 0.5f - cx) / cx
+                val e = sqrt(dx * dx + dy * dy)
+                val wgt = smoothstepF(0.45f, 1.45f, e)
+                if (wgt <= 0f) continue
+                var r = ((p shr 16) and 0xFF) / 255f
+                var g = ((p shr 8) and 0xFF) / 255f
+                var b = (p and 0xFF) / 255f
+                if (strength > 0f) {
+                    val k = 1f - strength * wgt
+                    r *= k; g *= k; b *= k
+                } else {
+                    val k = -strength * wgt
+                    r += (1f - r) * k; g += (1f - g) * k; b += (1f - b) * k
+                }
+                px[i] = (p and 0xFF000000.toInt()) or
+                    ((r * 255f + 0.5f).toInt().coerceIn(0, 255) shl 16) or
+                    ((g * 255f + 0.5f).toInt().coerceIn(0, 255) shl 8) or
+                    (b * 255f + 0.5f).toInt().coerceIn(0, 255)
+            }
+        }
+    }
+
+    /**
+     * Smart Auto: analyses the image AS IT LOOKS NOW (with [current] adjustments) and returns the
+     * extra corrections it still needs, as deltas to add to [current]. Measures the histogram
+     * (black / white points, median, spread, clipping), white balance from neutral-ish pixels,
+     * colourfulness and noise, and only corrects what is actually off. Transparent pixels are
+     * ignored. Running it again on a corrected image changes little.
+     */
+    fun computeSmartAutoAdjustments(source: Bitmap, current: ColorAdjustments = ColorAdjustments()): ColorAdjustments {
+        val thumb = scaleBitmapToMaxDimension(source, 512)
+        val look = applyAdjustments(thumb, current)
+        val w = look.width
+        val h = look.height
+        val px = IntArray(w * h)
+        look.getPixels(px, 0, w, 0, 0, w, h)
+        if (look !== thumb && !look.isRecycled) look.recycle()
+        if (thumb !== source && !thumb.isRecycled) thumb.recycle()
+
+        val hist = IntArray(256)
+        val luma = IntArray(px.size) { -1 }
+        var count = 0
+        var sumL = 0.0
+        var sumL2 = 0.0
+        var nR = 0.0; var nG = 0.0; var nB = 0.0; var nCount = 0
+        var chromaSum = 0.0
+        for (i in px.indices) {
+            val p = px[i]
+            if (((p ushr 24) and 0xFF) < 128) continue
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            val l = (r * 54 + g * 183 + b * 19) shr 8
+            luma[i] = l
+            hist[l]++
+            count++
+            sumL += l
+            sumL2 += l.toDouble() * l
+            val mx = max(r, max(g, b))
+            val mn = min(r, min(g, b))
+            chromaSum += (mx - mn) / 255.0
+            // Neutral candidates for white balance: mid-tones that are not strongly coloured.
+            if (l in 40..225 && (mx - mn) < 70) {
+                nR += r; nG += g; nB += b; nCount++
+            }
+        }
+        if (count < 16) return ColorAdjustments()
+
+        fun percentile(q: Double): Int {
+            val target = (count * q).toLong()
+            var acc = 0L
+            for (v in 0 until 256) {
+                acc += hist[v]
+                if (acc > target) return v
+            }
+            return 255
+        }
+        val p005 = percentile(0.005)
+        val p995 = percentile(0.995)
+        val median = percentile(0.5).coerceAtLeast(1)
+        val mean = sumL / count
+        val std = sqrt((sumL2 / count - mean * mean).coerceAtLeast(0.0)).toFloat()
+        val meanChroma = (chromaSum / count).toFloat()
+        val clippedHigh = hist[255].toFloat() / count + hist[254].toFloat() / count
+        val clippedLow = hist[0].toFloat() / count + hist[1].toFloat() / count
+        val brightFrac = (230..255).sumOf { hist[it] }.toFloat() / count
+        val darkFrac = (0..35).sumOf { hist[it] }.toFloat() / count
+
+        // Noise: average absolute Laplacian of luminance in flat-ish areas.
+        var noiseSum = 0.0
+        var noiseN = 0
+        for (y in 1 until h - 1) {
+            for (x in 1 until w - 1) {
+                val i = y * w + x
+                val c = luma[i]
+                if (c < 0) continue
+                val l = luma[i - 1]; val r = luma[i + 1]; val t = luma[i - w]; val b = luma[i + w]
+                if (l < 0 || r < 0 || t < 0 || b < 0) continue
+                val lap = abs(4 * c - l - r - t - b)
+                if (lap < 40) { noiseSum += lap; noiseN++ }
+            }
+        }
+        val noise = if (noiseN > 0) (noiseSum / noiseN).toFloat() else 0f
+
+        // Exposure: bring the median towards a pleasant mid-grey without clipping highlights.
+        var ev = 0f
+        val ratio = 118f / median
+        if (ratio > 1.15f || ratio < 0.87f) {
+            ev = (kotlin.math.ln(ratio.toDouble()) / kotlin.math.ln(2.0)).toFloat() * 0.7f
+            if (ev > 0f && p995 > 0) ev = min(ev, (kotlin.math.ln(250.0 / p995) / kotlin.math.ln(2.0)).toFloat().coerceAtLeast(0f) + 0.15f)
+            ev = ev.coerceIn(-1f, 1.2f)
+        }
+        val exposure = (ev * 50f).coerceIn(-60f, 60f)
+
+        // Black / white points.
+        val blacks = when {
+            p005 > 10 -> -((p005 - 4) * 4f).coerceAtMost(60f)
+            clippedLow > 0.03f -> 15f
+            else -> 0f
+        }
+        val whites = when {
+            p995 < 240 && ev <= 0.2f -> ((248 - p995) * 3f).coerceIn(0f, 50f)
+            clippedHigh > 0.03f -> -15f
+            else -> 0f
         }
 
-        if (sampledCount == 0) return ColorAdjustments()
+        // Contrast from the spread of tones.
+        val contrast = when {
+            std < 42f -> ((48f - std) * 1.1f).coerceIn(0f, 28f)
+            std > 75f -> -((std - 75f) * 0.6f).coerceAtMost(15f)
+            else -> 0f
+        }
+        val highlights = if (brightFrac > 0.08f) -(brightFrac * 220f).coerceAtMost(45f) else 0f
+        val shadows = if (darkFrac > 0.15f) (darkFrac * 120f).coerceAtMost(40f) else 0f
 
-        val avgR = (totalR / sampledCount).toFloat()
-        val avgG = (totalG / sampledCount).toFloat()
-        val avgB = (totalB / sampledCount).toFloat()
-        val avgGray = (avgR + avgG + avgB) / 3f
+        // White balance from neutral-ish pixels (60% strength keeps intentional mood).
+        var temperature = 0f
+        var tint = 0f
+        if (nCount > count * 0.05f) {
+            val ar = (nR / nCount).toFloat().coerceAtLeast(1f)
+            val ag = (nG / nCount).toFloat().coerceAtLeast(1f)
+            val ab = (nB / nCount).toFloat().coerceAtLeast(1f)
+            val q = ab / ar
+            val x = (q - 1f) / (q + 1f)
+            temperature = (x / 0.18f * 100f * 0.6f).coerceIn(-40f, 40f)
+            val gg = ((ar + ab) / 2f) / ag
+            tint = ((gg - 1f) / 0.12f * 100f * 0.6f).coerceIn(-30f, 30f)
+            if (abs(temperature) < 3f) temperature = 0f
+            if (abs(tint) < 3f) tint = 0f
+        }
 
-        // Calculate white balance gains
-        val gainR = if (avgR > 1f) (avgGray / avgR).coerceIn(0.8f, 1.25f) else 1f
-        val gainG = if (avgG > 1f) (avgGray / avgG).coerceIn(0.8f, 1.25f) else 1f
-        val gainB = if (avgB > 1f) (avgGray / avgB).coerceIn(0.8f, 1.25f) else 1f
+        // Colour: only muted images get vibrance; already colourful ones are left alone.
+        val vibrance = if (meanChroma < 0.2f) ((0.24f - meanChroma) * 120f).coerceIn(0f, 30f) else 0f
+        // Haze: lifted blacks together with weak colour.
+        val dehaze = if (p005 > 35 && meanChroma < 0.18f) ((p005 - 30) * 0.8f).coerceIn(0f, 30f) else 0f
+        // Detail: sharpen / clarity only when the image is clean.
+        val sharpness = when {
+            noise < 3f -> 20f
+            noise < 6f -> 10f
+            else -> 0f
+        }
+        val clarity = if (noise < 4f && std < 60f) 10f else 0f
 
         return ColorAdjustments(
-            brightness = if (avgGray < 110f) 14f else if (avgGray > 170f) -10f else 6f,
-            contrast = 18f,
-            saturation = 14f,
-            temperature = ((gainR - gainB) * 40f).coerceIn(-20f, 20f),
-            tint = ((gainG - avgGray / 255f) * 20f).coerceIn(-10f, 10f),
-            highlights = -12f,
-            shadows = 16f,
-            sharpness = 15f
+            exposure = exposure,
+            contrast = contrast,
+            highlights = highlights,
+            shadows = shadows,
+            whites = whites,
+            blacks = blacks,
+            temperature = temperature,
+            tint = tint,
+            vibrance = vibrance,
+            dehaze = dehaze,
+            sharpness = sharpness,
+            clarity = clarity
+        )
+    }
+
+    /** [base] plus [delta] x [strength] for the fields Smart Auto sets (curves / HSL untouched). */
+    fun combineSmartAuto(base: ColorAdjustments, delta: ColorAdjustments, strength: Float): ColorAdjustments {
+        // Signed: a negative strength change removes part of an earlier Smart Auto.
+        val s = strength.coerceIn(-1.5f, 1.5f)
+        fun mix(b: Float, d: Float, lo: Float = -100f, hi: Float = 100f) = (b + d * s).coerceIn(lo, hi)
+        return base.copy(
+            exposure = mix(base.exposure, delta.exposure),
+            contrast = mix(base.contrast, delta.contrast),
+            highlights = mix(base.highlights, delta.highlights),
+            shadows = mix(base.shadows, delta.shadows),
+            whites = mix(base.whites, delta.whites),
+            blacks = mix(base.blacks, delta.blacks),
+            temperature = mix(base.temperature, delta.temperature),
+            tint = mix(base.tint, delta.tint),
+            vibrance = mix(base.vibrance, delta.vibrance),
+            dehaze = mix(base.dehaze, delta.dehaze),
+            clarity = mix(base.clarity, delta.clarity),
+            sharpness = mix(base.sharpness, delta.sharpness, 0f, 100f)
         )
     }
 
@@ -672,23 +1102,59 @@ object ImageProcessor {
         isCancelled: (() -> Boolean)? = null
     ): Bitmap {
         if (filter == FilterType.NONE || intensity <= 0.001f) return source
-        val clampedIntensity = intensity.coerceIn(0f, 1f)
         val rawFiltered = applyFilterFull(source, filter, isCancelled)
-        if (clampedIntensity >= 0.999f || rawFiltered === source) {
-            return rawFiltered
-        }
+        return mixWithOriginal(source, rawFiltered, intensity)
+    }
 
-        val blended = Bitmap.createBitmap(source.width, source.height, source.config ?: Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(blended)
-        canvas.drawBitmap(source, 0f, 0f, null)
-        val blendPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
-            alpha = (clampedIntensity * 255f).toInt()
+    /** Applies a 3D LUT (.cube) with the given intensity. */
+    fun applyLut(source: Bitmap, lut: CubeLut, intensity: Float = 1f, isCancelled: (() -> Boolean)? = null): Bitmap {
+        if (intensity <= 0.001f) return source
+        val w = source.width
+        val h = source.height
+        val px = IntArray(w * h)
+        source.getPixels(px, 0, w, 0, 0, w, h)
+        lut.applyInPlace(px, isCancelled)
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        out.setPixels(px, 0, w, 0, 0, w, h)
+        return mixWithOriginal(source, out, intensity)
+    }
+
+    /**
+     * Intensity mix: per-pixel interpolation of the colour channels, keeping the ORIGINAL alpha.
+     * (Drawing the filtered image with partial opacity over the original made semi-transparent
+     * layers more opaque.) Recycles [filtered] when a new bitmap is returned.
+     */
+    private fun mixWithOriginal(source: Bitmap, filtered: Bitmap, intensity: Float): Bitmap {
+        val t = intensity.coerceIn(0f, 1f)
+        if (filtered === source) return source
+        val w = source.width
+        val h = source.height
+        val sp = IntArray(w * h)
+        val fp = IntArray(w * h)
+        source.getPixels(sp, 0, w, 0, 0, w, h)
+        filtered.getPixels(fp, 0, w, 0, 0, w, h)
+        val inv = 1f - t
+        for (i in sp.indices) {
+            val s = sp[i]
+            val f = fp[i]
+            val a = (s ushr 24) and 0xFF
+            if (t >= 0.999f) {
+                sp[i] = (a shl 24) or (f and 0x00FFFFFF)
+                continue
+            }
+            val r = (((s shr 16) and 0xFF) * inv + ((f shr 16) and 0xFF) * t).toInt()
+            val g = (((s shr 8) and 0xFF) * inv + ((f shr 8) and 0xFF) * t).toInt()
+            val b = ((s and 0xFF) * inv + (f and 0xFF) * t).toInt()
+            sp[i] = (a shl 24) or (r shl 16) or (g shl 8) or b
         }
-        canvas.drawBitmap(rawFiltered, 0f, 0f, blendPaint)
-        if (rawFiltered !== source && !rawFiltered.isRecycled) {
-            rawFiltered.recycle()
+        val out = if (filtered.isMutable && filtered.width == w && filtered.height == h && filtered.config == Bitmap.Config.ARGB_8888) {
+            filtered
+        } else {
+            if (!filtered.isRecycled) filtered.recycle()
+            Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         }
-        return blended
+        out.setPixels(sp, 0, w, 0, 0, w, h)
+        return out
     }
 
     private fun applyFilterFull(
@@ -697,427 +1163,94 @@ object ImageProcessor {
         isCancelled: (() -> Boolean)? = null
     ): Bitmap {
         if (filter == FilterType.NONE) return source
+        // Looks built from tone curves / split toning / grain (see FilterRecipes).
+        FilterRecipes.recipeFor(filter)?.let { return FilterRecipes.render(source, it, isCancelled) }
 
         val width = source.width
         val height = source.height
-        val output = Bitmap.createBitmap(width, height, source.config ?: Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(output)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-
-        when (filter) {
-            FilterType.SEPIA -> {
-                val cm = ColorMatrix(
-                    floatArrayOf(
-                        0.393f, 0.769f, 0.189f, 0f, 0f,
-                        0.349f, 0.686f, 0.168f, 0f, 0f,
-                        0.272f, 0.534f, 0.131f, 0f, 0f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-            }
-            FilterType.GRAYSCALE -> {
-                val cm = ColorMatrix()
-                cm.setSaturation(0f)
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-            }
-            FilterType.VINTAGE -> {
-                val cm = ColorMatrix(
-                    floatArrayOf(
-                        0.9f, 0.1f, 0.1f, 0f, 20f,
-                        0.1f, 0.8f, 0.1f, 0f, 15f,
-                        0.1f, 0.1f, 0.6f, 0f, 30f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-                applyVignetteEffect(output, 25f, isCancelled)
-            }
-            FilterType.CYBERPUNK -> {
-                val cm = ColorMatrix(
-                    floatArrayOf(
-                        1.2f, 0f, 0.4f, 0f, 10f,
-                        0.1f, 0.9f, 0.2f, 0f, -10f,
-                        0.3f, 0.2f, 1.4f, 0f, 30f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-            }
-            FilterType.CINEMATIC -> {
-                val cm = ColorMatrix(
-                    floatArrayOf(
-                        1.1f, 0f, 0f, 0f, -5f,
-                        0f, 1.0f, 0.1f, 0f, 5f,
-                        0f, 0.2f, 1.2f, 0f, 15f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-                applyVignetteEffect(output, 35f, isCancelled)
-            }
-            FilterType.HDR -> {
-                val adj = ColorAdjustments(
-                    contrast = 25f,
-                    saturation = 20f,
-                    highlights = -20f,
-                    shadows = 30f,
-                    sharpness = 35f
-                )
-                return applyAdjustments(source, adj, isCancelled)
-            }
-            FilterType.WARM -> {
-                val cm = ColorMatrix(
-                    floatArrayOf(
-                        1.2f, 0f, 0f, 0f, 20f,
-                        0f, 1.1f, 0f, 0f, 10f,
-                        0f, 0f, 0.85f, 0f, -10f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-            }
-            FilterType.COOL -> {
-                val cm = ColorMatrix(
-                    floatArrayOf(
-                        0.85f, 0f, 0f, 0f, -10f,
-                        0f, 1.0f, 0f, 0f, 5f,
-                        0f, 0f, 1.25f, 0f, 25f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-            }
-            FilterType.GLOW -> {
-                // 1. Draw base image
-                canvas.drawBitmap(source, 0f, 0f, paint)
-
-                // 2. Extract specular highlights to create bloom layer
-                val halfW = max(1, width / 2)
-                val halfH = max(1, height / 2)
-                val brightPixels = IntArray(halfW * halfH)
-                val srcPixels = IntArray(width * height)
-                source.getPixels(srcPixels, 0, width, 0, 0, width, height)
-
-                val scaleX = width.toFloat() / halfW
-                val scaleY = height.toFloat() / halfH
-
-                for (y in 0 until halfH) {
-                    if (y % 16 == 0 && isCancelled?.invoke() == true) {
-                        throw CancellationException("Glow filter cancelled")
-                    }
-                    val srcY = (y * scaleY).toInt().coerceIn(0, height - 1)
-                    for (x in 0 until halfW) {
-                        val srcX = (x * scaleX).toInt().coerceIn(0, width - 1)
-                        val p = srcPixels[srcY * width + srcX]
-                        val a = (p ushr 24) and 0xFF
-                        val r = (p ushr 16) and 0xFF
-                        val g = (p ushr 8) and 0xFF
-                        val b = p and 0xFF
-
-                        val lum = (0.2126f * r + 0.7152f * g + 0.0722f * b) / 255.0f
-                        // Highlight threshold curve: emphasizes brighter pixels
-                        val factor = (lum * lum).coerceIn(0f, 1f)
-
-                        val bloomR = (r * factor).toInt().coerceIn(0, 255)
-                        val bloomG = (g * factor).toInt().coerceIn(0, 255)
-                        val bloomB = (b * factor).toInt().coerceIn(0, 255)
-
-                        brightPixels[y * halfW + x] = (a shl 24) or (bloomR shl 16) or (bloomG shl 8) or bloomB
-                    }
-                }
-
-                val highlightBmp = Bitmap.createBitmap(halfW, halfH, Bitmap.Config.ARGB_8888)
-                highlightBmp.setPixels(brightPixels, 0, halfW, 0, 0, halfW, halfH)
-
-                // 3. Multi-pass Gaussian approximation box blur for broad, soft bloom
-                val blurredBloom = fastBoxBlur(highlightBmp, radius = 8, passes = 3, isCancelled = isCancelled)
-                val fullBloom = Bitmap.createScaledBitmap(blurredBloom, width, height, true)
-
-                // 4. Blend bloom using SCREEN or ADD mode for vibrant glow
-                val bloomPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-                    bloomPaint.blendMode = android.graphics.BlendMode.SCREEN
-                } else {
-                    bloomPaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.SCREEN)
-                }
-                bloomPaint.alpha = 200
-
-                canvas.drawBitmap(fullBloom, 0f, 0f, bloomPaint)
-            }
+        val maxDim = max(width, height)
+        return when (filter) {
             FilterType.PIXELATE -> {
-                val pixelSize = 16
+                // Block size relative to the image: preview and export show the same mosaic.
+                val pixelSize = max(2, (maxDim / 90f).toInt())
                 val smallW = max(1, width / pixelSize)
                 val smallH = max(1, height / pixelSize)
                 val small = Bitmap.createScaledBitmap(source, smallW, smallH, false)
-                return Bitmap.createScaledBitmap(small, width, height, false)
+                val big = Bitmap.createScaledBitmap(small, width, height, false)
+                if (small !== big && !small.isRecycled) small.recycle()
+                big
             }
             FilterType.EDGES -> {
                 val pixels = IntArray(width * height)
                 val outPixels = IntArray(width * height)
                 source.getPixels(pixels, 0, width, 0, 0, width, height)
-
-                // 1. Calculate luminance (BT.709) for all pixels weighted by alpha
+                // Sobel on luminance, sampled with a step relative to the image size and normalised,
+                // so line weight and strength match between preview and export.
+                val step = max(1, (maxDim / 1400f).toInt())
                 val lum = FloatArray(width * height)
                 for (i in pixels.indices) {
-                    if (i % 32768 == 0 && isCancelled?.invoke() == true) {
-                        throw CancellationException("Edges filter cancelled")
-                    }
                     val p = pixels[i]
-                    val a = (p ushr 24) and 0xFF
-                    if (a == 0) {
-                        lum[i] = 0f
-                    } else {
-                        val r = (p ushr 16) and 0xFF
-                        val g = (p ushr 8) and 0xFF
-                        val b = p and 0xFF
-                        lum[i] = (0.2126f * r + 0.7152f * g + 0.0722f * b) * (a / 255f)
-                    }
+                    lum[i] = 0.2126f * ((p ushr 16) and 0xFF) + 0.7152f * ((p ushr 8) and 0xFF) + 0.0722f * (p and 0xFF)
                 }
-
-                // 2. Sobel edge detection on luminance preserving sourceAlpha
                 for (y in 0 until height) {
-                    if (y % 32 == 0 && isCancelled?.invoke() == true) {
-                        throw CancellationException("Edges filter cancelled")
-                    }
+                    if (y % 32 == 0 && isCancelled?.invoke() == true) throw CancellationException("Edges filter cancelled")
                     for (x in 0 until width) {
                         val idx = y * width + x
                         val origA = (pixels[idx] ushr 24) and 0xFF
-
-                        if (origA == 0) {
-                            outPixels[idx] = 0
-                            continue
-                        }
-
-                        if (x == 0 || y == 0 || x == width - 1 || y == height - 1) {
-                            outPixels[idx] = (origA shl 24) // preserve alpha with black edge
-                            continue
-                        }
-
-                        val p00 = lum[(y - 1) * width + (x - 1)]
-                        val p01 = lum[(y - 1) * width + x]
-                        val p02 = lum[(y - 1) * width + (x + 1)]
-
-                        val p10 = lum[y * width + (x - 1)]
-                        val p12 = lum[y * width + (x + 1)]
-
-                        val p20 = lum[(y + 1) * width + (x - 1)]
-                        val p21 = lum[(y + 1) * width + x]
-                        val p22 = lum[(y + 1) * width + (x + 1)]
-
+                        if (origA == 0) continue
+                        val x0 = max(0, x - step); val x1 = min(width - 1, x + step)
+                        val y0 = max(0, y - step); val y1 = min(height - 1, y + step)
+                        val p00 = lum[y0 * width + x0]; val p01 = lum[y0 * width + x]; val p02 = lum[y0 * width + x1]
+                        val p10 = lum[y * width + x0]; val p12 = lum[y * width + x1]
+                        val p20 = lum[y1 * width + x0]; val p21 = lum[y1 * width + x]; val p22 = lum[y1 * width + x1]
                         val gx = (p02 + 2f * p12 + p22) - (p00 + 2f * p10 + p20)
                         val gy = (p20 + 2f * p21 + p22) - (p00 + 2f * p01 + p02)
-
-                        val gMag = sqrt(gx * gx + gy * gy)
-                        val edgeVal = gMag.toInt().coerceIn(0, 255)
-
+                        val edgeVal = (sqrt(gx * gx + gy * gy) * 0.6f).toInt().coerceIn(0, 255)
                         outPixels[idx] = (origA shl 24) or (edgeVal shl 16) or (edgeVal shl 8) or edgeVal
                     }
                 }
-                output.setPixels(outPixels, 0, width, 0, 0, width, height)
+                Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { it.setPixels(outPixels, 0, width, 0, 0, width, height) }
             }
             FilterType.GLITCH -> {
-                canvas.drawBitmap(source, 0f, 0f, paint)
-                val offset = (width * 0.02f).toInt()
+                val offset = max(1, (width * 0.02f).toInt())
+                val band = max(2, (maxDim / 160f).toInt())
                 val glitchPixels = IntArray(width * height)
-                val outPixels = IntArray(width * height)
                 source.getPixels(glitchPixels, 0, width, 0, 0, width, height)
-                source.getPixels(outPixels, 0, width, 0, 0, width, height)
-
-                for (y in 0 until height step 8) {
-                    if (isCancelled?.invoke() == true) {
-                        throw CancellationException("Glitch filter cancelled")
-                    }
-                    val rowShift = if ((y / 8) % 2 == 0) offset else -offset
-                    val rowHeight = min(6, height - y)
+                val outPixels = glitchPixels.copyOf()
+                var y = 0
+                while (y < height) {
+                    if (isCancelled?.invoke() == true) throw CancellationException("Glitch filter cancelled")
+                    val rowShift = if ((y / band) % 2 == 0) offset else -offset
+                    val rowHeight = min(band * 3 / 4, height - y)
                     for (ry in y until (y + rowHeight)) {
                         for (x in 0 until width) {
-                            val srcX = (x + rowShift).coerceIn(0, width - 1)
                             val origColor = glitchPixels[ry * width + x]
                             val origA = (origColor ushr 24) and 0xFF
                             if (origA == 0) continue
-
-                            val shiftedColor = glitchPixels[ry * width + srcX]
-                            val newR = (shiftedColor shr 16) and 0xFF
-                            val newG = (origColor shr 8) and 0xFF
-                            val newB = origColor and 0xFF
-                            outPixels[ry * width + x] = (origA shl 24) or (newR shl 16) or (newG shl 8) or newB
+                            val shiftedColor = glitchPixels[ry * width + (x + rowShift).coerceIn(0, width - 1)]
+                            outPixels[ry * width + x] = (origA shl 24) or (((shiftedColor shr 16) and 0xFF) shl 16) or (origColor and 0x0000FFFF)
                         }
                     }
+                    y += band
                 }
-                output.setPixels(outPixels, 0, width, 0, 0, width, height)
-            }
-            FilterType.ORANGE_TEAL -> {
-                val cm = ColorMatrix(
-                    floatArrayOf(
-                        1.22f, 0.05f, -0.18f, 0f, 18f,
-                        -0.08f, 1.12f, 0.08f, 0f, -4f,
-                        -0.28f, 0.18f, 1.30f, 0f, 22f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-                applyVignetteEffect(output, 20f, isCancelled)
-            }
-            FilterType.MOODY_DARK -> {
-                val cm = ColorMatrix(
-                    floatArrayOf(
-                        0.88f, 0.08f, 0.04f, 0f, -22f,
-                        0.04f, 0.88f, 0.08f, 0f, -18f,
-                        0.04f, 0.12f, 0.98f, 0f, -8f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-                applyVignetteEffect(output, 38f, isCancelled)
-            }
-            FilterType.VAPORWAVE -> {
-                val cm = ColorMatrix(
-                    floatArrayOf(
-                        1.40f, -0.10f, 0.25f, 0f, 30f,
-                        -0.15f, 0.95f, 0.40f, 0f, 12f,
-                        0.35f, 0.10f, 1.50f, 0f, 40f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-            }
-            FilterType.FILM_NOIR -> {
-                val cm = ColorMatrix(
-                    floatArrayOf(
-                        0.55f, 0.80f, 0.15f, 0f, -35f,
-                        0.55f, 0.80f, 0.15f, 0f, -35f,
-                        0.55f, 0.80f, 0.15f, 0f, -35f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-                applyVignetteEffect(output, 55f, isCancelled)
-            }
-            FilterType.KODACHROME -> {
-                val cm = ColorMatrix(
-                    floatArrayOf(
-                        1.28f, -0.02f, -0.06f, 0f, 12f,
-                        -0.02f, 1.18f, -0.04f, 0f, 6f,
-                        -0.12f, -0.02f, 1.08f, 0f, -12f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-            }
-            FilterType.PASTEL_DREAM -> {
-                val cm = ColorMatrix(
-                    floatArrayOf(
-                        0.82f, 0.06f, 0.06f, 0f, 38f,
-                        0.06f, 0.82f, 0.06f, 0f, 34f,
-                        0.06f, 0.06f, 0.88f, 0f, 42f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-            }
-            FilterType.DUOTONE_VIOLET -> {
-                val cm = ColorMatrix(
-                    floatArrayOf(
-                        0.85f, 0.35f, 0.10f, 0f, 28f,
-                        0.15f, 0.25f, 0.45f, 0f, -22f,
-                        0.30f, 0.10f, 0.90f, 0f, 48f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-            }
-            FilterType.EMERALD_MINT -> {
-                val cm = ColorMatrix(
-                    floatArrayOf(
-                        0.76f, 0.12f, -0.06f, 0f, -12f,
-                        0.12f, 1.28f, 0.18f, 0f, 18f,
-                        -0.06f, 0.22f, 1.15f, 0f, 12f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-            }
-            FilterType.GOLDEN_HOUR -> {
-                val cm = ColorMatrix(
-                    floatArrayOf(
-                        1.35f, 0.12f, -0.12f, 0f, 28f,
-                        0.06f, 1.18f, -0.12f, 0f, 16f,
-                        -0.18f, -0.12f, 0.72f, 0f, -22f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-                applyVignetteEffect(output, 22f, isCancelled)
+                Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { it.setPixels(outPixels, 0, width, 0, 0, width, height) }
             }
             FilterType.SOLARIZE -> {
+                // Classic Sabattier solarisation: tones above mid-grey are inverted, smoothly
+                // (no discontinuity at 128 like the previous formula).
                 val pixels = IntArray(width * height)
                 source.getPixels(pixels, 0, width, 0, 0, width, height)
+                val lut = IntArray(256) { v -> if (v <= 128) v else 255 - v + (v - 128) / 8 }
                 for (i in pixels.indices) {
-                    if (i % 65536 == 0 && isCancelled?.invoke() == true) {
-                        throw CancellationException("Solarize filter cancelled")
-                    }
                     val p = pixels[i]
                     val a = (p ushr 24) and 0xFF
                     if (a == 0) continue
-                    var r = (p ushr 16) and 0xFF
-                    var g = (p ushr 8) and 0xFF
-                    var b = p and 0xFF
-                    r = if (r > 128) 255 - r else r * 2
-                    g = if (g > 128) 255 - g else g * 2
-                    b = if (b > 128) 255 - b else b * 2
-                    pixels[i] = (a shl 24) or (r.coerceIn(0, 255) shl 16) or (g.coerceIn(0, 255) shl 8) or b.coerceIn(0, 255)
+                    pixels[i] = (a shl 24) or (lut[(p shr 16) and 0xFF] shl 16) or (lut[(p shr 8) and 0xFF] shl 8) or lut[p and 0xFF]
                 }
-                output.setPixels(pixels, 0, width, 0, 0, width, height)
+                Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { it.setPixels(pixels, 0, width, 0, 0, width, height) }
             }
-            FilterType.BLEACH_BYPASS -> {
-                val cm = ColorMatrix(
-                    floatArrayOf(
-                        1.25f, 0.22f, 0.12f, 0f, -32f,
-                        0.22f, 1.25f, 0.12f, 0f, -32f,
-                        0.22f, 0.22f, 1.35f, 0f, -28f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                val satMatrix = ColorMatrix()
-                satMatrix.setSaturation(0.38f)
-                cm.postConcat(satMatrix)
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-            }
-            FilterType.CROSS_PROCESS -> {
-                val cm = ColorMatrix(
-                    floatArrayOf(
-                        1.32f, -0.06f, 0.06f, 0f, 18f,
-                        0.06f, 1.22f, -0.12f, 0f, 12f,
-                        -0.12f, 0.18f, 1.28f, 0f, -26f,
-                        0f, 0f, 0f, 1f, 0f
-                    )
-                )
-                paint.colorFilter = ColorMatrixColorFilter(cm)
-                canvas.drawBitmap(source, 0f, 0f, paint)
-                applyVignetteEffect(output, 24f, isCancelled)
-            }
-            FilterType.NONE -> {}
+            else -> source
         }
-
-        return output
     }
 
     /**
@@ -1125,6 +1258,173 @@ object ImageProcessor {
      * Takes 4 source corners [top-left, top-right, bottom-right, bottom-left]
      * and maps them to a rectangular output of size destWidth x destHeight.
      */
+    // ---------------------------------------------------------------------------------------------
+    // Perspective helpers
+    // ---------------------------------------------------------------------------------------------
+
+    /**
+     * Real width / height ratio of the rectangle photographed as the quad [corners] (TL, TR, BR, BL,
+     * document pixels), assuming the optical centre is the image centre (Zhang & He, "Whiteboard
+     * scanning"). Taking the longest sides instead stretches or squashes documents shot at an
+     * angle. Returns null when the quad is degenerate.
+     */
+    fun estimateRectAspect(corners: List<PointF>, docW: Int, docH: Int): Float? {
+        if (corners.size < 4) return null
+        val u0 = docW / 2.0
+        val v0 = docH / 2.0
+        // m1 = TL, m2 = TR, m3 = BL, m4 = BR
+        val x1 = corners[0].x.toDouble(); val y1 = corners[0].y.toDouble()
+        val x2 = corners[1].x.toDouble(); val y2 = corners[1].y.toDouble()
+        val x3 = corners[3].x.toDouble(); val y3 = corners[3].y.toDouble()
+        val x4 = corners[2].x.toDouble(); val y4 = corners[2].y.toDouble()
+        val d2 = (y2 - y4) * x3 - (x2 - x4) * y3 + x2 * y4 - y2 * x4
+        val d3 = (y3 - y4) * x2 - (x3 - x4) * y2 + x3 * y4 - y3 * x4
+        if (kotlin.math.abs(d2) < 1e-9 || kotlin.math.abs(d3) < 1e-9) return null
+        val k2 = ((y1 - y4) * x3 - (x1 - x4) * y3 + x1 * y4 - y1 * x4) / d2
+        val k3 = ((y1 - y4) * x2 - (x1 - x4) * y2 + x1 * y4 - y1 * x4) / d3
+        val n21 = k2 * x2 - x1; val n22 = k2 * y2 - y1; val n23 = k2 - 1.0
+        val n31 = k3 * x3 - x1; val n32 = k3 * y3 - y1; val n33 = k3 - 1.0
+        val ratio: Double
+        val denom = n23 * n33
+        val f2 = if (kotlin.math.abs(denom) < 1e-9) -1.0 else -(
+            (n21 * n31 - (n21 * n33 + n23 * n31) * u0 + n23 * n33 * u0 * u0) +
+                (n22 * n32 - (n22 * n33 + n23 * n32) * v0 + n23 * n33 * v0 * v0)
+            ) / denom
+        ratio = if (f2 > 1.0) {
+            val f = kotlin.math.sqrt(f2)
+            fun norm2(a: Double, b: Double, c: Double): Double {
+                val p = (a - u0 * c) / f
+                val q = (b - v0 * c) / f
+                return p * p + q * q + c * c
+            }
+            kotlin.math.sqrt(norm2(n21, n22, n23) / norm2(n31, n32, n33))
+        } else {
+            // Opposite sides (almost) parallel: no perspective to undo, plain side ratio.
+            kotlin.math.sqrt((n21 * n21 + n22 * n22) / (n31 * n31 + n32 * n32))
+        }
+        if (!ratio.isFinite() || ratio <= 0.0) return null
+        return ratio.toFloat().coerceIn(0.1f, 10f)
+    }
+
+    /** Output size of a perspective crop: real proportions (or [aspect] when given), longest side kept. */
+    fun perspectiveOutputSize(corners: List<PointF>, docW: Int, docH: Int, aspect: Float?): Pair<Int, Int> {
+        if (corners.size < 4) return docW to docH
+        fun len(a: PointF, b: PointF) = kotlin.math.hypot((b.x - a.x).toDouble(), (b.y - a.y).toDouble()).toFloat()
+        val wSide = max(len(corners[0], corners[1]), len(corners[3], corners[2]))
+        val hSide = max(len(corners[0], corners[3]), len(corners[1], corners[2]))
+        val ratio = aspect?.takeIf { it > 0f } ?: estimateRectAspect(corners, docW, docH) ?: (wSide / hSide.coerceAtLeast(1f))
+        val longest = max(wSide, hSide).coerceAtLeast(50f)
+        val (w, h) = if (ratio >= 1f) longest to longest / ratio else longest * ratio to longest
+        return w.roundToIntSafe().coerceIn(50, 8192) to h.roundToIntSafe().coerceIn(50, 8192)
+    }
+
+    private fun Float.roundToIntSafe(): Int = if (isFinite()) kotlin.math.round(this).toInt() else 0
+
+    /**
+     * Finds a document / poster / screen in the photo: the largest region whose colour differs
+     * from the background sampled along the image border, then its four extreme corners.
+     * Returns TL, TR, BR, BL in [bitmap] pixels, or null when nothing convincing is found.
+     */
+    fun detectDocumentCorners(bitmap: Bitmap): List<PointF>? {
+        val w = bitmap.width
+        val h = bitmap.height
+        if (w < 16 || h < 16) return null
+        val px = IntArray(w * h)
+        bitmap.getPixels(px, 0, w, 0, 0, w, h)
+        // Background = median colour of the border.
+        val border = ArrayList<Int>()
+        for (x in 0 until w) { border.add(px[x]); border.add(px[(h - 1) * w + x]) }
+        for (y in 0 until h) { border.add(px[y * w]); border.add(px[y * w + w - 1]) }
+        fun median(sel: (Int) -> Int): Int = border.map(sel).sorted()[border.size / 2]
+        val br = median { (it shr 16) and 0xFF }
+        val bg = median { (it shr 8) and 0xFF }
+        val bb = median { it and 0xFF }
+        val diff = IntArray(w * h)
+        for (i in px.indices) {
+            val p = px[i]
+            val dr = ((p shr 16) and 0xFF) - br
+            val dg = ((p shr 8) and 0xFF) - bg
+            val db = (p and 0xFF) - bb
+            diff[i] = kotlin.math.sqrt((dr * dr + dg * dg + db * db).toDouble()).toInt()
+        }
+        // Threshold between background and the rest (Otsu on the difference).
+        val hist = IntArray(442)
+        diff.forEach { hist[it.coerceIn(0, 441)]++ }
+        var sumAll = 0.0
+        for (t in hist.indices) sumAll += t * hist[t].toDouble()
+        var sumB = 0.0; var wB = 0; var best = 0.0; var threshold = 40
+        for (t in hist.indices) {
+            wB += hist[t]
+            if (wB == 0) continue
+            val wF = diff.size - wB
+            if (wF == 0) break
+            sumB += t * hist[t].toDouble()
+            val mB = sumB / wB
+            val mF = (sumAll - sumB) / wF
+            val between = wB.toDouble() * wF * (mB - mF) * (mB - mF)
+            if (between > best) { best = between; threshold = t }
+        }
+        threshold = threshold.coerceAtLeast(25)
+        val fg = BooleanArray(w * h) { diff[it] > threshold }
+        // Largest 4-connected foreground component.
+        val label = IntArray(w * h) { -1 }
+        var bestLabel = -1
+        var bestSize = 0
+        var stack = IntArray(4096)
+        var next = 0
+        for (s in fg.indices) {
+            if (!fg[s] || label[s] >= 0) continue
+            var sp = 0
+            var size = 0
+            label[s] = next
+            stack[sp++] = s
+            while (sp > 0) {
+                val i = stack[--sp]
+                size++
+                val x = i % w
+                val y = i / w
+                fun push(j: Int) {
+                    if (fg[j] && label[j] < 0) {
+                        label[j] = next
+                        if (sp == stack.size) stack = stack.copyOf(stack.size * 2)
+                        stack[sp++] = j
+                    }
+                }
+                if (x > 0) push(i - 1)
+                if (x < w - 1) push(i + 1)
+                if (y > 0) push(i - w)
+                if (y < h - 1) push(i + w)
+            }
+            if (size > bestSize) { bestSize = size; bestLabel = next }
+            next++
+        }
+        val total = w * h
+        if (bestLabel < 0 || bestSize < total * 0.08f || bestSize > total * 0.97f) return null
+        // Extreme points along the diagonals = the quad's corners.
+        var tl = 0; var tr = 0; var brI = 0; var bl = 0
+        var minSum = Int.MAX_VALUE; var maxSum = Int.MIN_VALUE; var minDiff = Int.MAX_VALUE; var maxDiff = Int.MIN_VALUE
+        for (i in label.indices) {
+            if (label[i] != bestLabel) continue
+            val x = i % w
+            val y = i / w
+            val sum = x + y
+            val d = x - y
+            if (sum < minSum) { minSum = sum; tl = i }
+            if (sum > maxSum) { maxSum = sum; brI = i }
+            if (d > maxDiff) { maxDiff = d; tr = i }
+            if (d < minDiff) { minDiff = d; bl = i }
+        }
+        fun pt(i: Int) = PointF((i % w).toFloat(), (i / w).toFloat())
+        val quad = listOf(pt(tl), pt(tr), pt(brI), pt(bl))
+        // Reject slivers.
+        val area = kotlin.math.abs(
+            (quad[0].x * quad[1].y - quad[1].x * quad[0].y) + (quad[1].x * quad[2].y - quad[2].x * quad[1].y) +
+                (quad[2].x * quad[3].y - quad[3].x * quad[2].y) + (quad[3].x * quad[0].y - quad[0].x * quad[3].y)
+        ) / 2f
+        if (area < total * 0.06f) return null
+        return quad
+    }
+
     /**
      * Unwarps a perspective quadrilateral into a flat rectangular bitmap.
      * Takes 4 source corners [top-left, top-right, bottom-right, bottom-left]
@@ -1481,9 +1781,11 @@ object ImageProcessor {
         maskBitmap: Bitmap,
         radiusPx: Double = 5.0,
         featherPx: Int = 4,
-        mode: InpaintEngineMode = InpaintEngineMode.AI_PATCH_SYNTHESIS,
+        mode: InpaintEngineMode = InpaintEngineMode.SMART,
         smartEdgeSnap: Boolean = true,
-        seamlessBlend: Boolean = true
+        seamlessBlend: Boolean = true,
+        protectMask: Bitmap? = null,
+        seed: Int = 0x5EED
     ): Bitmap {
         require(source.width == maskBitmap.width && source.height == maskBitmap.height) { "Mask size must match source" }
         return InpaintEngine.inpaint(
@@ -1493,50 +1795,12 @@ object ImageProcessor {
             smartEdgeSnap = smartEdgeSnap,
             seamlessBlend = seamlessBlend,
             featherPx = featherPx,
-            radiusPx = radiusPx
+            radiusPx = radiusPx,
+            protectMask = protectMask,
+            seed = seed
         )
     }
 
-    private fun applyVignetteEffect(
-        bitmap: Bitmap,
-        intensity: Float,
-        isCancelled: (() -> Boolean)? = null
-    ) {
-        val width = bitmap.width
-        val height = bitmap.height
-        val cx = width / 2f
-        val cy = height / 2f
-        val maxRadius = sqrt((cx * cx + cy * cy).toDouble()).toFloat()
-
-        val alphaFactor = (intensity / 100f).coerceIn(0f, 1f)
-
-        val pixels = IntArray(width * height)
-        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-
-        for (y in 0 until height) {
-            if (y % 32 == 0 && isCancelled?.invoke() == true) {
-                throw CancellationException("Vignette cancelled")
-            }
-            for (x in 0 until width) {
-                val dx = x - cx
-                val dy = y - cy
-                val dist = sqrt((dx * dx + dy * dy).toDouble()).toFloat()
-                val distNormalized = (dist / maxRadius).coerceIn(0f, 1f)
-                val factor = 1.0f - (distNormalized.pow(2.0f) * alphaFactor)
-
-                val idx = y * width + x
-                val c = pixels[idx]
-                val a = (c shr 24) and 0xFF
-                val r = (((c shr 16) and 0xFF) * factor).toInt().coerceIn(0, 255)
-                val g = (((c shr 8) and 0xFF) * factor).toInt().coerceIn(0, 255)
-                val b = ((c and 0xFF) * factor).toInt().coerceIn(0, 255)
-
-                pixels[idx] = (a shl 24) or (r shl 16) or (g shl 8) or b
-            }
-        }
-
-        bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
-    }
 
     /**
      * Fast multi-pass Horizontal/Vertical Box Blur (approximates Gaussian Blur)
@@ -1638,46 +1902,66 @@ object ImageProcessor {
     }
 
     /**
-     * Builds a 256-element Look-Up Table (LUT) from tone curve control points using cubic spline interpolation.
+     * Tone curve as a 256-entry LUT using a monotone cubic spline (Fritsch-Carlson) through the
+     * control points: smooth, respects uneven point spacing and never overshoots, so a rising
+     * curve never inverts tones. Before the first / after the last point the curve is flat
+     * (moving an end point sideways sets the input black / white point).
      */
     fun buildCurveLut(points: List<PointF>): IntArray {
         val lut = IntArray(256)
-        if (points.isEmpty()) {
-            for (i in 0..255) lut[i] = i
-            return lut
-        }
-        val sorted = points.sortedBy { it.x }
-        if (sorted.size == 1) {
-            val y = sorted[0].y.toInt().coerceIn(0, 255)
-            for (i in 0..255) lut[i] = y
-            return lut
-        }
+        val f = curveValues(points)
+        for (i in 0..255) lut[i] = (f[i] + 0.5f).toInt().coerceIn(0, 255)
+        return lut
+    }
 
-        var pIdx = 0
+    /** The same curve as [buildCurveLut] with sub-level precision (0..255 floats). */
+    fun curveValues(points: List<PointF>): FloatArray {
+        val out = FloatArray(256)
+        // Sorted, one point per input level (a later duplicate wins), clamped to the range.
+        val byX = java.util.TreeMap<Float, Float>()
+        points.forEach { byX[it.x.coerceIn(0f, 255f)] = it.y.coerceIn(0f, 255f) }
+        if (byX.isEmpty()) { for (i in 0..255) out[i] = i.toFloat(); return out }
+        val xs = byX.keys.toFloatArray()
+        val ys = byX.values.toFloatArray()
+        val n = xs.size
+        if (n == 1) { java.util.Arrays.fill(out, ys[0]); return out }
+
+        val d = FloatArray(n - 1) { (ys[it + 1] - ys[it]) / (xs[it + 1] - xs[it]).coerceAtLeast(1e-4f) }
+        val m = FloatArray(n)
+        m[0] = d[0]
+        m[n - 1] = d[n - 2]
+        for (k in 1 until n - 1) {
+            m[k] = if (d[k - 1] * d[k] <= 0f) 0f else (d[k - 1] + d[k]) / 2f
+        }
+        for (k in 0 until n - 1) {
+            if (d[k] == 0f) { m[k] = 0f; m[k + 1] = 0f; continue }
+            val a = m[k] / d[k]
+            val b = m[k + 1] / d[k]
+            val s = a * a + b * b
+            if (s > 9f) {
+                val t = 3f / sqrt(s)
+                m[k] = t * a * d[k]
+                m[k + 1] = t * b * d[k]
+            }
+        }
+        var seg = 0
         for (i in 0..255) {
             val x = i.toFloat()
-            while (pIdx < sorted.size - 2 && sorted[pIdx + 1].x < x) {
-                pIdx++
-            }
-            val p0 = sorted[max(0, pIdx - 1)]
-            val p1 = sorted[pIdx]
-            val p2 = sorted[min(sorted.size - 1, pIdx + 1)]
-            val p3 = sorted[min(sorted.size - 1, pIdx + 2)]
-
-            val dx = (p2.x - p1.x).coerceAtLeast(0.001f)
-            val t = ((x - p1.x) / dx).coerceIn(0f, 1f)
-
-            val t2 = t * t
-            val t3 = t2 * t
-            val y = 0.5f * (
-                (2f * p1.y) +
-                (-p0.y + p2.y) * t +
-                (2f * p0.y - 5f * p1.y + 4f * p2.y - p3.y) * t2 +
-                (-p0.y + 3f * p1.y - 3f * p2.y + p3.y) * t3
-            )
-            lut[i] = y.toInt().coerceIn(0, 255)
+            out[i] = when {
+                x <= xs[0] -> ys[0]
+                x >= xs[n - 1] -> ys[n - 1]
+                else -> {
+                    while (seg < n - 2 && x > xs[seg + 1]) seg++
+                    val h = (xs[seg + 1] - xs[seg]).coerceAtLeast(1e-4f)
+                    val t = (x - xs[seg]) / h
+                    val t2 = t * t
+                    val t3 = t2 * t
+                    (2 * t3 - 3 * t2 + 1) * ys[seg] + (t3 - 2 * t2 + t) * h * m[seg] +
+                        (-2 * t3 + 3 * t2) * ys[seg + 1] + (t3 - t2) * h * m[seg + 1]
+                }
+            }.coerceIn(0f, 255f)
         }
-        return lut
+        return out
     }
 
     /**

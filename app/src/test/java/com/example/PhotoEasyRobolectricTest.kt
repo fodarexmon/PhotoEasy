@@ -475,6 +475,7 @@ class PhotoEasyRobolectricTest {
     }
 
     @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
     fun `quick selection snaps to high contrast edges within stroke area`() {
         // Create 100x100 bitmap: left half Red (high contrast), right half Blue
         val image = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
@@ -580,6 +581,76 @@ class PhotoEasyRobolectricTest {
         assertNotNull(context.getString(R.string.compare_after))
         assertNotNull(context.getString(R.string.compare_split_mode))
         assertNotNull(context.getString(R.string.compare_this_adjustment))
+    }
+
+    private fun stripOf(vararg colors: Int): Bitmap {
+        val b = Bitmap.createBitmap(colors.size, 1, Bitmap.Config.ARGB_8888)
+        b.setPixels(colors, 0, colors.size, 0, 0, colors.size, 1)
+        return b
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun `warm filter keeps highlight detail instead of clipping`() {
+        val src = stripOf(Color.rgb(230, 230, 230), Color.rgb(245, 245, 245))
+        val out = com.example.engine.ImageProcessor.applyFilter(src, FilterType.WARM)
+        // The old colour matrix (1.2·r + 20) pushed both to 255.
+        assertTrue("highlights merged: ${Color.red(out.getPixel(0, 0))} vs ${Color.red(out.getPixel(1, 0))}",
+            Color.red(out.getPixel(1, 0)) > Color.red(out.getPixel(0, 0)))
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun `filter intensity keeps the layer transparency`() {
+        val src = stripOf(Color.argb(128, 120, 90, 60))
+        val out = com.example.engine.ImageProcessor.applyFilter(src, FilterType.COOL, intensity = 0.5f)
+        assertEquals(128, (out.getPixel(0, 0) ushr 24) and 0xFF)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun `solarize has no jump around mid grey`() {
+        val src = stripOf(Color.rgb(127, 127, 127), Color.rgb(129, 129, 129))
+        val out = com.example.engine.ImageProcessor.applyFilter(src, FilterType.SOLARIZE)
+        assertTrue(kotlin.math.abs(Color.red(out.getPixel(0, 0)) - Color.red(out.getPixel(1, 0))) <= 4)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun `identity cube lut leaves colours unchanged and invalid files are rejected`() {
+        val text = """
+            TITLE "Identity"
+            LUT_3D_SIZE 2
+            0 0 0
+            1 0 0
+            0 1 0
+            1 1 0
+            0 0 1
+            1 0 1
+            0 1 1
+            1 1 1
+        """.trimIndent()
+        val lut = com.example.engine.CubeLut.parse(text, "x")
+        assertEquals("Identity", lut.title)
+        val c = Color.argb(200, 37, 140, 222)
+        val out = com.example.engine.ImageProcessor.applyLut(stripOf(c), lut).getPixel(0, 0)
+        assertEquals(200, (out ushr 24) and 0xFF)
+        assertTrue(kotlin.math.abs(Color.red(out) - 37) <= 1)
+        assertTrue(kotlin.math.abs(Color.green(out) - 140) <= 1)
+        assertTrue(kotlin.math.abs(Color.blue(out) - 222) <= 1)
+
+        var rejected = false
+        try { com.example.engine.CubeLut.parse("LUT_3D_SIZE 2\n0 0 0\n1 1 1", "bad") } catch (e: IllegalArgumentException) { rejected = true }
+        assertTrue("incomplete LUT must be rejected", rejected)
+    }
+
+    @Test
+    fun `every preset filter has a recipe or a special implementation`() {
+        val special = setOf(FilterType.NONE, FilterType.PIXELATE, FilterType.EDGES, FilterType.GLITCH, FilterType.SOLARIZE)
+        for (f in FilterType.values()) {
+            if (f in special) continue
+            assertNotNull("missing recipe for $f", com.example.engine.FilterRecipes.recipeFor(f))
+        }
     }
 
     /** Builds an ARGB image from a colour function and an ALPHA_8 mask from a predicate. */
@@ -708,6 +779,42 @@ class PhotoEasyRobolectricTest {
     }
 
     @Test
+    fun `removal keeps the background texture contrast instead of a pale ghost`() {
+        // High-contrast 2px stripes; averaging all patches would turn the hole into flat grey.
+        val (src, mask) = redSquareScene(80, 80, { x, _ -> if ((x / 2) % 2 == 0) Color.BLACK else Color.WHITE }, 28, 28, 51, 51)
+        val result = com.example.engine.InpaintEngine.inpaint(src, mask, com.example.engine.InpaintEngineMode.AI_PATCH_SYNTHESIS)
+        fun lumStd(bmp: Bitmap, x0: Int, y0: Int, x1: Int, y1: Int): Double {
+            var sum = 0.0; var sq = 0.0; var n = 0
+            for (y in y0..y1) for (x in x0..x1) {
+                val c = bmp.getPixel(x, y)
+                val l = 0.299 * Color.red(c) + 0.587 * Color.green(c) + 0.114 * Color.blue(c)
+                sum += l; sq += l * l; n++
+            }
+            val mean = sum / n
+            return kotlin.math.sqrt(sq / n - mean * mean)
+        }
+        val inside = lumStd(result, 34, 34, 45, 45)
+        val outside = lumStd(src, 2, 2, 13, 13)
+        assertTrue("fill lost the texture contrast: std $inside vs background $outside", inside > outside * 0.55)
+    }
+
+    @Test
+    fun `removal also takes the object's coloured glow beyond the mask`() {
+        val glow = Color.rgb(235, 95, 95)
+        val blue = Color.rgb(40, 70, 210)
+        // Object 20..39, a 5px reddish glow around it that the mask does NOT cover.
+        val (src, mask) = redSquareScene(64, 64, { x, y ->
+            val d = maxOf(maxOf(20 - x, x - 39), maxOf(20 - y, y - 39))
+            if (d in 1..5) glow else blue
+        }, 20, 20, 39, 39)
+        val result = com.example.engine.InpaintEngine.inpaint(src, mask, com.example.engine.InpaintEngineMode.AI_PATCH_SYNTHESIS)
+        // Outermost glow ring (5px outside the mask) must be background-coloured now.
+        val c = result.getPixel(30, 44)
+        assertTrue("glow remnant left behind: ${Integer.toHexString(c)}", Color.blue(c) > Color.red(c))
+        assertEquals("untouched background", blue, result.getPixel(2, 2))
+    }
+
+    @Test
     fun `patch synthesis also fills an object touching the image border`() {
         val (src, mask) = redSquareScene(64, 64, { _, _ -> Color.GREEN }, 0, 20, 10, 40)
         val result = com.example.engine.InpaintEngine.inpaint(src, mask, com.example.engine.InpaintEngineMode.AI_PATCH_SYNTHESIS)
@@ -755,5 +862,741 @@ class PhotoEasyRobolectricTest {
         assertNotNull(context.getString(R.string.inpaint_engine_telea))
         assertNotNull(context.getString(R.string.inpaint_smart_snap))
         assertNotNull(context.getString(R.string.inpaint_seamless_blend))
+    }
+
+    // --- Magic wand engine ---------------------------------------------------------------
+
+    private fun wandSource(w: Int, h: Int, colorAt: (Int, Int) -> Int): com.example.engine.WandSource {
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        for (y in 0 until h) for (x in 0 until w) bmp.setPixel(x, y, colorAt(x, y))
+        return com.example.engine.MagicWandEngine.buildSource(bmp, w, h)
+    }
+
+    private fun wand(
+        src: com.example.engine.WandSource, x: Int, y: Int, tol: Int, contiguous: Boolean = true,
+        options: com.example.engine.WandOptions = com.example.engine.WandOptions(softEdges = false)
+    ): ByteArray = com.example.engine.MagicWandEngine.computeMask(src, x + 0.5f, y + 0.5f, tol, contiguous, options, null)!!
+
+    private fun ByteArray.at(w: Int, x: Int, y: Int) = this[y * w + x].toInt() and 0xFF
+
+    @Test
+    fun magicWand_contiguousStopsAtEdge_globalFindsSameColourElsewhere() {
+        // Red left half, blue right half with a separate red block inside the blue.
+        val src = wandSource(60, 40) { x, y -> if (x < 30 || (x in 45..50 && y in 15..20)) Color.RED else Color.BLUE }
+        val contiguous = wand(src, 5, 5, 30)
+        assertEquals(255, contiguous.at(60, 10, 10))
+        assertEquals(0, contiguous.at(60, 40, 10))
+        assertEquals(0, contiguous.at(60, 47, 17))
+        val global = wand(src, 5, 5, 30, contiguous = false)
+        assertEquals(255, global.at(60, 47, 17))
+        assertEquals(0, global.at(60, 40, 10))
+    }
+
+    @Test
+    fun magicWand_cleanNoiseFillsPinholes() {
+        val src = wandSource(50, 50) { x, y -> if (x == 25 && y == 25) Color.WHITE else Color.rgb(200, 30, 30) }
+        val noisy = wand(src, 5, 5, 25, options = com.example.engine.WandOptions(cleanNoise = false, softEdges = false))
+        assertEquals(0, noisy.at(50, 25, 25))
+        val clean = wand(src, 5, 5, 25, options = com.example.engine.WandOptions(cleanNoise = true, softEdges = false))
+        assertEquals(255, clean.at(50, 25, 25))
+    }
+
+    @Test
+    fun magicWand_sampleSizeIgnoresOddSeedPixel() {
+        val src = wandSource(40, 40) { x, y -> if (x == 20 && y == 20) Color.GREEN else Color.rgb(180, 40, 40) }
+        val point = wand(src, 20, 20, 30, options = com.example.engine.WandOptions(sampleSize = 1, cleanNoise = false, softEdges = false))
+        assertEquals(0, point.at(40, 5, 5))
+        val averaged = wand(src, 20, 20, 30, options = com.example.engine.WandOptions(sampleSize = 5, cleanNoise = false, softEdges = false))
+        assertEquals(255, averaged.at(40, 5, 5))
+    }
+
+    @Test
+    fun magicWand_smartGradientFollowsSmoothRamp() {
+        val src = wandSource(200, 10) { x, _ -> val v = 40 + x * 160 / 199; Color.rgb(v, v, v) }
+        val plain = wand(src, 0, 5, 15)
+        assertEquals(0, plain.at(200, 199, 5))
+        val smart = wand(src, 0, 5, 15, options = com.example.engine.WandOptions(smartGradient = true, softEdges = false))
+        assertEquals(255, smart.at(200, 199, 5))
+    }
+
+    @Test
+    fun magicWand_softEdgesGradeTheBoundary() {
+        val src = wandSource(40, 20) { x, _ -> if (x < 20) Color.rgb(200, 30, 30) else Color.rgb(30, 30, 200) }
+        val soft = wand(src, 2, 10, 30, options = com.example.engine.WandOptions(softEdges = true))
+        assertEquals(255, soft.at(40, 5, 10))
+        assertEquals(0, soft.at(40, 35, 10))
+        val edge = soft.at(40, 19, 10)
+        assertTrue("edge pixel should be partially selected, was $edge", edge in 1..254)
+    }
+
+    // --- Layers and masks ------------------------------------------------------------------
+
+    @Test
+    fun linkedMask_followsLayerMove_unlinkedStays() {
+        val layer = Layer(id = "lm", name = "L", type = LayerType.IMAGE)
+        layer.maskBitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ALPHA_8)
+        layer.ensureMaskAnchor()
+        assertEquals(null, LayerRenderer.linkedMaskMatrix(layer, 100, 100))
+        layer.positionX = 10f
+        val m = LayerRenderer.linkedMaskMatrix(layer, 100, 100)
+        assertNotNull(m)
+        val p = floatArrayOf(20f, 20f)
+        m!!.mapPoints(p)
+        assertEquals(30f, p[0], 0.01f)
+        assertEquals(20f, p[1], 0.01f)
+        layer.isMaskLinked = false
+        assertEquals(null, LayerRenderer.linkedMaskMatrix(layer, 100, 100))
+    }
+
+    @Test
+    fun clippingMask_showsOnlyWhereBaseIsOpaque() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val baseBmp = Bitmap.createBitmap(20, 10, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 10) for (x in 0 until 10) baseBmp.setPixel(x, y, Color.RED)
+        val topBmp = Bitmap.createBitmap(20, 10, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) }
+        val base = Layer(id = "base", name = "Base", type = LayerType.IMAGE, bitmap = baseBmp)
+        val top = Layer(id = "top", name = "Top", type = LayerType.IMAGE, bitmap = topBmp, isClipped = true)
+        val out = LayerRenderer.renderCompositeCanvas(context, listOf(base, top), 20, 10, includeBackground = false)
+        assertEquals(Color.BLUE, out.getPixel(5, 5))
+        assertEquals(0, (out.getPixel(15, 5) ushr 24) and 0xFF)
+    }
+
+    @Test
+    fun maskBrush_opacityCapsCoverageWithinOneStroke() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "Brush", width = 100, height = 100)
+        val bmp = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.YELLOW) }
+        project.layers.add(Layer(id = "b", name = "B", type = LayerType.IMAGE, bitmap = bmp))
+        viewModel.openProject(project)
+        viewModel.addLayerMask(fromSelection = false)
+        viewModel.hideAllLayerMask()
+        viewModel.setMaskBrushHardness(1f)
+        viewModel.setMaskBrushOpacity(0.5f)
+        val pts = listOf(android.graphics.PointF(50f, 50f), android.graphics.PointF(52f, 50f), android.graphics.PointF(50f, 50f))
+        viewModel.paintMaskSegment(pts, 10f, isReveal = true, phase = com.example.ui.viewmodel.StrokePhase.START)
+        viewModel.paintMaskSegment(pts, 10f, isReveal = true, phase = com.example.ui.viewmodel.StrokePhase.END)
+        val mask = viewModel.uiState.value.currentProject!!.layers[0].maskBitmap!!
+        val a = (mask.getPixel(50, 50) ushr 24) and 0xFF
+        assertTrue("half-opacity stroke should paint mid grey, was $a", a in 120..135)
+        assertEquals(0, (mask.getPixel(5, 5) ushr 24) and 0xFF)
+    }
+
+    @Test
+    fun moveLayer_reordersAndKeepsSelection() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "Order", width = 10, height = 10)
+        for (n in listOf("a", "b", "c")) {
+            project.layers.add(Layer(id = n, name = n, type = LayerType.IMAGE, bitmap = Bitmap.createBitmap(10, 10, Bitmap.Config.ARGB_8888)))
+        }
+        viewModel.openProject(project)
+        viewModel.selectLayer(0)
+        viewModel.moveLayer(0, 2)
+        val layers = viewModel.uiState.value.currentProject!!.layers
+        assertEquals(listOf("b", "c", "a"), layers.map { it.id })
+        assertEquals(2, viewModel.uiState.value.selectedLayerIndex)
+        viewModel.renameLayer(2, "  Sky  ")
+        assertEquals("Sky", viewModel.uiState.value.currentProject!!.layers[2].name)
+    }
+
+    // --- Text tool ---------------------------------------------------------------------------
+
+    @Test
+    fun textBox_hugsShortText_andWrapsAtMaxWidth() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val short = Layer(id = "t", name = "T", type = LayerType.TEXT, textConfig = TextLayerConfig(text = "Hi"))
+        val (w, _) = LayerRenderer.measureTextLayer(context, short, 1000f)
+        assertTrue("short text box should hug the text, was $w", w < 400f)
+        val long = Layer(
+            id = "t2", name = "T", type = LayerType.TEXT,
+            textConfig = TextLayerConfig(text = "word ".repeat(80), maxLineWidthPercent = 50f)
+        )
+        val (lw, lh) = LayerRenderer.measureTextLayer(context, long, 1000f)
+        assertTrue("long text must wrap within 50% of the document, was $lw", lw <= 501f)
+        assertTrue(lh > 100f)
+    }
+
+    @Test
+    fun textBackground_enlargesTheLayerBox() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val plain = Layer(id = "a", name = "A", type = LayerType.TEXT, textConfig = TextLayerConfig(text = "Hello"))
+        val boxed = plain.copy(id = "b", textConfig = plain.textConfig.copy(backgroundEnabled = true, backgroundPadding = 10f))
+        val (pw, ph) = LayerRenderer.measureTextLayer(context, plain, 500f)
+        val (bw, bh) = LayerRenderer.measureTextLayer(context, boxed, 500f)
+        assertEquals(pw + 20f, bw, 0.5f)
+        assertEquals(ph + 20f, bh, 0.5f)
+    }
+
+    @Test
+    fun commitPendingHistory_doesNotAddEmptyUndoSteps() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "History", width = 200, height = 200)
+        project.layers.add(Layer(id = "t", name = "T", type = LayerType.TEXT, textConfig = TextLayerConfig(text = "A")))
+        viewModel.openProject(project)
+        viewModel.commitPendingHistory()
+        assertFalse("opening and closing the text panel must not create an undo step", viewModel.uiState.value.canUndo)
+        viewModel.updateTextConfigTransient(TextLayerConfig(text = "AB"))
+        viewModel.commitPendingHistory()
+        assertTrue(viewModel.uiState.value.canUndo)
+    }
+
+    @Test
+    fun newTextLayer_hasVisiblePlaceholderAndAutoName() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        viewModel.openProject(Project(name = "Txt", width = 200, height = 200))
+        viewModel.addTextLayer("")
+        val layer = viewModel.uiState.value.currentProject!!.layers.last()
+        assertTrue(layer.textConfig.text.isNotBlank())
+        viewModel.updateTextConfigTransient(layer.textConfig.copy(text = "Sale"))
+        val renamed = viewModel.uiState.value.currentProject!!.layers.last()
+        assertTrue("auto name follows the text, was ${renamed.name}", renamed.name.contains("Sale"))
+    }
+
+    // --- Adjustments & Smart Auto -------------------------------------------------------------
+
+    @Test
+    fun brightness_keepsPureBlackAndWhite() {
+        val src = Bitmap.createBitmap(3, 1, Bitmap.Config.ARGB_8888)
+        src.setPixel(0, 0, Color.BLACK); src.setPixel(1, 0, Color.rgb(128, 128, 128)); src.setPixel(2, 0, Color.WHITE)
+        val out = com.example.engine.ImageProcessor.applyAdjustments(src, ColorAdjustments(brightness = 60f))
+        assertEquals(0, Color.red(out.getPixel(0, 0)))
+        assertEquals(255, Color.red(out.getPixel(2, 0)))
+        assertTrue("mid grey should get brighter", Color.red(out.getPixel(1, 0)) > 150)
+    }
+
+    @Test
+    fun hslBands_areIndependentPerRange() {
+        val a = ColorAdjustments()
+            .withHslBand("REDS", com.example.data.model.HslBand(hue = 20f))
+            .withHslBand("BLUES", com.example.data.model.HslBand(saturation = -50f))
+        assertEquals(20f, a.hslBand("REDS").hue, 0.001f)
+        assertEquals(-50f, a.hslBand("BLUES").saturation, 0.001f)
+        // Legacy single-range values migrate instead of moving to the newly chosen range.
+        val legacy = ColorAdjustments(hueShift = 30f, hslColorRange = "GREENS").migrateHsl().copy(hslColorRange = "BLUES")
+        assertEquals(30f, legacy.hslBand("GREENS").hue, 0.001f)
+        assertEquals(0f, legacy.hslBand("BLUES").hue, 0.001f)
+    }
+
+    @Test
+    fun colorReplace_takesShortestWayRoundHueCircle() {
+        val src = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+        val hsv = floatArrayOf(350f, 1f, 1f)
+        src.setPixel(0, 0, Color.HSVToColor(hsv))
+        val adj = ColorAdjustments(
+            replaceColorEnabled = true,
+            replaceSourceColorHex = Color.HSVToColor(hsv),
+            replaceTolerance = 100f,
+            replaceTargetHue = 10f
+        )
+        val out = com.example.engine.ImageProcessor.applyAdjustments(src, adj)
+        val outHsv = FloatArray(3)
+        Color.colorToHSV(out.getPixel(0, 0), outHsv)
+        val distFromRed = minOf(outHsv[0], 360f - outHsv[0])
+        assertTrue("hue should stay near red, was ${outHsv[0]}", distFromRed < 20f)
+    }
+
+    @Test
+    fun vignette_negativeLightensCorners() {
+        val src = Bitmap.createBitmap(50, 50, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.rgb(100, 100, 100)) }
+        val out = com.example.engine.ImageProcessor.applyAdjustments(src, ColorAdjustments(vignette = -80f))
+        assertTrue(Color.red(out.getPixel(0, 0)) > 120)
+        assertEquals(100, Color.red(out.getPixel(25, 25)))
+    }
+
+    @Test
+    fun smartAuto_brightensDarkImage_andKeepsUserCurves() {
+        val dark = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 64) for (x in 0 until 64) {
+            val v = 10 + (x + y) / 3
+            dark.setPixel(x, y, Color.rgb(v, v, v))
+        }
+        val curve = listOf(android.graphics.PointF(0f, 0f), android.graphics.PointF(128f, 150f), android.graphics.PointF(255f, 255f))
+        val current = ColorAdjustments(curvesRgb = curve)
+        val delta = com.example.engine.ImageProcessor.computeSmartAutoAdjustments(dark, current)
+        assertTrue("dark image needs more exposure, was ${delta.exposure}", delta.exposure > 10f)
+        val combined = com.example.engine.ImageProcessor.combineSmartAuto(current, delta, 1f)
+        assertEquals(3, combined.curvesRgb.size)
+        // Half strength = half of the correction.
+        val half = com.example.engine.ImageProcessor.combineSmartAuto(current, delta, 0.5f)
+        assertEquals(delta.exposure / 2f, half.exposure, 0.01f)
+    }
+
+    // --- One Undo / Redo timeline for document and selection edits ---------------------------
+
+    private fun waitUntil(condition: () -> Boolean) {
+        repeat(300) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            if (condition()) return
+            Thread.sleep(10)
+        }
+        org.robolectric.shadows.ShadowLooper.idleMainLooper()
+        assertTrue("condition not reached", condition())
+    }
+
+    @Test
+    fun mainUndo_undoesSelectionAndDocumentEditsInOrder() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "Timeline", width = 60, height = 60)
+        project.layers.add(Layer(id = "img", name = "Img", type = LayerType.IMAGE, bitmap = Bitmap.createBitmap(60, 60, Bitmap.Config.ARGB_8888)))
+        viewModel.openProject(project)
+        fun hasSelection() = viewModel.uiState.value.selectionMask?.let { SelectionEngine.hasSelection(it) } == true
+
+        // 1. Selection edit, 2. document edit.
+        viewModel.selectAll()
+        waitUntil { hasSelection() && viewModel.uiState.value.canUndo }
+        viewModel.toggleSelectedLayerVisibility()
+        assertFalse(viewModel.uiState.value.currentProject!!.layers[0].isVisible)
+
+        // Undo #1 reverts the document edit and keeps the selection.
+        viewModel.undo()
+        waitUntil { viewModel.uiState.value.currentProject!!.layers[0].isVisible }
+        assertTrue(hasSelection())
+
+        // Undo #2 reverts the selection.
+        viewModel.undo()
+        waitUntil { !hasSelection() }
+
+        // Redo replays them in the same order.
+        viewModel.redo()
+        waitUntil { hasSelection() }
+        assertTrue(viewModel.uiState.value.currentProject!!.layers[0].isVisible)
+        viewModel.redo()
+        waitUntil { !viewModel.uiState.value.currentProject!!.layers[0].isVisible }
+    }
+
+    // --- Curves ------------------------------------------------------------------------------
+
+    @Test
+    fun curveLut_identityAndMonotone() {
+        val id = com.example.engine.ImageProcessor.buildCurveLut(listOf(android.graphics.PointF(0f, 0f), android.graphics.PointF(255f, 255f)))
+        for (i in 0..255) assertEquals(i, id[i])
+        // Steep, unevenly spaced points: a monotone spline never dips (no inverted tones).
+        val pts = listOf(
+            android.graphics.PointF(0f, 0f), android.graphics.PointF(10f, 200f),
+            android.graphics.PointF(20f, 210f), android.graphics.PointF(255f, 255f)
+        )
+        val lut = com.example.engine.ImageProcessor.buildCurveLut(pts)
+        for (i in 1..255) assertTrue("curve must not go down at $i", lut[i] >= lut[i - 1])
+        assertEquals(200, lut[10])
+        assertEquals(210, lut[20])
+    }
+
+    @Test
+    fun curveLut_movedEndPointSetsInputBlackPoint() {
+        val lut = com.example.engine.ImageProcessor.buildCurveLut(listOf(android.graphics.PointF(20f, 0f), android.graphics.PointF(255f, 255f)))
+        assertEquals(0, lut[0])
+        assertEquals(0, lut[19])
+        assertEquals(255, lut[255])
+    }
+
+    @Test
+    fun sampleColorForCurves_readsLayerColourUnderPoint() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "Pick", width = 40, height = 40)
+        val bmp = Bitmap.createBitmap(40, 40, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.rgb(200, 40, 20)) }
+        project.layers.add(Layer(id = "p", name = "P", type = LayerType.IMAGE, bitmap = bmp))
+        viewModel.openProject(project)
+        val c = viewModel.sampleColorForCurves(20f, 20f)
+        assertNotNull(c)
+        assertEquals(200, Color.red(c!!))
+        assertEquals(40, Color.green(c))
+    }
+
+    // --- Smart removal ---------------------------------------------------------------------------
+
+    private fun squareMask(w: Int, h: Int, x0: Int, y0: Int, x1: Int, y1: Int): Bitmap {
+        val m = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        for (y in y0..y1) for (x in x0..x1) m.setPixel(x, y, Color.WHITE)
+        return m
+    }
+
+    @Test
+    fun smartRemoval_thinScratchDisappearsSeamlessly() {
+        val src = Bitmap.createBitmap(80, 80, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.rgb(120, 130, 140)) }
+        for (x in 5 until 75) for (y in 39..41) src.setPixel(x, y, Color.BLACK)
+        val mask = squareMask(80, 80, 5, 39, 74, 41)
+        val out = com.example.engine.InpaintEngine.inpaint(src, mask, com.example.engine.InpaintEngineMode.SMART)
+        val p = out.getPixel(40, 40)
+        assertTrue("scratch should be filled with the surrounding grey", abs(Color.red(p) - 120) < 12 && abs(Color.blue(p) - 140) < 12)
+    }
+
+    @Test
+    fun smartRemoval_keepsAHorizontalEdgeAcrossTheHole() {
+        val src = Bitmap.createBitmap(120, 120, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 120) for (x in 0 until 120) src.setPixel(x, y, if (y < 60) Color.rgb(200, 40, 40) else Color.rgb(40, 40, 200))
+        val mask = squareMask(120, 120, 40, 40, 79, 79)
+        val out = com.example.engine.InpaintEngine.inpaint(src, mask, com.example.engine.InpaintEngineMode.SMART)
+        val above = out.getPixel(60, 50)
+        val below = out.getPixel(60, 70)
+        assertTrue("above the edge should stay red", Color.red(above) > Color.blue(above))
+        assertTrue("below the edge should stay blue", Color.blue(below) > Color.red(below))
+    }
+
+    @Test
+    fun removal_neverCopiesFromProtectedArea() {
+        val src = Bitmap.createBitmap(120, 120, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 120) for (x in 0 until 120) src.setPixel(x, y, if (y < 30) Color.rgb(220, 30, 30) else Color.rgb(30, 200, 30))
+        val mask = squareMask(120, 120, 50, 70, 70, 90)
+        // Protect all the green: the only allowed texture source is the red band.
+        val protect = Bitmap.createBitmap(120, 120, Bitmap.Config.ARGB_8888)
+        for (y in 30 until 120) for (x in 0 until 120) protect.setPixel(x, y, Color.WHITE)
+        val out = com.example.engine.InpaintEngine.inpaint(
+            src, mask, com.example.engine.InpaintEngineMode.AI_PATCH_SYNTHESIS,
+            seamlessBlend = false, protectMask = protect
+        )
+        val p = out.getPixel(60, 80)
+        assertTrue("fill must come from the unprotected red area, was ${Integer.toHexString(p)}", Color.red(p) > Color.green(p))
+    }
+
+    // --- Crop & perspective ----------------------------------------------------------------------
+
+    @Test
+    fun perspectiveAspect_recoversSquareSeenAtAnAngle() {
+        // A 2x2 square on a tilted plane, seen by a pinhole camera (f = 500) centred on a 1000x1000 image.
+        fun project(x: Double, y: Double): android.graphics.PointF {
+            val z = 6.0 + 1.2 * y
+            return android.graphics.PointF((500 + 500 * x / z).toFloat(), (500 + 500 * y / z).toFloat())
+        }
+        val quad = listOf(project(-1.0, -1.0), project(1.0, -1.0), project(1.0, 1.0), project(-1.0, 1.0))
+        val ratio = com.example.engine.ImageProcessor.estimateRectAspect(quad, 1000, 1000)
+        assertNotNull(ratio)
+        assertEquals("a square must come out square", 1f, ratio!!, 0.08f)
+        val (w, h) = com.example.engine.ImageProcessor.perspectiveOutputSize(quad, 1000, 1000, null)
+        assertEquals(1f, w.toFloat() / h, 0.08f)
+    }
+
+    @Test
+    fun perspectiveAspect_plainRectangleKeepsItsRatio() {
+        val quad = listOf(
+            android.graphics.PointF(200f, 400f), android.graphics.PointF(800f, 400f),
+            android.graphics.PointF(800f, 700f), android.graphics.PointF(200f, 700f)
+        )
+        assertEquals(2f, com.example.engine.ImageProcessor.estimateRectAspect(quad, 1000, 1000)!!, 0.01f)
+    }
+
+    @Test
+    fun rotateCanvas90_swapsSizeAndRotatesLayers() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "Rot", width = 300, height = 200)
+        project.layers.add(Layer(id = "r", name = "R", type = LayerType.IMAGE, bitmap = Bitmap.createBitmap(300, 200, Bitmap.Config.ARGB_8888), positionX = 10f, positionY = 0f))
+        viewModel.openProject(project)
+        viewModel.rotateCanvas90(clockwise = true)
+        val p = viewModel.uiState.value.currentProject!!
+        assertEquals(200, p.width)
+        assertEquals(300, p.height)
+        assertEquals(90f, p.layers[0].rotation, 0.01f)
+        // A point right of centre moves below centre.
+        assertEquals(0f, p.layers[0].positionX, 0.01f)
+        assertEquals(10f, p.layers[0].positionY, 0.01f)
+        assertTrue(viewModel.uiState.value.canUndo)
+    }
+
+    @Test
+    fun cropWithStraighten_rotatesLayersAndUsesFrameSize() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "Straight", width = 400, height = 300)
+        project.layers.add(Layer(id = "s", name = "S", type = LayerType.IMAGE, bitmap = Bitmap.createBitmap(400, 300, Bitmap.Config.ARGB_8888)))
+        viewModel.openProject(project)
+        viewModel.setCropStraighten(10f)
+        viewModel.applyCrop(android.graphics.RectF(100f, 75f, 300f, 225f), null)
+        val p = viewModel.uiState.value.currentProject!!
+        assertEquals(200, p.width)
+        assertEquals(150, p.height)
+        assertEquals(10f, p.layers[0].rotation, 0.01f)
+        assertEquals(0f, viewModel.uiState.value.cropStraighten, 0.001f)
+    }
+
+    @Test
+    fun cropToExactSize_resamplesTheDocument() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "Size", width = 400, height = 500)
+        project.layers.add(Layer(id = "z", name = "Z", type = LayerType.IMAGE, bitmap = Bitmap.createBitmap(400, 500, Bitmap.Config.ARGB_8888)))
+        viewModel.openProject(project)
+        viewModel.setCropTargetSize(1080, 1350)
+        viewModel.applyCrop(android.graphics.RectF(0f, 0f, 400f, 500f), viewModel.uiState.value.selectedAspectRatio)
+        val p = viewModel.uiState.value.currentProject!!
+        assertEquals(1080, p.width)
+        assertEquals(1350, p.height)
+        assertEquals(2.7f, p.layers[0].scaleX, 0.01f)
+    }
+
+    // --- Transform: skew & distort ---------------------------------------------------------------
+
+    @Test
+    fun layerMatrix_appliesFreeDistort() {
+        val layer = Layer(id = "d", name = "D", type = LayerType.IMAGE, bitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888))
+        layer.distort = floatArrayOf(0f, 0f, 2f, 0f, 1f, 1f, 0f, 1f)
+        val m = SelectionEngine.getLayerMatrix(layer, 100, 100)
+        val p = floatArrayOf(100f, 0f, 0f, 0f)
+        m.mapPoints(p)
+        assertEquals(200f, p[0], 0.5f)
+        assertEquals(0f, p[1], 0.5f)
+        assertEquals(0f, p[2], 0.5f)
+    }
+
+    @Test
+    fun layerMatrix_appliesSkew() {
+        val layer = Layer(id = "k", name = "K", type = LayerType.IMAGE, bitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888), skewX = 45f)
+        val m = SelectionEngine.getLayerMatrix(layer, 100, 100)
+        val p = floatArrayOf(50f, 0f, 50f, 100f)
+        m.mapPoints(p)
+        // Top centre slides left by half the height, bottom centre right.
+        assertEquals(0f, p[0], 0.5f)
+        assertEquals(100f, p[2], 0.5f)
+    }
+
+    @Test
+    fun resetTransform_clearsSkewAndDistort() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "Reset", width = 100, height = 100)
+        val layer = Layer(id = "t", name = "T", type = LayerType.IMAGE, bitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888), skewX = 20f)
+        layer.distort = floatArrayOf(0f, 0f, 1.2f, 0f, 1f, 1f, 0f, 1f)
+        project.layers.add(layer)
+        viewModel.openProject(project)
+        viewModel.resetSelectedLayerTransform()
+        val l = viewModel.uiState.value.currentProject!!.layers[0]
+        assertEquals(0f, l.skewX, 0.001f)
+        assertEquals(null, l.distort)
+    }
+
+    // --- Replace colour ----------------------------------------------------------------------------
+
+    @Test
+    fun replaceColor_legacyToleranceIsRepaired() {
+        val buggy = ColorAdjustments(replaceColorEnabled = true, replaceTolerance = 0.35f)
+        assertEquals(35f, buggy.effectiveReplacements()[0].tolerance, 0.01f)
+        val old = ColorAdjustments(replaceColorEnabled = true, replaceTolerance = 40f)
+        assertEquals(40f, old.effectiveReplacements()[0].tolerance, 0.01f)
+    }
+
+    @Test
+    fun replaceColor_changesHueKeepsShadingAndSparesGreys() {
+        val src = Bitmap.createBitmap(3, 1, Bitmap.Config.ARGB_8888)
+        src.setPixel(0, 0, Color.rgb(220, 30, 30))   // bright red
+        src.setPixel(1, 0, Color.rgb(110, 15, 15))   // dark red (same colour in shadow)
+        src.setPixel(2, 0, Color.rgb(128, 128, 128)) // grey
+        val adj = ColorAdjustments().withReplacements(listOf(
+            com.example.data.model.ColorReplacement(sourceColor = Color.rgb(220, 30, 30), targetColor = Color.rgb(30, 60, 220), tolerance = 40f)
+        ))
+        val out = com.example.engine.ImageProcessor.applyAdjustments(src, adj)
+        val bright = out.getPixel(0, 0)
+        val dark = out.getPixel(1, 0)
+        assertTrue("bright red becomes blue", Color.blue(bright) > Color.red(bright))
+        assertTrue("shadowed red becomes blue too", Color.blue(dark) > Color.red(dark))
+        assertTrue("shading is kept", Color.blue(dark) < Color.blue(bright))
+        assertEquals(128, Color.red(out.getPixel(2, 0)), 2)
+    }
+
+    @Test
+    fun replaceColor_previewMaskShowsAffectedArea() {
+        val src = Bitmap.createBitmap(2, 1, Bitmap.Config.ARGB_8888)
+        src.setPixel(0, 0, Color.rgb(220, 30, 30))
+        src.setPixel(1, 0, Color.rgb(30, 200, 30))
+        val adj = ColorAdjustments(replacePreviewMask = true).withReplacements(listOf(
+            com.example.data.model.ColorReplacement(sourceColor = Color.rgb(220, 30, 30), targetColor = Color.BLUE, tolerance = 30f)
+        ))
+        val out = com.example.engine.ImageProcessor.applyAdjustments(src, adj)
+        assertTrue(Color.red(out.getPixel(0, 0)) > 240)
+        assertTrue(Color.red(out.getPixel(1, 0)) < 15)
+    }
+
+    @Test
+    fun replaceColor_listSurvivesJsonRoundTrip() {
+        val adj = ColorAdjustments().withReplacements(listOf(
+            com.example.data.model.ColorReplacement(sourceColor = Color.RED, targetColor = Color.GREEN, tolerance = 22f, softness = 70f),
+            com.example.data.model.ColorReplacement(sourceColor = Color.BLUE, targetColor = Color.YELLOW, enabled = false)
+        ))
+        val back = com.example.engine.AdjustmentsJson.fromJson(com.example.engine.AdjustmentsJson.toJson(adj))
+        assertEquals(2, back.colorReplacements.size)
+        assertEquals(22f, back.colorReplacements[0].tolerance, 0.01f)
+        assertEquals(70f, back.colorReplacements[0].softness, 0.01f)
+        assertFalse(back.colorReplacements[1].enabled)
+    }
+
+    // --- HSL -----------------------------------------------------------------------------------------
+
+    @Test
+    fun hslRanges_neighbouringWeightsAddUpToOne() {
+        val w = com.example.data.model.HslRanges.weights(15f)
+        val keys = com.example.data.model.HslRanges.keys
+        assertEquals(0.5f, w[keys.indexOf("REDS")], 0.01f)
+        assertEquals(0.5f, w[keys.indexOf("ORANGES")], 0.01f)
+        assertEquals(1f, w.sum(), 0.01f)
+        val orange = com.example.engine.ImageProcessor.hslRangeWeights(Color.rgb(255, 128, 0))
+        assertEquals("ORANGES", orange.maxByOrNull { it.value }!!.key)
+    }
+
+    @Test
+    fun hslLightness_darkensBlueWithoutGreying() {
+        val src = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply { setPixel(0, 0, Color.rgb(60, 110, 220)) }
+        val adj = ColorAdjustments().withHslBand("BLUES", com.example.data.model.HslBand(lightness = -50f))
+        val out = com.example.engine.ImageProcessor.applyAdjustments(src, adj).getPixel(0, 0)
+        val before = FloatArray(3).also { Color.colorToHSV(Color.rgb(60, 110, 220), it) }
+        val after = FloatArray(3).also { Color.colorToHSV(out, it) }
+        assertTrue("darker", after[2] < before[2] - 0.1f)
+        assertTrue("still clearly blue (not grey), saturation ${after[1]}", after[1] > before[1] * 0.8f)
+        assertEquals(before[0], after[0], 12f)
+    }
+
+    @Test
+    fun colorize_tintsGreys() {
+        val src = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888).apply { setPixel(0, 0, Color.rgb(128, 128, 128)) }
+        val adj = ColorAdjustments(colorizeEnabled = true, colorizeHue = 30f, colorizeSaturation = 50f)
+        val out = com.example.engine.ImageProcessor.applyAdjustments(src, adj).getPixel(0, 0)
+        assertTrue("warm tint expected", Color.red(out) > Color.blue(out) + 20)
+    }
+
+    // --- Selection refine ----------------------------------------------------------------------------
+
+    private fun alphaAt(mask: Bitmap, x: Int, y: Int) = (mask.getPixel(x, y) ushr 24) and 0xFF
+
+    private fun squareSelection(size: Int, x0: Int, y0: Int, x1: Int, y1: Int): Bitmap {
+        val m = Bitmap.createBitmap(size, size, Bitmap.Config.ALPHA_8)
+        android.graphics.Canvas(m).drawRect(x0.toFloat(), y0.toFloat(), (x1 + 1).toFloat(), (y1 + 1).toFloat(), android.graphics.Paint().apply { color = Color.WHITE })
+        return m
+    }
+
+    @Test
+    fun growSelection_isRoundNotSquare() {
+        val m = squareSelection(80, 40, 40, 40, 40) // a single pixel
+        SelectionEngine.shiftEdge(m, 10f)
+        assertTrue("10 px straight out is inside", alphaAt(m, 49, 40) > 128)
+        assertTrue("7,7 diagonal (9.9 px) is inside", alphaAt(m, 47, 47) > 128)
+        assertTrue("9,9 diagonal (12.7 px) stays outside: round, not square", alphaAt(m, 49, 49) < 64)
+    }
+
+    @Test
+    fun shrinkSelection_movesEdgeInward() {
+        val m = squareSelection(80, 20, 20, 59, 59)
+        SelectionEngine.shiftEdge(m, -5f)
+        assertTrue(alphaAt(m, 27, 40) > 200)
+        assertTrue(alphaAt(m, 22, 40) < 30)
+    }
+
+    @Test
+    fun cleanup_removesSpecksAndFillsHoles() {
+        val m = squareSelection(100, 20, 20, 79, 79)
+        android.graphics.Canvas(m).drawRect(50f, 50f, 52f, 52f, android.graphics.Paint().apply { xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.CLEAR) })
+        android.graphics.Canvas(m).drawRect(5f, 5f, 7f, 7f, android.graphics.Paint().apply { color = Color.WHITE })
+        SelectionEngine.cleanupMask(m, 16)
+        assertTrue("hole filled", alphaAt(m, 50, 50) > 200)
+        assertTrue("speck removed", alphaAt(m, 5, 5) < 30)
+    }
+
+    @Test
+    fun border_selectsBandAroundEdge() {
+        val m = squareSelection(100, 20, 20, 79, 79)
+        SelectionEngine.borderMask(m, 10f)
+        assertTrue("on the edge", alphaAt(m, 20, 50) > 200)
+        assertTrue("deep inside is not selected", alphaAt(m, 50, 50) < 30)
+        assertTrue("far outside is not selected", alphaAt(m, 5, 50) < 30)
+    }
+    // --- Quick Selection ------------------------------------------------------------------------
+
+    private fun qsImage(w: Int, h: Int, paint: (Int, Int) -> Int): Bitmap {
+        val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val px = IntArray(w * h) { paint(it % w, it / w) }
+        b.setPixels(px, 0, w, 0, 0, w, h)
+        return b
+    }
+
+    private fun labColor(l: Float, a: Float, b: Float): Int {
+        val out = FloatArray(3)
+        com.example.engine.ImageProcessor.labToRgbF(l, a, b, out)
+        return Color.rgb((out[0] * 255f).toInt().coerceIn(0, 255), (out[1] * 255f).toInt().coerceIn(0, 255), (out[2] * 255f).toInt().coerceIn(0, 255))
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun quickSelection_shortStrokeGrowsToObjectOutline() {
+        // A 100 px red square on white; a tiny brush dab in the middle selects the whole square.
+        val img = qsImage(200, 200) { x, y -> if (x in 50..149 && y in 50..149) Color.RED else Color.WHITE }
+        val mask = Bitmap.createBitmap(200, 200, Bitmap.Config.ALPHA_8)
+        SelectionEngine.quickSelection(mask, listOf(android.graphics.PointF(100f, 100f)), 4f, img, SelectionMode.ADD, tolerance = 35)
+        assertTrue("near the square's corner (far from the brush)", alphaAt(mask, 55, 55) > 200)
+        assertTrue("near the square's edge", alphaAt(mask, 147, 100) > 200)
+        assertTrue("outside the square", alphaAt(mask, 20, 20) < 20)
+        assertTrue("just outside the square", alphaAt(mask, 153, 100) < 40)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun quickSelection_stopsAtColourEdgeWithSameBrightness() {
+        // Same lightness, opposite hue: a brightness-only edge detector would leak across.
+        val left = labColor(55f, 45f, 10f)
+        val right = labColor(55f, -45f, 10f)
+        val img = qsImage(120, 80) { x, _ -> if (x < 60) left else right }
+        val mask = Bitmap.createBitmap(120, 80, Bitmap.Config.ALPHA_8)
+        SelectionEngine.quickSelection(mask, listOf(android.graphics.PointF(30f, 40f)), 6f, img, SelectionMode.ADD, tolerance = 60)
+        assertTrue(alphaAt(mask, 50, 40) > 200)
+        assertTrue("does not cross the hue edge", alphaAt(mask, 64, 40) < 20)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun quickSelection_multiColourObjectIsOneObject() {
+        // A red / yellow striped block on blue: a stroke across the stripes takes the whole block.
+        val img = qsImage(160, 160) { x, y ->
+            if (x in 40..119 && y in 40..119) (if (((y - 40) / 8) % 2 == 0) Color.RED else Color.YELLOW) else Color.BLUE
+        }
+        val mask = Bitmap.createBitmap(160, 160, Bitmap.Config.ALPHA_8)
+        val stroke = (44..76 step 4).map { android.graphics.PointF(80f, it.toFloat()) }
+        SelectionEngine.quickSelection(mask, stroke, 5f, img, SelectionMode.ADD, tolerance = 35)
+        assertTrue("red stripe far from the stroke", alphaAt(mask, 45, 110) > 200 || alphaAt(mask, 45, 106) > 200)
+        assertTrue("yellow stripe far from the stroke", alphaAt(mask, 115, 50) > 200)
+        assertTrue("blue background", alphaAt(mask, 20, 80) < 20)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun quickSelection_subtractRemovesTheObjectSmartly() {
+        val img = qsImage(200, 200) { x, y -> if (x in 50..149 && y in 50..149) Color.RED else Color.WHITE }
+        val mask = Bitmap.createBitmap(200, 200, Bitmap.Config.ALPHA_8).apply { eraseColor(Color.BLACK) }
+        SelectionEngine.quickSelection(mask, listOf(android.graphics.PointF(100f, 100f)), 4f, img, SelectionMode.SUBTRACT, tolerance = 35)
+        assertTrue("the square is removed", alphaAt(mask, 60, 140) < 40)
+        assertTrue("the rest stays selected", alphaAt(mask, 20, 20) > 200)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun quickSelection_edgeIsAntiAliased() {
+        // The source is half the document size: the edge is drawn with sub-pixel coverage.
+        val img = qsImage(100, 100) { x, y -> if (x in 25..74 && y in 25..74) Color.RED else Color.WHITE }
+        val mask = Bitmap.createBitmap(200, 200, Bitmap.Config.ALPHA_8)
+        SelectionEngine.quickSelection(mask, listOf(android.graphics.PointF(100f, 100f)), 6f, img, SelectionMode.ADD, tolerance = 35)
+        assertTrue(alphaAt(mask, 100, 100) > 240)
+        val partial = (146..153).any { alphaAt(mask, it, 100) in 20..235 }
+        assertTrue("soft (anti-aliased) edge values exist", partial)
+    }
+
+    @Test
+    fun quickSelection_toleranceIsIndependentFromMagicWand() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val vm = com.example.ui.viewmodel.EditorViewModel(app)
+        vm.setMagicWandTolerance(80)
+        vm.setQuickSelectionTolerance(20)
+        vm.setQuickSelectionEdgeSensitivity(90)
+        assertEquals(80, vm.uiState.value.magicWandTolerance)
+        assertEquals(20, vm.uiState.value.quickSelectionTolerance)
+        assertEquals(90, vm.uiState.value.quickSelectionEdgeSensitivity)
+    }
+
+    @Test
+    fun quickSelection_guidedFilterKeepsFlatAreas() {
+        val w = 20; val h = 20
+        val g = FloatArray(w * h) { if (it % w < 10) 0f else 1f }
+        val p = FloatArray(w * h) { if (it % w < 10) 0f else 1f }
+        val q = com.example.engine.QuickSelectEngine.guidedFilter(g, p, w, h, 2, 0.0025f)
+        assertTrue(q[5 * w + 2] < 0.05f)
+        assertTrue(q[5 * w + 17] > 0.95f)
     }
 }
