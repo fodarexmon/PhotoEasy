@@ -9,14 +9,27 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
+/**
+ * Every Select-and-Mask setting in one place (the single refine workspace).
+ * Sizes are in pixels of the image being refined.
+ */
 data class RefineEdgeConfig(
+    /** Edge detection band; 0 = no edge detection (only the global refinements below). */
     val radiusPx: Int = 10,
     val smartRadius: Boolean = true,
     val hairRefine: Boolean = true,
-    val smoothPx: Int = 2,
+    /** Removes jagged edges, specks and holes without shrinking the selection. */
+    val smoothPx: Float = 0f,
+    /** Gaussian softness of the edge. */
     val featherPx: Float = 0f,
-    val contrastPercent: Float = 20f,
-    val shiftEdgePercent: Float = 0f,
+    /** Sharpens soft edges around the 50% level (0..100). */
+    val contrastPercent: Float = 0f,
+    /** Moves the edge out (+) or in (-), Euclidean distance (round corners). */
+    val shiftEdgePx: Float = 0f,
+    /** Drops small selected specks and fills small holes. */
+    val removeSpecks: Boolean = false,
+    /** > 0: keep only a band of this width centred on the edge (Select > Modify > Border). */
+    val borderPx: Float = 0f,
     // Off by default: decontamination rewrites the layer's pixels, so it must be an explicit choice.
     val decontaminateColors: Boolean = false,
     val decontaminateAmount: Float = 0.8f
@@ -72,9 +85,21 @@ object RefineEdgeEngine {
 
         // --- 1. Input alpha (+ Shift Edge) -------------------------------------------------------
         var alpha = readMaskAlpha(mask)
-        if (abs(config.shiftEdgePercent) > 1f) {
-            val shift = (abs(config.shiftEdgePercent) / 100f * 15f).roundToInt().coerceIn(1, 15)
-            alpha = morphBytes(alpha, w, h, shift, grow = config.shiftEdgePercent > 0f)
+        // Shift Edge moves the input edge before matting, so hair matting follows the new edge and
+        // soft strands are kept (shifting a finished matte would cut them off).
+        if (abs(config.shiftEdgePx) >= 0.25f) {
+            val m = SelectionEngine.alphaMaskFromPacked(alpha, w, h)
+            try {
+                SelectionEngine.shiftEdge(m, config.shiftEdgePx)
+                alpha = SelectionEngine.alphaBytesPacked(m)
+            } finally {
+                m.recycle()
+            }
+        }
+
+        // No edge detection: only the global refinements.
+        if (config.radiusPx <= 0) {
+            return RefineResult(globalRefinements(alpha, w, h, config), null)
         }
 
         // --- 2. Trimap ---------------------------------------------------------------------------
@@ -139,27 +164,26 @@ object RefineEdgeEngine {
             }
         }
 
-        // --- 5. Global post-processing -----------------------------------------------------------
-        var result = out
-        if (config.smoothPx > 0) result = boxBlurBytes(result, w, h, config.smoothPx.coerceIn(1, 40))
-        if (config.contrastPercent > 0f) {
-            val factor = 1f + (config.contrastPercent / 40f)
-            for (i in 0 until n) {
-                val v = result[i].toInt() and 0xFF
-                if (v in 3..252) {
-                    val a = v / 255f
-                    result[i] = (((a - 0.5f) * factor + 0.5f).coerceIn(0f, 1f) * 255f).roundToInt().toByte()
-                }
-            }
-        }
-        if (config.featherPx > 0.5f) {
-            // Two box passes ≈ a Gaussian of the requested radius.
-            val r = (config.featherPx / 2f).roundToInt().coerceAtLeast(1)
-            result = boxBlurBytes(boxBlurBytes(result, w, h, r), w, h, r)
-        }
+        // --- 5. Global refinements ---------------------------------------------------------------
+        return RefineResult(globalRefinements(out, w, h, config), decontaminated)
+    }
 
-        val maskOut = SelectionEngine.alphaMaskFromPacked(result, w, h)
-        return RefineResult(maskOut, decontaminated)
+    /**
+     * Global refinements in Photoshop's order (smooth -> feather -> contrast), with the same
+     * professional operations used everywhere: speck / hole cleanup, Euclidean smooth, Gaussian
+     * feather, edge contrast and an optional border band. Returns an ALPHA_8 mask.
+     */
+    private fun globalRefinements(alpha: ByteArray, w: Int, h: Int, config: RefineEdgeConfig): Bitmap {
+        val m = SelectionEngine.alphaMaskFromPacked(alpha, w, h)
+        if (config.removeSpecks) {
+            val minArea = ((w.toLong() * h) / 2000L).toInt().coerceIn(16, 20000)
+            SelectionEngine.cleanupMask(m, minArea)
+        }
+        if (config.smoothPx >= 0.5f) SelectionEngine.smoothSelection(m, config.smoothPx)
+        if (config.featherPx >= 0.5f) SelectionEngine.gaussianFeather(m, config.featherPx)
+        if (config.contrastPercent >= 0.5f) SelectionEngine.refineMaskEdges(m, contrastFactor = 1f + config.contrastPercent / 12.5f)
+        if (config.borderPx >= 1f) SelectionEngine.borderMask(m, config.borderPx)
+        return m
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -680,7 +704,7 @@ object RefineEdgeEngine {
         val refined = refineEdges(
             source = source,
             mask = subjectMask,
-            config = RefineEdgeConfig(radiusPx = 6, smoothPx = 2, hairRefine = true, contrastPercent = 30f, decontaminateColors = false)
+            config = RefineEdgeConfig(radiusPx = 6, smoothPx = 1f, hairRefine = true, contrastPercent = 12f, decontaminateColors = false)
         )
         subjectMask.recycle()
         refined.decontaminatedSource?.let { if (!it.isRecycled) it.recycle() }

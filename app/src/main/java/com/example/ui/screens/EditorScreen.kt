@@ -133,7 +133,7 @@ import com.example.ui.viewmodel.EditorUiState
 fun EditorScreen(
     viewModel: EditorViewModel,
     uiState: EditorUiState,
-    onExportConfirm: (isPng: Boolean, quality: Int) -> Unit
+    onExportConfirm: (com.example.engine.ExportSettings) -> Unit
 ) {
     val project = uiState.currentProject ?: return
     val renderRevision = uiState.renderRevision
@@ -231,11 +231,6 @@ fun EditorScreen(
     val onEllipseSelection: (PointF, PointF) -> Unit = { a, b -> viewModel.applyEllipseSelection(a, b) }
     val onPolygonComplete: (List<PointF>) -> Unit = { points -> viewModel.applyPolygonSelection(points) }
     val onMagicWandTap: (Int, Int) -> Unit = { x, y -> viewModel.applyMagicWand(x, y) }
-    val onFeatherSelection: (Float) -> Unit = { r -> viewModel.featherSelection(r) }
-    val onGrowSelection: (Int) -> Unit = { r -> viewModel.growSelection(r) }
-    val onShrinkSelection: (Int) -> Unit = { r -> viewModel.shrinkSelection(r) }
-    val onSmoothSelection: (Int) -> Unit = { r -> viewModel.smoothSelection(r) }
-    val onRefineSelectionEdge: () -> Unit = { viewModel.refineSelectionEdge() }
     val onSelectAll: () -> Unit = { viewModel.selectAll() }
     val onInvertSelection: () -> Unit = { viewModel.invertSelection() }
     val onClearSelection: () -> Unit = { viewModel.clearSelection() }
@@ -278,16 +273,6 @@ fun EditorScreen(
     val onTemporarySubtract: ((Boolean) -> Unit) = { held ->
         viewModel.setSelectionModeOverride(if (held) com.example.data.model.SelectionMode.SUBTRACT else null)
     }
-    val modifierOp = uiState.selectionModifierOp
-    val modifierAmount = uiState.selectionModifierAmount
-    val onModifierPreview: (com.example.ui.viewmodel.SelectionModifierOp, Float) -> Unit = { op, amount -> viewModel.previewSelectionModifier(op, amount) }
-    val onModifierCommit: () -> Unit = { viewModel.endSelectionModifier() }
-    val selectionRefine = uiState.selectionRefine
-    val onSelectionRefinePreview: (com.example.ui.viewmodel.SelectionRefineParams) -> Unit = { viewModel.previewSelectionRefine(it) }
-    val onSelectionRefineApply: () -> Unit = { viewModel.applySelectionRefine() }
-    val onSelectionRefineReset: () -> Unit = { viewModel.resetSelectionRefine() }
-    val onBorderSelection: (Float) -> Unit = { viewModel.borderSelection(it) }
-    val onCleanupSelection: () -> Unit = { viewModel.cleanupSelection() }
     val isQuickAutoEnhance = uiState.isQuickSelectionAutoEnhance
     val onToggleQuickAutoEnhance: (Boolean) -> Unit = { viewModel.setQuickSelectionAutoEnhance(it) }
     val isQuickSampleAll = uiState.isQuickSelectionSampleAll
@@ -604,23 +589,38 @@ fun EditorScreen(
     val shareLabel = stringResource(R.string.action_share)
     LaunchedEffect(exportSuccessUri) {
         val uri = exportSuccessUri ?: return@LaunchedEffect
-        val result = snackbarHostState.showSnackbar(
-            message = exportedText,
-            actionLabel = shareLabel,
-            duration = SnackbarDuration.Long
-        )
-        if (result == SnackbarResult.ActionPerformed) {
+        val uris = uiState.exportSuccessUris.ifEmpty { listOf(uri) }
+        fun share() {
             val mime = try { context.contentResolver.getType(uri) } catch (_: Exception) { null } ?: "image/*"
-            val send = Intent(Intent.ACTION_SEND).apply {
-                type = mime
-                putExtra(Intent.EXTRA_STREAM, uri)
-                clipData = ClipData.newRawUri(null, uri)
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            val send = if (uris.size > 1) {
+                Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                    type = "image/*"
+                    putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
+                    clipData = ClipData.newRawUri(null, uris[0]).also { cd -> uris.drop(1).forEach { cd.addItem(ClipData.Item(it)) } }
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
+            } else {
+                Intent(Intent.ACTION_SEND).apply {
+                    type = mime
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    clipData = ClipData.newRawUri(null, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                }
             }
             try {
                 context.startActivity(Intent.createChooser(send, shareLabel).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
             } catch (_: Exception) {
             }
+        }
+        if (uiState.exportSettings.shareAfter) {
+            share()
+        } else {
+            val result = snackbarHostState.showSnackbar(
+                message = exportedText,
+                actionLabel = shareLabel,
+                duration = SnackbarDuration.Long
+            )
+            if (result == SnackbarResult.ActionPerformed) share()
         }
         onExportResultConsumed()
     }
@@ -711,7 +711,7 @@ fun EditorScreen(
                         maxLines = 1
                     )
                     // A Pro effect being applied: progress and cancel.
-                    val prog = proEffectProgress
+                    val prog = proEffectProgress ?: uiState.exportProgress
                     if (prog != null) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             androidx.compose.material3.LinearProgressIndicator(
@@ -720,7 +720,7 @@ fun EditorScreen(
                                 color = AmberAccent
                             )
                             androidx.compose.material3.TextButton(
-                                onClick = onCancelProEffect,
+                                onClick = { if (proEffectProgress != null) onCancelProEffect() else viewModel.cancelExport() },
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                                 modifier = Modifier.heightIn(min = 32.dp).testTag("btn_cancel_pro_effect")
                             ) {
@@ -968,11 +968,6 @@ fun EditorScreen(
                             onBrushSizeChange = onBrushSizeChange,
                             onToleranceChange = onToleranceChange,
                             onToggleContiguous = onToggleMagicWandContiguous,
-                            onFeatherClick = onFeatherSelection,
-                            onGrowClick = onGrowSelection,
-                            onShrinkClick = onShrinkSelection,
-                            onSmoothClick = onSmoothSelection,
-                            onRefineClick = onRefineSelectionEdge,
                             onSelectAllClick = onSelectAll,
                             onInvertClick = onInvertSelection,
                             onClearClick = onClearSelection,
@@ -997,17 +992,7 @@ fun EditorScreen(
                             onToggleShapeFromCenter = onToggleShapeFromCenter,
                             shapeLockSquare = shapeLockSquare,
                             onToggleShapeLockSquare = onToggleShapeLockSquare,
-                            modifierOp = modifierOp,
-                            modifierAmount = modifierAmount,
-                            onModifierPreview = onModifierPreview,
-                            onModifierCommit = onModifierCommit,
-                            refineParams = selectionRefine,
-                            onRefinePreview = onSelectionRefinePreview,
-                            onRefineApply = onSelectionRefineApply,
-                            onRefineReset = onSelectionRefineReset,
-                            onBorderSelection = onBorderSelection,
-                            onCleanupSelection = onCleanupSelection,
-                            documentMaxDim = maxOf(project.width, project.height)
+
                         )
                     }
 
@@ -1557,14 +1542,55 @@ fun EditorScreen(
         }
     }
 
+    // "Save to Files": a document (one image) or a folder (each layer separately).
+    var pendingFileExport by remember { mutableStateOf<com.example.engine.ExportSettings?>(null) }
+    fun onDocPicked(uri: Uri?) {
+        val s = pendingFileExport
+        pendingFileExport = null
+        if (uri != null && s != null) viewModel.exportImage(s, target = uri)
+    }
+    val createJpeg = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/jpeg")) { onDocPicked(it) }
+    val createPng = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/png")) { onDocPicked(it) }
+    val createWebp = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/webp")) { onDocPicked(it) }
+    val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
+        val s = pendingFileExport
+        pendingFileExport = null
+        if (tree != null && s != null) viewModel.exportImage(s, treeUri = tree)
+    }
+
     if (showExportDialog) {
+        LaunchedEffect(Unit) { viewModel.prepareExportSettings() }
         ExportDialog(
-            width = project.width,
-            height = project.height,
-            onDismiss = { showExportDialog = false },
-            onExportConfirm = { isPng, quality ->
+            settings = uiState.exportSettings,
+            estimate = uiState.exportEstimate,
+            hasSelection = hasActiveSelectionCached,
+            hasBackgroundFill = com.example.engine.ExportEngine.hasBackgroundFill(project.layers),
+            layerCount = com.example.engine.ExportEngine.layerGroups(project.layers).size,
+            onSettingsChange = { viewModel.updateExportSettings(it) },
+            onRequestEstimate = { viewModel.requestExportEstimate(it) },
+            onDismiss = {
                 showExportDialog = false
-                onExportConfirm(isPng, quality)
+                viewModel.clearExportEstimate()
+            },
+            onExport = { s ->
+                showExportDialog = false
+                viewModel.clearExportEstimate()
+                if (s.destination == com.example.engine.ExportDestination.FILES) {
+                    pendingFileExport = s
+                    val name = com.example.engine.ExportEngine.safeFileName(s.fileName.ifBlank { project.name }) + "." + s.format.extension
+                    try {
+                        when {
+                            s.scope == com.example.engine.ExportScope.LAYERS -> pickFolder.launch(null)
+                            s.format == com.example.engine.ExportFormat.JPEG -> createJpeg.launch(name)
+                            s.format == com.example.engine.ExportFormat.PNG -> createPng.launch(name)
+                            else -> createWebp.launch(name)
+                        }
+                    } catch (e: Exception) {
+                        pendingFileExport = null
+                    }
+                } else {
+                    onExportConfirm(s)
+                }
             }
         )
     }
@@ -1594,9 +1620,11 @@ fun EditorScreen(
             onDismiss = onCloseRefineEdgeDialog,
             onApply = onApplyRefineEdge,
             preview = refinePreview,
+            previewOriginal = uiState.refinePreviewOriginal,
             previewMode = refinePreviewMode,
             onPreviewModeChange = onRefinePreviewModeChange,
-            onRequestPreview = onRequestRefinePreview
+            onRequestPreview = onRequestRefinePreview,
+            documentMaxDim = maxOf(project.width, project.height)
         )
     }
 }

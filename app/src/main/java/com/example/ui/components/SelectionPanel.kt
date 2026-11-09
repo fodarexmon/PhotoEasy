@@ -59,11 +59,6 @@ fun SelectionPanel(
     onBrushSizeChange: (Float) -> Unit,
     onToleranceChange: (Int) -> Unit,
     onToggleContiguous: (Boolean) -> Unit = {},
-    onFeatherClick: (Float) -> Unit,
-    onGrowClick: (Int) -> Unit,
-    onShrinkClick: (Int) -> Unit,
-    onSmoothClick: (Int) -> Unit,
-    onRefineClick: () -> Unit,
     onSelectAllClick: () -> Unit,
     onInvertClick: () -> Unit,
     onClearClick: () -> Unit,
@@ -80,23 +75,8 @@ fun SelectionPanel(
     onToggleShapeFromCenter: (Boolean) -> Unit = {},
     shapeLockSquare: Boolean = false,
     onToggleShapeLockSquare: (Boolean) -> Unit = {},
-    modifierOp: com.example.ui.viewmodel.SelectionModifierOp = com.example.ui.viewmodel.SelectionModifierOp.FEATHER,
-    modifierAmount: Float = 5f,
-    onModifierPreview: (com.example.ui.viewmodel.SelectionModifierOp, Float) -> Unit = { _, _ -> },
-    onModifierCommit: () -> Unit = {},
-    /** Live refine (shift / smooth / feather / contrast together). */
-    refineParams: com.example.ui.viewmodel.SelectionRefineParams = com.example.ui.viewmodel.SelectionRefineParams(),
-    onRefinePreview: (com.example.ui.viewmodel.SelectionRefineParams) -> Unit = {},
-    onRefineApply: () -> Unit = {},
-    onRefineReset: () -> Unit = {},
-    onBorderSelection: (Float) -> Unit = {},
-    onCleanupSelection: () -> Unit = {},
-    /** Longest side of the document: slider ranges scale with the image. */
-    documentMaxDim: Int = 2000,
     modifier: Modifier = Modifier
 ) {
-    var showRefine by remember { mutableStateOf(false) }
-
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -403,7 +383,7 @@ fun SelectionPanel(
             }
         }
 
-        // Quick Refine & Undo/Redo Action Row
+        // Selection undo / redo. All refinement lives in one place: Refine Edge & Hair.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -411,96 +391,17 @@ fun SelectionPanel(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            OutlinedButton(
-                onClick = { showRefine = !showRefine },
-                modifier = Modifier.weight(1f).heightIn(min = 44.dp)
-            ) {
-                Text(stringResource(R.string.selection_refine_group), fontSize = 12.sp)
-                Spacer(Modifier.width(4.dp))
-                Icon(Icons.Default.ExpandMore, contentDescription = null)
-            }
+            Text(
+                stringResource(R.string.select_refine_moved_hint),
+                color = Color.Gray,
+                fontSize = 11.sp,
+                modifier = Modifier.weight(1f)
+            )
             IconButton(onClick = onUndoSelection, enabled = canUndoSelection, modifier = Modifier.size(44.dp)) {
                 Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = stringResource(R.string.selection_undo))
             }
             IconButton(onClick = onRedoSelection, enabled = canRedoSelection, modifier = Modifier.size(44.dp)) {
                 Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = stringResource(R.string.selection_redo))
-            }
-        }
-
-        AnimatedVisibility(showRefine) {
-            // All four settings preview together on the selection; Apply keeps them (one undo step).
-            val maxPx = kotlin.math.max(20f, documentMaxDim / 25f)
-            var borderWidth by remember { mutableFloatStateOf(10f) }
-            Column {
-                SelectionSlider(
-                    label = stringResource(R.string.select_shift_edge),
-                    valueLabel = "${if (refineParams.shift > 0f) "+" else ""}${kotlin.math.round(refineParams.shift).toInt()} px",
-                    value = refineParams.shift,
-                    valueRange = -maxPx..maxPx,
-                    onValueChange = { onRefinePreview(refineParams.copy(shift = it)) },
-                    onValueChangeFinished = {}
-                )
-                SelectionSlider(
-                    label = stringResource(R.string.select_smooth),
-                    valueLabel = "${kotlin.math.round(refineParams.smooth).toInt()} px",
-                    value = refineParams.smooth,
-                    valueRange = 0f..(maxPx / 2f),
-                    onValueChange = { onRefinePreview(refineParams.copy(smooth = it)) },
-                    onValueChangeFinished = {}
-                )
-                SelectionSlider(
-                    label = stringResource(R.string.select_feather),
-                    valueLabel = "${kotlin.math.round(refineParams.feather).toInt()} px",
-                    value = refineParams.feather,
-                    valueRange = 0f..maxPx,
-                    onValueChange = { onRefinePreview(refineParams.copy(feather = it)) },
-                    onValueChangeFinished = {}
-                )
-                SelectionSlider(
-                    label = stringResource(R.string.select_edge_contrast),
-                    valueLabel = "${kotlin.math.round(refineParams.contrast).toInt()}%",
-                    value = refineParams.contrast,
-                    valueRange = 0f..100f,
-                    onValueChange = { onRefinePreview(refineParams.copy(contrast = it)) },
-                    onValueChangeFinished = {}
-                )
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = onRefineReset,
-                        enabled = !refineParams.isIdentity(),
-                        modifier = Modifier.weight(1f).heightIn(min = 44.dp)
-                    ) { Text(stringResource(R.string.action_reset), fontSize = 12.sp) }
-                    Button(
-                        onClick = onRefineApply,
-                        enabled = !refineParams.isIdentity(),
-                        colors = ButtonDefaults.buttonColors(containerColor = IndigoPrimary),
-                        modifier = Modifier.weight(1f).heightIn(min = 44.dp).testTag("btn_apply_refine")
-                    ) { Text(stringResource(R.string.action_apply), fontSize = 12.sp, fontWeight = FontWeight.Bold) }
-                }
-                // One-shot tools.
-                Row(
-                    Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp, vertical = 2.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    OutlinedButton(onClick = onCleanupSelection, modifier = Modifier.heightIn(min = 44.dp).testTag("btn_cleanup_selection")) {
-                        Text(stringResource(R.string.select_cleanup), fontSize = 12.sp)
-                    }
-                    OutlinedButton(onClick = { onBorderSelection(borderWidth) }, modifier = Modifier.heightIn(min = 44.dp).testTag("btn_border_selection")) {
-                        Text(stringResource(R.string.select_border_width, kotlin.math.round(borderWidth).toInt()), fontSize = 12.sp)
-                    }
-                }
-                SelectionSlider(
-                    label = stringResource(R.string.select_border),
-                    valueLabel = "${kotlin.math.round(borderWidth).toInt()} px",
-                    value = borderWidth,
-                    valueRange = 2f..maxPx,
-                    onValueChange = { borderWidth = it },
-                    onValueChangeFinished = {}
-                )
             }
         }
 

@@ -2,8 +2,9 @@ package com.example.ui.components
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -17,7 +18,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -32,7 +38,15 @@ import com.example.ui.theme.IndigoPrimary
 import com.example.ui.theme.PinkAccent
 import com.example.ui.theme.StudioSurface
 import com.example.ui.theme.StudioSurfaceVariant
+import kotlin.math.max
+import kotlin.math.round
 
+/**
+ * The single selection-refine workspace ("Select and Mask"): edge detection and hair matting,
+ * global refinements (smooth, feather, contrast, shift edge), clean-up and border, colour
+ * decontamination. Every change is previewed instantly (a fast pass, then a detailed one);
+ * the preview can be zoomed (pinch, double-tap resets) and compared with the original (hold Before).
+ */
 @Composable
 fun RefineEdgeDialog(
     initialConfig: RefineEdgeConfig = RefineEdgeConfig(),
@@ -40,36 +54,23 @@ fun RefineEdgeDialog(
     onApply: (RefineEdgeConfig) -> Unit,
     /** Live preview of the refined selection (null while computing / unavailable). */
     preview: android.graphics.Bitmap? = null,
+    /** The same area before refinement (shown while Before is held). */
+    previewOriginal: android.graphics.Bitmap? = null,
     previewMode: com.example.ui.viewmodel.RefinePreviewMode = com.example.ui.viewmodel.RefinePreviewMode.OVERLAY,
     onPreviewModeChange: (com.example.ui.viewmodel.RefinePreviewMode) -> Unit = {},
-    onRequestPreview: (RefineEdgeConfig) -> Unit = {}
+    onRequestPreview: (RefineEdgeConfig) -> Unit = {},
+    /** Longest side of the image: slider ranges scale with it. */
+    documentMaxDim: Int = 2000
 ) {
-    var radiusPx by remember { mutableFloatStateOf(initialConfig.radiusPx.toFloat()) }
-    var smartRadius by remember { mutableStateOf(initialConfig.smartRadius) }
-    var hairRefine by remember { mutableStateOf(initialConfig.hairRefine) }
-    var smoothPx by remember { mutableFloatStateOf(initialConfig.smoothPx.toFloat()) }
-    var featherPx by remember { mutableFloatStateOf(initialConfig.featherPx) }
-    var contrastPercent by remember { mutableFloatStateOf(initialConfig.contrastPercent) }
-    var shiftEdgePercent by remember { mutableFloatStateOf(initialConfig.shiftEdgePercent) }
-    var decontaminate by remember { mutableStateOf(initialConfig.decontaminateColors) }
-    var decontamAmount by remember { mutableFloatStateOf(initialConfig.decontaminateAmount) }
+    var cfg by remember { mutableStateOf(initialConfig) }
+    val maxPx = max(20f, documentMaxDim / 25f)
 
-    fun currentConfig() = RefineEdgeConfig(
-        radiusPx = radiusPx.toInt(),
-        smartRadius = smartRadius,
-        hairRefine = hairRefine,
-        smoothPx = smoothPx.toInt(),
-        featherPx = featherPx,
-        contrastPercent = contrastPercent,
-        shiftEdgePercent = shiftEdgePercent,
-        decontaminateColors = decontaminate,
-        decontaminateAmount = decontamAmount
-    )
+    // Every change re-renders the preview (the ViewModel debounces briefly).
+    LaunchedEffect(cfg, previewMode) { onRequestPreview(cfg) }
 
-    // Every change re-renders the preview (the ViewModel debounces).
-    LaunchedEffect(radiusPx, smartRadius, hairRefine, smoothPx, featherPx, contrastPercent, shiftEdgePercent, decontaminate, decontamAmount, previewMode) {
-        onRequestPreview(currentConfig())
-    }
+    var zoom by remember { mutableFloatStateOf(1f) }
+    var pan by remember { mutableStateOf(Offset.Zero) }
+    var showBefore by remember { mutableStateOf(false) }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -80,15 +81,11 @@ fun RefineEdgeDialog(
             color = StudioSurface,
             border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
             modifier = Modifier
-                .fillMaxWidth(0.94f)
-                .fillMaxHeight(0.85f)
-                .padding(8.dp)
+                .fillMaxWidth(0.96f)
+                .fillMaxHeight(0.94f)
+                .padding(6.dp)
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(16.dp)
-            ) {
+            Column(modifier = Modifier.fillMaxSize().padding(14.dp)) {
                 // Header
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -105,35 +102,92 @@ fun RefineEdgeDialog(
                             fontSize = 15.sp
                         )
                     }
-                    IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(40.dp)) {
                         Icon(Icons.Default.Close, contentDescription = stringResource(R.string.action_cancel), tint = Color.LightGray)
                     }
                 }
 
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(6.dp))
 
-                // Live preview of the selected area with the current settings
+                // Large, zoomable live preview.
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(170.dp)
-                        .background(Color.Black.copy(alpha = 0.35f), RoundedCornerShape(12.dp)),
+                        .weight(0.95f)
+                        .clipToBounds()
+                        .background(Color.Black.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
+                        .pointerInput(Unit) {
+                            detectTransformGestures { _, panChange, zoomChange, _ ->
+                                zoom = (zoom * zoomChange).coerceIn(1f, 8f)
+                                pan = if (zoom <= 1.001f) Offset.Zero else pan + panChange
+                            }
+                        }
+                        .pointerInput(Unit) {
+                            detectTapGestures(onDoubleTap = { zoom = 1f; pan = Offset.Zero })
+                        }
+                        .testTag("refine_preview"),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (preview != null && !preview.isRecycled) {
+                    val shown = if (showBefore) previewOriginal ?: preview else preview
+                    if (shown != null && !shown.isRecycled) {
                         androidx.compose.foundation.Image(
-                            bitmap = preview.asImageBitmap(),
+                            bitmap = shown.asImageBitmap(),
                             contentDescription = stringResource(R.string.refine_preview),
                             contentScale = androidx.compose.ui.layout.ContentScale.Fit,
-                            modifier = Modifier.fillMaxSize().padding(4.dp)
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(4.dp)
+                                .graphicsLayer(scaleX = zoom, scaleY = zoom, translationX = pan.x, translationY = pan.y)
                         )
                     } else {
                         CircularProgressIndicator(color = IndigoPrimary, modifier = Modifier.size(28.dp))
                     }
+                    // Hold to compare with the selection before refinement.
+                    Surface(
+                        color = Color.Black.copy(alpha = 0.6f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(6.dp)
+                            .heightIn(min = 36.dp)
+                            .pointerInput(Unit) {
+                                detectTapGestures(onPress = {
+                                    showBefore = true
+                                    tryAwaitRelease()
+                                    showBefore = false
+                                })
+                            }
+                            .testTag("btn_refine_before")
+                    ) {
+                        Text(
+                            stringResource(R.string.refine_before),
+                            color = if (showBefore) CyanAccent else Color.White,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp)
+                        )
+                    }
+                    if (zoom > 1.01f) {
+                        Text(
+                            "${round(zoom * 100f).toInt()}%",
+                            color = Color.White,
+                            fontSize = 10.sp,
+                            modifier = Modifier
+                                .align(Alignment.TopStart)
+                                .padding(8.dp)
+                                .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        )
+                    }
                 }
-                Spacer(Modifier.height(6.dp))
+                Text(
+                    stringResource(R.string.refine_zoom_hint),
+                    color = Color.Gray,
+                    fontSize = 10.sp,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
                 Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     listOf(
@@ -145,188 +199,202 @@ fun RefineEdgeDialog(
                         FilterChip(
                             selected = previewMode == mode,
                             onClick = { onPreviewModeChange(mode) },
-                            label = { Text(stringResource(label), fontSize = 11.sp) }
+                            label = { Text(stringResource(label), fontSize = 11.sp) },
+                            modifier = Modifier.heightIn(min = 36.dp)
                         )
                     }
                 }
 
-                Spacer(Modifier.height(6.dp))
-
-                // Scrollable Controls
+                // Controls
                 Column(
                     modifier = Modifier
                         .weight(1f)
                         .verticalScroll(rememberScrollState())
-                        .padding(vertical = 4.dp),
+                        .padding(vertical = 2.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    // 1. Edge Detection & Hair Extraction Card
-                    Surface(
-                        color = StudioSurfaceVariant.copy(alpha = 0.65f),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(
-                                stringResource(R.string.refine_radius) + ": ${radiusPx.toInt()} px",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp
-                            )
-                            Slider(
-                                value = radiusPx,
-                                onValueChange = { radiusPx = it },
-                                valueRange = 1f..40f,
-                                colors = SliderDefaults.colors(thumbColor = IndigoPrimary, activeTrackColor = IndigoPrimary)
-                            )
-
-                            // Smart Radius Switch
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(stringResource(R.string.refine_smart_radius), color = Color.White, fontSize = 12.sp)
-                                Switch(
-                                    checked = smartRadius,
-                                    onCheckedChange = { smartRadius = it },
-                                    colors = SwitchDefaults.colors(checkedThumbColor = IndigoPrimary)
-                                )
-                            }
-
-                            HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
-
-                            // Hair Refine Switch
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = PinkAccent, modifier = Modifier.size(16.dp))
-                                        Spacer(Modifier.width(6.dp))
-                                        Text(stringResource(R.string.refine_hair), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                                    }
-                                    Text(stringResource(R.string.refine_hair_desc), color = Color.Gray, fontSize = 10.sp)
-                                }
-                                Switch(
-                                    checked = hairRefine,
-                                    onCheckedChange = { hairRefine = it },
-                                    colors = SwitchDefaults.colors(checkedThumbColor = PinkAccent, checkedTrackColor = PinkAccent.copy(alpha = 0.4f))
-                                )
-                            }
-                        }
+                    // 1. Edge detection & hair
+                    RefineCard {
+                        Text(stringResource(R.string.refine_edge_detection), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        RefineSliderItem(
+                            label = stringResource(R.string.refine_radius),
+                            valueLabel = if (cfg.radiusPx <= 0) stringResource(R.string.refine_off) else "${cfg.radiusPx} px",
+                            value = cfg.radiusPx.toFloat(),
+                            range = 0f..64f,
+                            onValueChange = { cfg = cfg.copy(radiusPx = round(it).toInt()) }
+                        )
+                        RefineSwitchRow(
+                            title = stringResource(R.string.refine_smart_radius),
+                            description = null,
+                            checked = cfg.smartRadius,
+                            enabled = cfg.radiusPx > 0,
+                            color = IndigoPrimary
+                        ) { cfg = cfg.copy(smartRadius = it) }
+                        HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+                        RefineSwitchRow(
+                            title = stringResource(R.string.refine_hair),
+                            description = stringResource(R.string.refine_hair_desc),
+                            checked = cfg.hairRefine,
+                            enabled = cfg.radiusPx > 0,
+                            color = PinkAccent,
+                            icon = true
+                        ) { cfg = cfg.copy(hairRefine = it) }
                     }
 
-                    // 2. Global Edge Polish Card
-                    Surface(
-                        color = StudioSurfaceVariant.copy(alpha = 0.65f),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(stringResource(R.string.refine_global_adjustments), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-
-                            // Smooth
-                            RefineSliderItem(
-                                label = stringResource(R.string.refine_smooth),
-                                valueLabel = "${smoothPx.toInt()} px",
-                                value = smoothPx,
-                                range = 0f..20f,
-                                onValueChange = { smoothPx = it }
-                            )
-
-                            // Feather
-                            RefineSliderItem(
-                                label = stringResource(R.string.refine_feather),
-                                valueLabel = "${featherPx.toInt()} px",
-                                value = featherPx,
-                                range = 0f..20f,
-                                onValueChange = { featherPx = it }
-                            )
-
-                            // Contrast
-                            RefineSliderItem(
-                                label = stringResource(R.string.refine_contrast),
-                                valueLabel = "${contrastPercent.toInt()}%",
-                                value = contrastPercent,
-                                range = 0f..100f,
-                                onValueChange = { contrastPercent = it }
-                            )
-
-                            // Shift Edge
-                            RefineSliderItem(
-                                label = stringResource(R.string.refine_shift_edge),
-                                valueLabel = "${shiftEdgePercent.toInt()}%",
-                                value = shiftEdgePercent,
-                                range = -100f..100f,
-                                onValueChange = { shiftEdgePercent = it }
-                            )
-                        }
+                    // 2. Global refinements
+                    RefineCard {
+                        Text(stringResource(R.string.refine_global_adjustments), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        RefineSliderItem(
+                            label = stringResource(R.string.refine_smooth),
+                            valueLabel = pxLabel(cfg.smoothPx),
+                            value = cfg.smoothPx,
+                            range = 0f..(maxPx / 2f),
+                            onValueChange = { cfg = cfg.copy(smoothPx = it) }
+                        )
+                        RefineSliderItem(
+                            label = stringResource(R.string.refine_feather),
+                            valueLabel = pxLabel(cfg.featherPx),
+                            value = cfg.featherPx,
+                            range = 0f..maxPx,
+                            onValueChange = { cfg = cfg.copy(featherPx = it) }
+                        )
+                        RefineSliderItem(
+                            label = stringResource(R.string.refine_contrast),
+                            valueLabel = "${round(cfg.contrastPercent).toInt()}%",
+                            value = cfg.contrastPercent,
+                            range = 0f..100f,
+                            onValueChange = { cfg = cfg.copy(contrastPercent = it) }
+                        )
+                        RefineSliderItem(
+                            label = stringResource(R.string.refine_shift_edge),
+                            valueLabel = (if (cfg.shiftEdgePx > 0.05f) "+" else "") + pxLabel(cfg.shiftEdgePx),
+                            value = cfg.shiftEdgePx,
+                            range = -maxPx..maxPx,
+                            onValueChange = { cfg = cfg.copy(shiftEdgePx = it) }
+                        )
                     }
 
-                    // 3. Decontaminate Colors Card
-                    Surface(
-                        color = StudioSurfaceVariant.copy(alpha = 0.65f),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(stringResource(R.string.refine_decontaminate), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                                    Text(stringResource(R.string.refine_decontaminate_desc), color = Color.Gray, fontSize = 10.sp)
-                                }
-                                Switch(
-                                    checked = decontaminate,
-                                    onCheckedChange = { decontaminate = it },
-                                    colors = SwitchDefaults.colors(checkedThumbColor = CyanAccent, checkedTrackColor = CyanAccent.copy(alpha = 0.4f))
-                                )
-                            }
+                    // 3. Clean-up & output
+                    RefineCard {
+                        Text(stringResource(R.string.refine_output_section), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        RefineSwitchRow(
+                            title = stringResource(R.string.select_cleanup),
+                            description = null,
+                            checked = cfg.removeSpecks,
+                            color = IndigoPrimary
+                        ) { cfg = cfg.copy(removeSpecks = it) }
+                        RefineSliderItem(
+                            label = stringResource(R.string.select_border),
+                            valueLabel = if (cfg.borderPx < 1f) stringResource(R.string.refine_off) else pxLabel(cfg.borderPx),
+                            value = cfg.borderPx,
+                            range = 0f..maxPx,
+                            onValueChange = { cfg = cfg.copy(borderPx = if (it < 1f) 0f else it) }
+                        )
+                    }
 
-                            if (decontaminate) {
-                                RefineSliderItem(
-                                    label = stringResource(R.string.refine_decontaminate_amount),
-                                    valueLabel = "${(decontamAmount * 100).toInt()}%",
-                                    value = decontamAmount,
-                                    range = 0.1f..1.0f,
-                                    onValueChange = { decontamAmount = it }
-                                )
-                            }
+                    // 4. Decontaminate colours
+                    RefineCard {
+                        RefineSwitchRow(
+                            title = stringResource(R.string.refine_decontaminate),
+                            description = stringResource(R.string.refine_decontaminate_desc),
+                            checked = cfg.decontaminateColors,
+                            enabled = cfg.radiusPx > 0,
+                            color = CyanAccent
+                        ) { cfg = cfg.copy(decontaminateColors = it) }
+                        if (cfg.decontaminateColors && cfg.radiusPx > 0) {
+                            RefineSliderItem(
+                                label = stringResource(R.string.refine_decontaminate_amount),
+                                valueLabel = "${(cfg.decontaminateAmount * 100).toInt()}%",
+                                value = cfg.decontaminateAmount,
+                                range = 0.1f..1.0f,
+                                onValueChange = { cfg = cfg.copy(decontaminateAmount = it) }
+                            )
                         }
                     }
                 }
 
                 Spacer(Modifier.height(8.dp))
 
-                // Bottom Actions
+                // Bottom actions
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
+                    OutlinedButton(
+                        onClick = { cfg = RefineEdgeConfig() },
+                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("btn_reset_refine_edge")
+                    ) {
+                        Text(stringResource(R.string.action_reset), fontSize = 12.sp, maxLines = 1)
+                    }
                     OutlinedButton(
                         onClick = onDismiss,
                         modifier = Modifier.weight(1f).heightIn(min = 48.dp)
                     ) {
-                        Text(stringResource(R.string.action_cancel), fontSize = 12.sp)
+                        Text(stringResource(R.string.action_cancel), fontSize = 12.sp, maxLines = 1)
                     }
                     Button(
-                        onClick = { onApply(currentConfig()) },
+                        onClick = { onApply(cfg) },
                         colors = ButtonDefaults.buttonColors(containerColor = IndigoPrimary),
-                        modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("btn_apply_refine_edge")
+                        modifier = Modifier.weight(1.3f).heightIn(min = 48.dp).testTag("btn_apply_refine_edge")
                     ) {
                         Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text(stringResource(R.string.action_done), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Text(stringResource(R.string.action_done), fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1)
                     }
                 }
             }
         }
+    }
+}
+
+private fun pxLabel(v: Float): String {
+    val a = kotlin.math.abs(v)
+    val shown = if (a < 10f) (round(v * 10f) / 10f).toString() else round(v).toInt().toString()
+    return "$shown px"
+}
+
+@Composable
+private fun RefineCard(content: @Composable ColumnScope.() -> Unit) {
+    Surface(
+        color = StudioSurfaceVariant.copy(alpha = 0.65f),
+        shape = RoundedCornerShape(12.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp), content = content)
+    }
+}
+
+@Composable
+private fun RefineSwitchRow(
+    title: String,
+    description: String?,
+    checked: Boolean,
+    enabled: Boolean = true,
+    color: Color,
+    icon: Boolean = false,
+    onChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (icon) {
+                    Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = color, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text(title, color = if (enabled) Color.White else Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+            if (description != null) Text(description, color = Color.Gray, fontSize = 10.sp)
+        }
+        Switch(
+            checked = checked,
+            enabled = enabled,
+            onCheckedChange = onChange,
+            colors = SwitchDefaults.colors(checkedThumbColor = color, checkedTrackColor = color.copy(alpha = 0.4f))
+        )
     }
 }
 
@@ -344,7 +412,7 @@ private fun RefineSliderItem(
             Text(valueLabel, color = IndigoPrimary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
         }
         Slider(
-            value = value,
+            value = value.coerceIn(range.start, range.endInclusive),
             onValueChange = onValueChange,
             valueRange = range,
             colors = SliderDefaults.colors(thumbColor = IndigoPrimary, activeTrackColor = IndigoPrimary)

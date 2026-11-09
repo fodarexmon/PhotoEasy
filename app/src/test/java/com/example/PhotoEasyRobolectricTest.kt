@@ -680,7 +680,7 @@ class PhotoEasyRobolectricTest {
         val blue = Color.rgb(30, 60, 220)
         val mixed = Color.rgb(125, 45, 125)
         val (img, mask) = scene(64, 64, { _, y -> when { y < 20 -> blue; y == 20 -> mixed; else -> red } }, { _, y -> y >= 18 })
-        val cfg = com.example.engine.RefineEdgeConfig(radiusPx = 6, smartRadius = false, smoothPx = 0, contrastPercent = 0f)
+        val cfg = com.example.engine.RefineEdgeConfig(radiusPx = 6, smartRadius = false, smoothPx = 0f, contrastPercent = 0f)
         val result = com.example.engine.RefineEdgeEngine.refineEdges(img, mask, cfg).refinedMask
         assertTrue("background above the edge must be dropped (was ${alphaAt(result, 32, 18)})", alphaAt(result, 32, 18) < 60)
         val edge = alphaAt(result, 32, 20)
@@ -695,7 +695,7 @@ class PhotoEasyRobolectricTest {
         val blue = Color.rgb(40, 70, 210)
         // Subject block for y >= 40, one-pixel "hair" at x = 30 from y = 28 to 39; the selection only covers the block.
         val (img, mask) = scene(64, 64, { x, y -> if (y >= 40 || (x == 30 && y in 28..39)) red else blue }, { _, y -> y >= 40 })
-        val cfg = com.example.engine.RefineEdgeConfig(radiusPx = 14, smartRadius = false, hairRefine = true, smoothPx = 0, contrastPercent = 0f)
+        val cfg = com.example.engine.RefineEdgeConfig(radiusPx = 14, smartRadius = false, hairRefine = true, smoothPx = 0f, contrastPercent = 0f)
         val result = com.example.engine.RefineEdgeEngine.refineEdges(img, mask, cfg).refinedMask
         assertTrue("hair strand pixel should be selected (was ${alphaAt(result, 30, 33)})", alphaAt(result, 30, 33) > 150)
         assertTrue("background next to the strand should not (was ${alphaAt(result, 35, 33)})", alphaAt(result, 35, 33) < 80)
@@ -708,7 +708,7 @@ class PhotoEasyRobolectricTest {
         val blue = Color.argb(128, 30, 60, 220)
         val mixed = Color.argb(128, 125, 45, 125)
         val (img, mask) = scene(48, 48, { _, y -> when { y < 20 -> blue; y == 20 -> mixed; else -> red } }, { _, y -> y >= 19 })
-        val cfg = com.example.engine.RefineEdgeConfig(radiusPx = 5, smartRadius = false, smoothPx = 0, contrastPercent = 0f, decontaminateColors = true, decontaminateAmount = 1f)
+        val cfg = com.example.engine.RefineEdgeConfig(radiusPx = 5, smartRadius = false, smoothPx = 0f, contrastPercent = 0f, decontaminateColors = true, decontaminateAmount = 1f)
         val out = com.example.engine.RefineEdgeEngine.refineEdges(img, mask, cfg).decontaminatedSource!!
         assertEquals(128, (out.getPixel(24, 20) ushr 24) and 0xFF)
         // The edge colour moves towards the subject colour (less blue).
@@ -1785,5 +1785,128 @@ class PhotoEasyRobolectricTest {
         assertEquals(120, p.width)
         assertEquals(90f, p.layers[1].rotation, 0.01f)
         assertEquals(0f, p.layers[0].rotation, 0.01f)
+    }
+    // --- Refine Edge & Hair: the single refine workspace ----------------------------------------
+
+    private fun refineRun(mask: Bitmap, cfg: com.example.engine.RefineEdgeConfig): Bitmap {
+        val src = Bitmap.createBitmap(mask.width, mask.height, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.GRAY) }
+        return com.example.engine.RefineEdgeEngine.refineEdges(src, mask, cfg).refinedMask
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun refineWorkspace_shiftEdgeIsRoundAndInPixels() {
+        val out = refineRun(squareSelection(80, 40, 40, 40, 40), com.example.engine.RefineEdgeConfig(radiusPx = 0, shiftEdgePx = 10f))
+        assertTrue(alphaAt(out, 49, 40) > 128)
+        assertTrue("round, not square", alphaAt(out, 49, 49) < 64)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun refineWorkspace_cleanupBorderAndFeather() {
+        val m = squareSelection(100, 20, 20, 79, 79)
+        android.graphics.Canvas(m).drawRect(5f, 5f, 7f, 7f, android.graphics.Paint().apply { color = Color.WHITE })
+        val cleaned = refineRun(m, com.example.engine.RefineEdgeConfig(radiusPx = 0, removeSpecks = true))
+        assertTrue("speck removed", alphaAt(cleaned, 5, 5) < 30)
+        assertTrue(alphaAt(cleaned, 50, 50) > 200)
+        val border = refineRun(squareSelection(100, 20, 20, 79, 79), com.example.engine.RefineEdgeConfig(radiusPx = 0, borderPx = 10f))
+        assertTrue("edge band", alphaAt(border, 20, 50) > 200)
+        assertTrue("inside dropped", alphaAt(border, 50, 50) < 30)
+        val soft = refineRun(squareSelection(100, 20, 20, 79, 79), com.example.engine.RefineEdgeConfig(radiusPx = 0, featherPx = 8f))
+        assertTrue("feathered edge is soft", alphaAt(soft, 20, 50) in 30..225)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun refineWorkspace_defaultsChangeNothingWithoutDetection() {
+        val m = squareSelection(60, 10, 10, 49, 49)
+        val out = refineRun(m, com.example.engine.RefineEdgeConfig(radiusPx = 0))
+        assertEquals(255, alphaAt(out, 30, 30))
+        assertEquals(0, alphaAt(out, 3, 3))
+        assertEquals(255, alphaAt(out, 10, 30))
+    }
+    // --- Export ------------------------------------------------------------------------------------
+
+    @Test
+    fun export_outputSizeModes() {
+        val E = com.example.engine.ExportEngine
+        val base = com.example.engine.ExportSettings()
+        assertEquals(4000 to 3000, E.outputSize(4000, 3000, base))
+        assertEquals(2000 to 1500, E.outputSize(4000, 3000, base.copy(sizeMode = com.example.engine.ExportSizeMode.PERCENT, percent = 50)))
+        assertEquals(1080 to 810, E.outputSize(4000, 3000, base.copy(sizeMode = com.example.engine.ExportSizeMode.LONG_EDGE, longEdge = 1080)))
+    }
+
+    @Test
+    fun export_settingsAreRemembered() {
+        val s = com.example.engine.ExportSettings(format = com.example.engine.ExportFormat.PNG, quality = 77, sizeMode = com.example.engine.ExportSizeMode.LONG_EDGE, longEdge = 1920, metadata = com.example.engine.ExportMetadata.NONE, shareAfter = true)
+        val back = com.example.engine.ExportSettings.fromJson(s.toJson())
+        assertEquals(s.format, back.format)
+        assertEquals(77, back.quality)
+        assertEquals(1920, back.longEdge)
+        assertEquals(com.example.engine.ExportMetadata.NONE, back.metadata)
+        assertTrue(back.shareAfter)
+    }
+
+    @Test
+    fun export_transparentBackgroundDropsTheDarkFillLayer() {
+        val E = com.example.engine.ExportEngine
+        val bg = Layer(id = "bg", name = "Background", type = LayerType.COLOR_FILL, colorFillHex = E.LEGACY_AUTO_BACKGROUND)
+        val photo = Layer(id = "p", name = "Photo", type = LayerType.IMAGE, bitmap = Bitmap.createBitmap(10, 10, Bitmap.Config.ARGB_8888))
+        val layers = listOf(bg, photo)
+        assertTrue(E.defaultTransparent(layers))
+        assertEquals(listOf(photo), E.layersForExport(layers, transparent = true))
+        assertEquals(layers, E.layersForExport(layers, transparent = false))
+        val white = bg.copy(colorFillHex = Color.WHITE)
+        assertFalse("a chosen white background stays unless asked", E.defaultTransparent(listOf(white, photo)))
+        assertEquals(listOf(listOf(photo)), E.layerGroups(layers))
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun export_pngKeepsTransparency_jpegUsesChosenBackground() {
+        val E = com.example.engine.ExportEngine
+        val img = qsImage(20, 20) { x, y -> if (x in 5..14 && y in 5..14) Color.RED else Color.TRANSPARENT }
+        val png = java.io.ByteArrayOutputStream()
+        assertTrue(E.encode(img, com.example.engine.ExportFormat.PNG, 100, png))
+        val decoded = android.graphics.BitmapFactory.decodeByteArray(png.toByteArray(), 0, png.size())
+        assertEquals("transparent corner, not black", 0, Color.alpha(decoded.getPixel(0, 0)))
+        assertEquals(Color.RED, decoded.getPixel(10, 10))
+        val flat = E.flatten(img, Color.WHITE)
+        assertEquals(Color.WHITE, flat.getPixel(0, 0))
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun export_importedPngRendersTransparentWithoutTheFill() = runBlocking {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val E = com.example.engine.ExportEngine
+        val photoBmp = qsImage(40, 40) { x, _ -> if (x < 20) Color.BLUE else Color.TRANSPARENT }
+        val layers = listOf(
+            Layer(id = "bg", name = "Background", type = LayerType.COLOR_FILL, colorFillHex = E.LEGACY_AUTO_BACKGROUND),
+            Layer(id = "p", name = "Photo", type = LayerType.IMAGE, bitmap = photoBmp)
+        )
+        val out = LayerRenderer.renderCompositeCanvas(app, E.layersForExport(layers, true), 40, 40, includeBackground = true, backgroundColor = null)
+        assertEquals("right half is transparent", 0, Color.alpha(out.getPixel(35, 20)))
+        assertTrue(Color.alpha(out.getPixel(5, 20)) > 200)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun export_selectionOnlyCropsAndMasks() {
+        val img = qsImage(50, 50) { _, _ -> Color.GREEN }
+        val mask = squareSelection(50, 10, 20, 29, 39)
+        val out = com.example.engine.ExportEngine.selectionOnly(img, mask)!!
+        assertEquals(20, out.width)
+        assertEquals(20, out.height)
+        assertTrue(Color.alpha(out.getPixel(10, 10)) > 240)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun export_resizeHitsExactSize() {
+        val img = qsImage(400, 300) { x, y -> if ((x / 10 + y / 10) % 2 == 0) Color.BLACK else Color.WHITE }
+        val out = com.example.engine.ExportEngine.resize(img, 97, 73, sharpen = true)
+        assertEquals(97, out.width)
+        assertEquals(73, out.height)
     }
 }

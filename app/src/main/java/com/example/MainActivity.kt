@@ -33,20 +33,21 @@ import java.util.Locale
 class MainActivity : AppCompatActivity() {
 
     private val viewModel: EditorViewModel by viewModels()
-    private var pendingLegacyExport: Pair<Boolean, Int>? = null
+    private var pendingLegacyExport: com.example.engine.ExportSettings? = null
     private val storagePermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         val pending = pendingLegacyExport
         pendingLegacyExport = null
         if (granted && pending != null) {
-            viewModel.exportImage(pending.first, pending.second)
+            viewModel.exportImage(pending)
         } else if (!granted && pending != null) {
             viewModel.notifyStoragePermissionDenied()
         }
     }
-    private fun exportImageSafely(isPng: Boolean, quality: Int) {
+    /** Gallery export; Android 9 and older first need the storage permission. */
+    private fun exportImageSafely(settings: com.example.engine.ExportSettings) {
         if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P && ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-            pendingLegacyExport = isPng to quality; storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-        } else viewModel.exportImage(isPng, quality)
+            pendingLegacyExport = settings; storagePermissionLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+        } else viewModel.exportImage(settings)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -92,7 +93,7 @@ class MainActivity : AppCompatActivity() {
                             EditorScreen(
                                 viewModel = viewModel,
                                 uiState = uiState,
-                                onExportConfirm = { isPng, quality -> exportImageSafely(isPng, quality) }
+                                onExportConfirm = { settings -> exportImageSafely(settings) }
                             )
                         }
 

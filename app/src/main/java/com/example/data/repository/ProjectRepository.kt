@@ -659,6 +659,88 @@ class ProjectRepository(private val context: Context) {
         }
     }
 
+    /**
+     * Saves an already encoded export file.
+     * - [target] (a document the user created with "Save to Files") receives the bytes directly.
+     * - [treeUri] (a folder picked for "each layer separately") gets a new document named [displayName].
+     * - Otherwise the file goes to the gallery (Pictures/PhotoEasy), with the same Android 7-9
+     *   fallback as before. Returns the saved file's Uri, or null on failure.
+     */
+    suspend fun saveExportFile(
+        encoded: File,
+        displayName: String,
+        mimeType: String,
+        target: Uri? = null,
+        treeUri: Uri? = null
+    ): Uri? = withContext(Dispatchers.IO) {
+        val resolver = context.contentResolver
+        fun copyInto(uri: Uri): Boolean = try {
+            resolver.openOutputStream(uri, "w")?.use { out -> encoded.inputStream().use { it.copyTo(out) }; out.flush(); true } ?: false
+        } catch (e: Exception) {
+            false
+        }
+        try {
+            if (target != null) return@withContext if (copyInto(target)) target else null
+            if (treeUri != null) {
+                val parent = android.provider.DocumentsContract.buildDocumentUriUsingTree(
+                    treeUri, android.provider.DocumentsContract.getTreeDocumentId(treeUri)
+                )
+                val doc = android.provider.DocumentsContract.createDocument(resolver, parent, mimeType, displayName)
+                    ?: return@withContext null
+                return@withContext if (copyInto(doc)) doc else null
+            }
+            // Gallery (MediaStore).
+            try {
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/PhotoEasy")
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    }
+                }
+                val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                if (uri != null) {
+                    if (copyInto(uri)) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            values.clear()
+                            values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                            resolver.update(uri, values, null, null)
+                        }
+                        return@withContext uri
+                    }
+                    try { resolver.delete(uri, null, null) } catch (_: Exception) {}
+                }
+            } catch (_: SecurityException) {
+            } catch (_: Exception) {
+            }
+            // Android 7-9 without the storage permission: public Pictures if possible, else app storage.
+            val dir: File = try {
+                val pub = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "PhotoEasy")
+                if (pub.exists() || pub.mkdirs()) pub else context.getExternalFilesDir(Environment.DIRECTORY_PICTURES) ?: context.filesDir
+            } catch (e: Exception) {
+                context.getExternalFilesDir(Environment.DIRECTORY_PICTURES) ?: context.filesDir
+            }
+            var file = File(dir, displayName)
+            if (file.exists()) {
+                val dot = displayName.lastIndexOf('.')
+                val base = if (dot > 0) displayName.substring(0, dot) else displayName
+                val ext = if (dot > 0) displayName.substring(dot) else ""
+                var k = 1
+                while (file.exists()) { file = File(dir, "${base}_$k$ext"); k++ }
+            }
+            encoded.copyTo(file, overwrite = true)
+            try {
+                android.media.MediaScannerConnection.scanFile(context, arrayOf(file.absolutePath), arrayOf(mimeType), null)
+            } catch (_: Exception) {
+            }
+            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        }
+    }
+
     private fun compressBitmap(bmp: Bitmap, isPng: Boolean, quality: Int, outStream: OutputStream): Boolean {
         return try {
             val format = if (isPng) Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG

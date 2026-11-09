@@ -53,6 +53,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.math.min
 import kotlin.math.max
+import kotlin.math.roundToInt
 import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.io.File
@@ -96,6 +97,12 @@ data class EditorUiState(
     val canUndo: Boolean = false,
     val canRedo: Boolean = false,
     val exportSuccessUri: Uri? = null,
+    /** Every file of the last export (several when exporting each layer separately). */
+    val exportSuccessUris: List<Uri> = emptyList(),
+    val exportSettings: com.example.engine.ExportSettings = com.example.engine.ExportSettings(),
+    val exportEstimate: com.example.ui.components.ExportEstimate? = null,
+    /** Progress 0..1 of an export (null = none running). */
+    val exportProgress: Float? = null,
     val currentLanguage: String = "auto", // "auto", "en", "ar"
     val selectedAspectRatio: Float? = null,
     /** Crop: straighten angle in degrees (-45..45), applied together with the crop. */
@@ -168,6 +175,8 @@ data class EditorUiState(
     val selectionRefine: SelectionRefineParams = SelectionRefineParams(),
     /** Live preview image of the Refine Edge dialog and how it is displayed. */
     val refinePreview: Bitmap? = null,
+    /** The same preview area before refinement (hold "Before" in the refine workspace). */
+    val refinePreviewOriginal: Bitmap? = null,
     val refinePreviewMode: RefinePreviewMode = RefinePreviewMode.OVERLAY,
     /** User filter library: imported LUTs, saved looks and favourite filter keys. */
     val luts: List<com.example.engine.LutInfo> = emptyList(),
@@ -288,6 +297,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     init {
+        _uiState.value = _uiState.value.copy(
+            exportSettings = com.example.engine.ExportSettings.fromJson(prefs.getString("export_settings_v1", null))
+        )
         val savedLang = prefs.getString("app_language", "auto") ?: "auto"
         _uiState.value = _uiState.value.copy(currentLanguage = savedLang)
         applyAppLocale(savedLang)
@@ -1081,14 +1093,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                         height = safeH
                     )
 
-                    val bgLayer = Layer(
-                        id = java.util.UUID.randomUUID().toString(),
-                        name = tr(R.string.layer_name_background),
-                        type = LayerType.COLOR_FILL,
-                        colorFillHex = 0xFF12131C.toInt()
-                    )
-                    proj.layers.add(bgLayer)
-
+                    // No background fill layer: like Photoshop, an imported photo is the only layer, so
+                    // transparent areas of a PNG stay transparent on export (the canvas shows a checkerboard).
                     val layerId = java.util.UUID.randomUUID().toString()
                     val projDir = repository.getProjectDir(projId)
                     val sourceFile = File(projDir, "source_layer_$layerId.dat")
@@ -3901,7 +3907,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun clearRefinePreview() {
         refinePreviewJob?.cancel()
         refinePreviewJob = null
-        _uiState.value = _uiState.value.copy(refinePreview = null)
+        _uiState.value = _uiState.value.copy(refinePreview = null, refinePreviewOriginal = null)
     }
 
     fun setRefinePreviewMode(mode: RefinePreviewMode) {
@@ -3921,15 +3927,24 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val docMask = _uiState.value.selectionMask ?: return
         refinePreviewJob?.cancel()
         refinePreviewJob = viewModelScope.launch {
-            delay(180) // debounce slider drags
-            val preview = try {
-                withContext(Dispatchers.Default) { buildRefinePreview(proj, layer, proxy, docMask, config, _uiState.value.refinePreviewMode) }
-            } catch (e: kotlinx.coroutines.CancellationException) {
-                throw e
-            } catch (e: Throwable) {
-                null
+            // Short debounce: the preview follows the slider almost instantly. A fast, smaller
+            // pass is shown first, then the detailed one replaces it.
+            delay(60)
+            val mode = _uiState.value.refinePreviewMode
+            for (size in intArrayOf(360, 720)) {
+                val pair = try {
+                    withContext(Dispatchers.Default) { buildRefinePreview(proj, layer, proxy, docMask, config, mode, size) }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    null
+                }
+                if (pair == null) {
+                    if (size == 360) _uiState.value = _uiState.value.copy(refinePreview = null, refinePreviewOriginal = null)
+                    break
+                }
+                _uiState.value = _uiState.value.copy(refinePreview = pair.first, refinePreviewOriginal = pair.second)
             }
-            _uiState.value = _uiState.value.copy(refinePreview = preview)
         }
     }
 
@@ -3939,8 +3954,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         proxy: Bitmap,
         docMask: Bitmap,
         config: RefineEdgeConfig,
-        mode: RefinePreviewMode
-    ): Bitmap? {
+        mode: RefinePreviewMode,
+        maxSize: Int = 720
+    ): Pair<Bitmap, Bitmap>? {
         val local = SelectionEngine.mapDocumentMaskToLayerLocal(docMask, layer, proj.width, proj.height)
         try {
             val bounds = SelectionEngine.selectionBounds(local) ?: return null
@@ -3952,7 +3968,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 (bounds.bottom + margin).coerceAtMost(proxy.height)
             )
             if (crop.width() < 2 || crop.height() < 2) return null
-            val ratio = min(1f, 480f / max(crop.width(), crop.height()))
+            val ratio = min(1f, maxSize.toFloat() / max(crop.width(), crop.height()))
             val pw = (crop.width() * ratio).toInt().coerceAtLeast(2)
             val ph = (crop.height() * ratio).toInt().coerceAtLeast(2)
             val srcCrop = Bitmap.createBitmap(proxy, crop.left, crop.top, crop.width(), crop.height())
@@ -3963,37 +3979,46 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             // The real refine runs on the full-resolution source: scale pixel radii accordingly.
             val fullMax = max(layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight()).coerceAtLeast(1f)
             val scaleToPreview = (max(pw, ph).toFloat() / max(crop.width(), crop.height())) * (max(proxy.width, proxy.height) / fullMax)
+            // Every pixel size shrinks with the preview so it matches the full-resolution result.
+            fun sc(v: Float) = v * scaleToPreview
             val previewConfig = config.copy(
-                radiusPx = (config.radiusPx * scaleToPreview).toInt().coerceAtLeast(1),
-                smoothPx = (config.smoothPx * scaleToPreview).toInt(),
-                featherPx = config.featherPx * scaleToPreview
+                radiusPx = if (config.radiusPx <= 0) 0 else (config.radiusPx * scaleToPreview).toInt().coerceAtLeast(1),
+                smoothPx = sc(config.smoothPx),
+                featherPx = sc(config.featherPx),
+                shiftEdgePx = sc(config.shiftEdgePx),
+                borderPx = if (config.borderPx >= 1f) max(1f, sc(config.borderPx)) else 0f
             )
             val result = RefineEdgeEngine.refineEdges(srcSmall, maskSmall, previewConfig)
             val shown = result.decontaminatedSource ?: srcSmall
-            val src = IntArray(pw * ph)
-            val alpha = IntArray(pw * ph)
-            shown.getPixels(src, 0, pw, 0, 0, pw, ph)
-            result.refinedMask.getPixels(alpha, 0, pw, 0, 0, pw, ph)
-            val out = IntArray(pw * ph)
-            for (i in out.indices) {
-                val a = ((alpha[i] ushr 24) and 0xFF) / 255f
-                val p = src[i]
-                val r = (p shr 16) and 0xFF; val g = (p shr 8) and 0xFF; val b = p and 0xFF
-                out[i] = when (mode) {
-                    RefinePreviewMode.ON_BLACK -> Color.rgb((r * a).toInt(), (g * a).toInt(), (b * a).toInt())
-                    RefinePreviewMode.ON_WHITE -> Color.rgb((r * a + 255 * (1 - a)).toInt(), (g * a + 255 * (1 - a)).toInt(), (b * a + 255 * (1 - a)).toInt())
-                    RefinePreviewMode.MASK -> { val v = (a * 255).toInt(); Color.rgb(v, v, v) }
-                    RefinePreviewMode.OVERLAY -> {
-                        val k = 0.55f * (1 - a)
-                        Color.rgb((r * (1 - k) + 230 * k).toInt(), (g * (1 - k) + 30 * k).toInt(), (b * (1 - k) + 60 * k).toInt())
+            fun compose(colors: Bitmap, maskBmp: Bitmap): Bitmap {
+                val src = IntArray(pw * ph)
+                val alpha = IntArray(pw * ph)
+                colors.getPixels(src, 0, pw, 0, 0, pw, ph)
+                maskBmp.getPixels(alpha, 0, pw, 0, 0, pw, ph)
+                val out = IntArray(pw * ph)
+                for (i in out.indices) {
+                    val a = ((alpha[i] ushr 24) and 0xFF) / 255f
+                    val p = src[i]
+                    val r = (p shr 16) and 0xFF; val g = (p shr 8) and 0xFF; val b = p and 0xFF
+                    out[i] = when (mode) {
+                        RefinePreviewMode.ON_BLACK -> Color.rgb((r * a).toInt(), (g * a).toInt(), (b * a).toInt())
+                        RefinePreviewMode.ON_WHITE -> Color.rgb((r * a + 255 * (1 - a)).toInt(), (g * a + 255 * (1 - a)).toInt(), (b * a + 255 * (1 - a)).toInt())
+                        RefinePreviewMode.MASK -> { val v = (a * 255).toInt(); Color.rgb(v, v, v) }
+                        RefinePreviewMode.OVERLAY -> {
+                            val k = 0.55f * (1 - a)
+                            Color.rgb((r * (1 - k) + 230 * k).toInt(), (g * (1 - k) + 30 * k).toInt(), (b * (1 - k) + 60 * k).toInt())
+                        }
                     }
                 }
+                val bmp = Bitmap.createBitmap(pw, ph, Bitmap.Config.ARGB_8888)
+                bmp.setPixels(out, 0, pw, 0, 0, pw, ph)
+                return bmp
             }
-            val bmp = Bitmap.createBitmap(pw, ph, Bitmap.Config.ARGB_8888)
-            bmp.setPixels(out, 0, pw, 0, 0, pw, ph)
+            val after = compose(shown, result.refinedMask)
+            val before = compose(srcSmall, maskSmall)
             listOf(srcCrop, srcSmall, maskCrop, maskSmall, result.refinedMask).forEach { if (it !== proxy && !it.isRecycled) it.recycle() }
             result.decontaminatedSource?.let { if (!it.isRecycled) it.recycle() }
-            return bmp
+            return after to before
         } finally {
             if (!local.isRecycled) local.recycle()
         }
@@ -4185,53 +4210,245 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     // --- Exporting ---
+
+    /** Kept for callers of the old API: a whole-image JPG / PNG export to the gallery. */
     fun exportImage(isPng: Boolean, quality: Int) {
+        exportImage(
+            _uiState.value.exportSettings.copy(
+                format = if (isPng) com.example.engine.ExportFormat.PNG else com.example.engine.ExportFormat.JPEG,
+                quality = quality,
+                scope = com.example.engine.ExportScope.WHOLE,
+                destination = com.example.engine.ExportDestination.GALLERY
+            )
+        )
+    }
+
+    /** Opening the export dialog: project defaults (file name, transparent background). */
+    fun prepareExportSettings() {
+        val proj = _uiState.value.currentProject ?: return
+        val cur = _uiState.value.exportSettings
+        val transparentDefault = com.example.engine.ExportEngine.defaultTransparent(proj.layers)
+        _uiState.value = _uiState.value.copy(
+            exportSettings = cur.copy(
+                fileName = com.example.engine.ExportEngine.safeFileName(proj.name),
+                transparentBackground = if (transparentDefault) true else cur.transparentBackground,
+                scope = if (cur.scope == com.example.engine.ExportScope.SELECTION) com.example.engine.ExportScope.WHOLE else cur.scope
+            ),
+            exportEstimate = null
+        )
+    }
+
+    fun updateExportSettings(settings: com.example.engine.ExportSettings) {
+        _uiState.value = _uiState.value.copy(exportSettings = settings)
+        try { prefs.edit().putString("export_settings_v1", settings.toJson()).apply() } catch (_: Exception) {}
+    }
+
+    private var exportEstimateJob: Job? = null
+
+    fun clearExportEstimate() {
+        exportEstimateJob?.cancel()
+        _uiState.value = _uiState.value.copy(exportEstimate = null)
+    }
+
+    /**
+     * Output size, estimated file size and a 1:1 compression preview, from a test encode of a
+     * reduced render (debounced while settings change).
+     */
+    fun requestExportEstimate(settings: com.example.engine.ExportSettings) {
+        val proj = _uiState.value.currentProject ?: return
+        val selection = _uiState.value.selectionMask
+        exportEstimateJob?.cancel()
+        exportEstimateJob = viewModelScope.launch {
+            delay(250)
+            val est = try {
+                withContext(Dispatchers.Default) {
+                    val E = com.example.engine.ExportEngine
+                    val alpha = settings.format.supportsAlpha
+                    val groups = if (settings.scope == com.example.engine.ExportScope.LAYERS) E.layerGroups(proj.layers).size else 1
+                    val layers = E.layersForExport(proj.layers, settings.transparentBackground && alpha)
+                    val sample = LayerRenderer.renderCompositeCanvas(
+                        getApplication(), layers, proj.width, proj.height,
+                        includeBackground = true, backgroundColor = null, maxPreviewDimension = 1600
+                    )
+                    val temps = java.util.IdentityHashMap<Bitmap, Boolean>()
+                    temps[sample] = true
+                    try {
+                        val sampleScale = sample.width.toFloat() / proj.width.coerceAtLeast(1)
+                        var img = sample
+                        var docW = proj.width
+                        var docH = proj.height
+                        if (settings.scope == com.example.engine.ExportScope.SELECTION && selection != null && !selection.isRecycled) {
+                            E.selectionOnly(sample, selection)?.let { cropped ->
+                                temps[cropped] = true
+                                img = cropped
+                                docW = (cropped.width / sampleScale).roundToInt().coerceAtLeast(1)
+                                docH = (cropped.height / sampleScale).roundToInt().coerceAtLeast(1)
+                            }
+                        }
+                        val (ow, oh) = E.outputSize(docW, docH, settings)
+                        val sized = if (ow < img.width) E.resize(img, ow, oh, settings.sharpenOnResize).also { temps[it] = true } else img
+                        val enc = if (!alpha) E.flatten(sized, settings.jpegBackground).also { temps[it] = true } else sized
+                        val bytes = java.io.ByteArrayOutputStream()
+                        E.encode(enc, settings.format, settings.quality, bytes)
+                        val total = E.estimateBytes(bytes.size().toLong(), enc.width, enc.height, ow, oh) * groups
+                        val preview = if (settings.format.lossy) E.compressionPreview(enc, settings.format, settings.quality, 220, settings.jpegBackground) else null
+                        com.example.ui.components.ExportEstimate(ow, oh, total, preview, groups)
+                    } finally {
+                        temps.keys.forEach { if (!it.isRecycled) it.recycle() }
+                    }
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                if (e is OutOfMemoryError) System.gc()
+                null
+            }
+            _uiState.value = _uiState.value.copy(exportEstimate = est)
+        }
+    }
+
+    private var exportJob: Job? = null
+
+    /** Cancels a running export (nothing is saved). */
+    fun cancelExport() {
+        exportJob?.cancel()
+    }
+
+    /**
+     * Exports with [settings]: renders at full resolution (smaller only when memory is short, and
+     * then says so), crops to the selection or splits into layers when asked, resizes with output
+     * sharpening, flattens for JPEG, encodes, writes metadata and saves to the gallery, to the
+     * document [target] or into the folder [treeUri]. Progress and cancel are shown in the top bar.
+     */
+    fun exportImage(settings: com.example.engine.ExportSettings, target: Uri? = null, treeUri: Uri? = null) {
         val proj = _uiState.value.currentProject ?: return
         if (_uiState.value.isProcessing) return
-        viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_exporting), exportSuccessUri = null)
-            var compositeBmp: Bitmap? = null
+        val E = com.example.engine.ExportEngine
+        val selection = _uiState.value.selectionMask
+        if (settings.scope == com.example.engine.ExportScope.SELECTION &&
+            (selection == null || selection.isRecycled || !SelectionEngine.hasSelection(selection))
+        ) {
+            _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_nothing_selected))
+            return
+        }
+        updateExportSettings(settings)
+        exportJob = viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(
+                isProcessing = true, exportProgress = 0f, statusMessage = tr(R.string.status_exporting),
+                exportSuccessUri = null, exportSuccessUris = emptyList()
+            )
+            val job = currentCoroutineContext()[Job]
+            val cancelled = { job?.isCancelled == true }
+            fun progress(f: Float) {
+                _uiState.value = _uiState.value.copy(exportProgress = f.coerceIn(0f, 0.99f))
+            }
+            val alpha = settings.format.supportsAlpha
+            val baseName = E.safeFileName(settings.fileName.ifBlank { proj.name })
+            val metaSource = proj.layers.firstOrNull { it.type == LayerType.IMAGE && it.sourceAssetPath != null }
+                ?.sourceAssetPath?.let { File(it) }
+            val saved = ArrayList<Uri>()
+            var reducedTo: String? = null
             try {
-                compositeBmp = withContext(Dispatchers.Default) {
-                    LayerRenderer.renderCompositeCanvas(
-                        getApplication(),
-                        proj.layers,
-                        proj.width,
-                        proj.height,
-                        backgroundColor = if (isPng) null else android.graphics.Color.WHITE,
-                        maxPreviewDimension = null
-                    )
+                val jobs: List<Pair<String, List<Layer>>> = if (settings.scope == com.example.engine.ExportScope.LAYERS) {
+                    E.layerGroups(proj.layers).mapIndexed { i, g -> "${baseName}_${i + 1}_${E.safeFileName(g[0].name, "layer")}" to g }
+                } else {
+                    listOf(baseName to E.layersForExport(proj.layers, settings.transparentBackground && alpha))
                 }
-
-                // File names: keep letters/digits (any script), dash and underscore only.
-                val safeName = proj.name.trim()
-                    .replace(Regex("[^\\p{L}\\p{N}_-]+"), "_")
-                    .trim('_')
-                    .ifEmpty { "PhotoEasy" }
-                    .take(60)
-                val exportUri = repository.exportToGallery(compositeBmp!!, safeName, isPng, quality)
-
+                if (jobs.isEmpty()) throw IllegalStateException("Nothing to export")
+                for ((index, entry) in jobs.withIndex()) {
+                    val (name, layers) = entry
+                    val p0 = index.toFloat() / jobs.size
+                    val span = 1f / jobs.size
+                    // 1. Render (full resolution; smaller steps only when memory is short).
+                    var composite: Bitmap? = null
+                    var renderScale = 1f
+                    for (attempt in floatArrayOf(1f, 0.7f, 0.5f, 0.35f)) {
+                        try {
+                            val maxDim = if (attempt >= 1f) null else (max(proj.width, proj.height) * attempt).toInt().coerceAtLeast(64)
+                            composite = withContext(Dispatchers.Default) {
+                                LayerRenderer.renderCompositeCanvas(
+                                    getApplication(), layers, proj.width, proj.height,
+                                    includeBackground = true,
+                                    backgroundColor = if (!alpha && settings.scope == com.example.engine.ExportScope.WHOLE) settings.jpegBackground else null,
+                                    maxPreviewDimension = maxDim
+                                )
+                            }
+                            renderScale = attempt
+                            break
+                        } catch (e: OutOfMemoryError) {
+                            System.gc()
+                        }
+                    }
+                    val comp = composite ?: throw OutOfMemoryError("export render")
+                    progress(p0 + span * 0.5f)
+                    val temps = java.util.IdentityHashMap<Bitmap, Boolean>()
+                    temps[comp] = true
+                    val tmp = File(getApplication<Application>().cacheDir, "export_${System.nanoTime()}.${settings.format.extension}")
+                    try {
+                        // 2. Selection crop.
+                        var img = comp
+                        if (settings.scope == com.example.engine.ExportScope.SELECTION) {
+                            img = withContext(Dispatchers.Default) { E.selectionOnly(comp, selection!!) } ?: throw IllegalStateException("Empty selection")
+                            temps[img] = true
+                        }
+                        // 3. Size (in document pixels; never upscale a memory-reduced render).
+                        val docW = (img.width / renderScale).roundToInt().coerceAtLeast(1)
+                        val docH = (img.height / renderScale).roundToInt().coerceAtLeast(1)
+                        var (ow, oh) = E.outputSize(docW, docH, settings)
+                        if (renderScale < 1f && (ow > img.width || oh > img.height)) {
+                            ow = img.width; oh = img.height
+                            reducedTo = "${ow} × ${oh}"
+                        }
+                        val sized = withContext(Dispatchers.Default) { E.resize(img, ow, oh, settings.sharpenOnResize, cancelled) }
+                        temps[sized] = true
+                        progress(p0 + span * 0.7f)
+                        // 4. JPEG has no transparency: flatten over the chosen colour.
+                        val final = if (!alpha) withContext(Dispatchers.Default) { E.flatten(sized, settings.jpegBackground) }.also { temps[it] = true } else sized
+                        // 5. Encode, metadata, save.
+                        val ok = withContext(Dispatchers.IO) { tmp.outputStream().use { E.encode(final, settings.format, settings.quality, it) } }
+                        if (!ok) throw java.io.IOException("Encoding failed")
+                        if (settings.scope != com.example.engine.ExportScope.LAYERS) {
+                            withContext(Dispatchers.IO) { E.writeMetadata(metaSource, tmp, settings.metadata, final.width, final.height) }
+                        }
+                        progress(p0 + span * 0.9f)
+                        val uri = repository.saveExportFile(
+                            tmp, "$name.${settings.format.extension}", settings.format.mimeType,
+                            target = if (jobs.size == 1) target else null,
+                            treeUri = treeUri
+                        ) ?: throw java.io.IOException("Save failed")
+                        saved += uri
+                    } finally {
+                        temps.keys.forEach { if (!it.isRecycled) it.recycle() }
+                        tmp.delete()
+                    }
+                    progress(p0 + span)
+                }
                 // Success is announced by the editor's "Exported • Share" snackbar (driven by exportSuccessUri).
                 _uiState.value = _uiState.value.copy(
                     isProcessing = false,
-                    exportSuccessUri = exportUri,
-                    statusMessage = if (exportUri != null) null else tr(R.string.export_failed)
+                    exportProgress = null,
+                    exportSuccessUri = saved.firstOrNull(),
+                    exportSuccessUris = saved.toList(),
+                    statusMessage = reducedTo?.let { tr(R.string.export_reduced_memory, it) }
                 )
             } catch (e: kotlinx.coroutines.CancellationException) {
+                _uiState.value = _uiState.value.copy(isProcessing = false, exportProgress = null, statusMessage = tr(R.string.export_cancelled))
                 throw e
             } catch (e: OutOfMemoryError) {
                 System.gc()
-                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_processing_failed_memory))
+                _uiState.value = _uiState.value.copy(isProcessing = false, exportProgress = null, statusMessage = tr(R.string.status_processing_failed_memory))
             } catch (e: Exception) {
-                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.export_failed))
-            } finally {
-                compositeBmp?.let { if (!it.isRecycled) it.recycle() }
+                _uiState.value = _uiState.value.copy(
+                    isProcessing = false, exportProgress = null,
+                    exportSuccessUri = saved.firstOrNull(), exportSuccessUris = saved.toList(),
+                    statusMessage = tr(R.string.export_failed)
+                )
             }
         }
     }
 
     fun consumeExportResult() {
-        _uiState.value = _uiState.value.copy(exportSuccessUri = null)
+        _uiState.value = _uiState.value.copy(exportSuccessUri = null, exportSuccessUris = emptyList())
     }
 
     /** Renames the open project (persisted by autosave) or a closed one (manifest-only rewrite). */
