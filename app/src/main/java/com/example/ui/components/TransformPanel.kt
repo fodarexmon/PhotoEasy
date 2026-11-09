@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FitScreen
@@ -115,6 +116,8 @@ fun TransformPanel(
                 Text(stringResource(R.string.transform_exact_values), fontSize = 12.sp)
             }
         }
+        // Scope: this tab changes the selected layer; Crop & Perspective changes the whole image.
+        ScopeLabel(stringResource(R.string.scope_selected_layer))
 
         // Mode: free transform / skew / distort.
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -143,6 +146,14 @@ fun TransformPanel(
             fontSize = 11.sp,
             modifier = Modifier.padding(top = 4.dp, bottom = 6.dp)
         )
+        if (mode == "DISTORT") {
+            Text(
+                stringResource(R.string.transform_distort_vs_perspective_hint),
+                color = IndigoPrimary,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
+        }
 
         // Options: lock proportions, scale from centre, snapping.
         Row(
@@ -232,6 +243,19 @@ fun TransformPanel(
 
         ValueSlider(stringResource(R.string.transform_rotation), String.format(Locale.US, "%.1f°", signed), signed, -180f..180f,
             { onRotationChange(it) }, onRotationCommit)
+        Text(
+            stringResource(R.string.transform_tilted_photo_hint),
+            color = Color.Gray,
+            fontSize = 11.sp,
+            modifier = Modifier.padding(bottom = 6.dp)
+        )
+        Text(
+            stringResource(R.string.transform_section_rotate_flip),
+            color = Color.White,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(top = 4.dp, bottom = 6.dp)
+        )
 
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TransformAction(stringResource(R.string.rotate_left), Icons.Default.RotateLeft, Modifier.weight(1f), onRotate90Left)
@@ -385,5 +409,22 @@ private fun TransformAction(label: String, icon: ImageVector, modifier: Modifier
         Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp).then(if (rotateIcon) Modifier.rotate(90f) else Modifier))
         Spacer(Modifier.width(4.dp))
         Text(label, fontSize = 11.sp, maxLines = 1)
+    }
+}
+
+/** Small banner saying what a tool panel changes (the selected layer or the whole image). */
+@Composable
+internal fun ScopeLabel(text: String) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+            .background(StudioSurfaceVariant, androidx.compose.foundation.shape.RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(Icons.Default.Info, contentDescription = null, tint = IndigoPrimary, modifier = Modifier.size(14.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(text, color = Color.White, fontSize = 11.sp)
     }
 }

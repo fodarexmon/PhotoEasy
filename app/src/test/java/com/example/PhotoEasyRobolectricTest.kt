@@ -1599,4 +1599,191 @@ class PhotoEasyRobolectricTest {
         assertTrue(q[5 * w + 2] < 0.05f)
         assertTrue(q[5 * w + 17] > 0.95f)
     }
+    // --- Pro effects ---------------------------------------------------------------------------
+
+    private fun fx(b: Bitmap, t: com.example.data.model.ProFilterType, p: com.example.engine.ProEffectParams) =
+        com.example.engine.ProEffects.apply(b, t, p)
+
+    private fun lumaAt(b: Bitmap, x: Int, y: Int): Int {
+        val c = b.getPixel(x, y)
+        return (Color.red(c) * 299 + Color.green(c) * 587 + Color.blue(c) * 114) / 1000
+    }
+
+    private fun noisyGray(w: Int, h: Int, seed: Long, amp: Int): Bitmap {
+        val rnd = java.util.Random(seed)
+        return qsImage(w, h) { _, _ ->
+            val n = rnd.nextInt(2 * amp + 1) - amp
+            val cr = rnd.nextInt(2 * amp + 1) - amp
+            Color.rgb((128 + n + cr).coerceIn(0, 255), (128 + n).coerceIn(0, 255), (128 + n - cr).coerceIn(0, 255))
+        }
+    }
+
+    private fun stdDev(b: Bitmap, ch: (Int) -> Int): Double {
+        var sum = 0.0; var sq = 0.0; var n = 0
+        for (y in 4 until b.height - 4) for (x in 4 until b.width - 4) {
+            val v = ch(b.getPixel(x, y)).toDouble(); sum += v; sq += v * v; n++
+        }
+        val m = sum / n
+        return kotlin.math.sqrt(sq / n - m * m)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun proGaussian_noDarkHaloAtTransparentEdges() {
+        val img = qsImage(60, 60) { x, y -> if (x in 20..39 && y in 20..39) Color.RED else Color.TRANSPARENT }
+        val out = fx(img, com.example.data.model.ProFilterType.GAUSSIAN_BLUR, com.example.engine.ProEffectParams(4f))
+        val edge = out.getPixel(19, 30)
+        assertTrue("edge is partly transparent", Color.alpha(edge) in 20..235)
+        assertTrue("edge colour stays red, not darkened", Color.red(edge) > 240 && Color.green(edge) < 15)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun proGaussian_fractionalRadiusChangesResult() {
+        val img = qsImage(40, 40) { x, _ -> if (x < 20) Color.BLACK else Color.WHITE }
+        val a = fx(img, com.example.data.model.ProFilterType.GAUSSIAN_BLUR, com.example.engine.ProEffectParams(1.0f))
+        val b = fx(img, com.example.data.model.ProFilterType.GAUSSIAN_BLUR, com.example.engine.ProEffectParams(1.6f))
+        assertTrue(lumaAt(a, 18, 20) != lumaAt(b, 18, 20))
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun proSharpen_amountSliderWorksAndThresholdProtectsNoise() {
+        val img = qsImage(40, 40) { x, _ -> if (x < 20) Color.rgb(90, 90, 90) else Color.rgb(160, 160, 160) }
+        val low = fx(img, com.example.data.model.ProFilterType.SHARPEN, com.example.engine.ProEffectParams(50f, 1.5f, 0f))
+        val high = fx(img, com.example.data.model.ProFilterType.SHARPEN, com.example.engine.ProEffectParams(300f, 1.5f, 0f))
+        assertTrue("more amount = stronger edge overshoot", lumaAt(high, 20, 20) > lumaAt(low, 20, 20))
+        // Small noise below the threshold is left alone.
+        val noisy = noisyGray(40, 40, 3L, 3)
+        val kept = fx(noisy, com.example.data.model.ProFilterType.SHARPEN, com.example.engine.ProEffectParams(300f, 1f, 20f))
+        assertTrue(abs(stdDev(kept) { Color.green(it) } - stdDev(noisy) { Color.green(it) }) < 1.0)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun proNoiseReduction_luminanceAndColourControlsWork() {
+        val noisy = noisyGray(64, 64, 7L, 20)
+        val none = fx(noisy, com.example.data.model.ProFilterType.NOISE_REDUCTION, com.example.engine.ProEffectParams(0f, 0f, 0f))
+        assertEquals(noisy.getPixel(30, 30), none.getPixel(30, 30))
+        val lum = fx(noisy, com.example.data.model.ProFilterType.NOISE_REDUCTION, com.example.engine.ProEffectParams(100f, 0f, 0f))
+        assertTrue("luminance noise reduced", stdDev(lum) { Color.green(it) } < stdDev(noisy) { Color.green(it) } * 0.7)
+        val col = fx(noisy, com.example.data.model.ProFilterType.NOISE_REDUCTION, com.example.engine.ProEffectParams(0f, 100f, 0f))
+        val chroma: (Int) -> Int = { Color.red(it) - Color.blue(it) }
+        assertTrue("colour noise reduced", stdDev(col, chroma) < stdDev(noisy, chroma) * 0.6)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun proMotionBlur_followsTheAngle() {
+        val img = qsImage(80, 80) { x, _ -> if (x == 40) Color.WHITE else Color.BLACK }
+        val out = fx(img, com.example.data.model.ProFilterType.MOTION_BLUR, com.example.engine.ProEffectParams(20f, 0f))
+        assertTrue("spread sideways", lumaAt(out, 46, 40) > 0)
+        assertTrue("peak is dimmed", lumaAt(out, 40, 40) < 128)
+        val vertical = fx(img, com.example.data.model.ProFilterType.MOTION_BLUR, com.example.engine.ProEffectParams(20f, 90f))
+        assertTrue("a vertical blur keeps the vertical line", lumaAt(vertical, 40, 40) > 240)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun proRadialBlur_centreAndModeMatter() {
+        val img = noisyGray(80, 80, 11L, 60)
+        val zoom = fx(img, com.example.data.model.ProFilterType.RADIAL_BLUR, com.example.engine.ProEffectParams(60f, centerX = 0.1f, centerY = 0.1f, mode = 0))
+        val spin = fx(img, com.example.data.model.ProFilterType.RADIAL_BLUR, com.example.engine.ProEffectParams(60f, centerX = 0.1f, centerY = 0.1f, mode = 1))
+        assertTrue("near the centre the image stays sharp", abs(lumaAt(zoom, 8, 8) - lumaAt(img, 8, 8)) < 40)
+        assertTrue("far from the centre it is blurred", stdDev(zoom) { Color.green(it) } < stdDev(img) { Color.green(it) })
+        assertTrue("spin differs from zoom", zoom.getPixel(70, 70) != spin.getPixel(70, 70))
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun proEffect_fadeZeroKeepsOriginal() {
+        val img = noisyGray(30, 30, 5L, 40)
+        val out = fx(img, com.example.data.model.ProFilterType.GAUSSIAN_BLUR, com.example.engine.ProEffectParams(6f, fade = 0f))
+        assertEquals(img.getPixel(10, 10), out.getPixel(10, 10))
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun proTiltShift_bandStaysSharp() {
+        val img = noisyGray(80, 80, 9L, 60)
+        val out = fx(img, com.example.data.model.ProFilterType.TILT_SHIFT, com.example.engine.ProEffectParams(6f, 20f, 10f, centerX = 0.5f, centerY = 0.5f))
+        assertEquals("focus band is untouched", img.getPixel(10, 40), out.getPixel(10, 40))
+        assertTrue("far from the band it is blurred", out.getPixel(10, 2) != img.getPixel(10, 2))
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun proLensBlur_pointBecomesADisc() {
+        val img = qsImage(60, 60) { x, y -> if (x == 30 && y == 30) Color.WHITE else Color.BLACK }
+        val out = fx(img, com.example.data.model.ProFilterType.LENS_BLUR, com.example.engine.ProEffectParams(6f, 100f))
+        assertTrue("inside the disc", lumaAt(out, 34, 30) > 0)
+        assertEquals("outside the disc", 0, lumaAt(out, 39, 30))
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun proSurfaceBlur_keepsEdgesSmoothsNoise() {
+        val rnd = java.util.Random(4L)
+        val img = qsImage(60, 60) { x, _ ->
+            val base = if (x < 30) 50 else 200
+            val v = (base + rnd.nextInt(17) - 8).coerceIn(0, 255)
+            Color.rgb(v, v, v)
+        }
+        val out = fx(img, com.example.data.model.ProFilterType.SURFACE_BLUR, com.example.engine.ProEffectParams(5f, 30f))
+        assertTrue("edge stays sharp", lumaAt(out, 31, 30) - lumaAt(out, 28, 30) > 120)
+        var before = 0.0; var after = 0.0
+        for (y in 5 until 55) for (x in 5 until 25) {
+            before += abs(lumaAt(img, x, y) - 50); after += abs(lumaAt(out, x, y) - 50)
+        }
+        assertTrue("noise smoothed", after < before * 0.7)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun proOilPaint_andHighPassRun() {
+        val img = noisyGray(40, 40, 2L, 30)
+        val oil = fx(img, com.example.data.model.ProFilterType.OIL_PAINT, com.example.engine.ProEffectParams(3f, 40f))
+        assertEquals(40, oil.width)
+        val hp = fx(qsImage(40, 40) { _, _ -> Color.rgb(200, 30, 90) }, com.example.data.model.ProFilterType.HIGH_PASS, com.example.engine.ProEffectParams(3f))
+        assertTrue("flat image -> 50% grey", abs(lumaAt(hp, 20, 20) - 128) <= 2)
+    }
+
+    @Test
+    fun proEffect_previewScalesPixelRadii() {
+        val p = com.example.engine.ProEffectParams(20f, 30f)
+        val g = com.example.engine.ProEffects.scaleForPreview(com.example.data.model.ProFilterType.GAUSSIAN_BLUR, p, 0.25f)
+        assertEquals(5f, g.p1, 0.001f)
+        val s = com.example.engine.ProEffects.scaleForPreview(com.example.data.model.ProFilterType.SURFACE_BLUR, p, 0.25f)
+        assertEquals("threshold is not a size", 30f, s.p2, 0.001f)
+    }
+    // --- Transform vs crop -------------------------------------------------------------------------
+
+    @Test
+    fun rotate90_onOneLayerImage_rotatesTheWholeImage() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val vm = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "Rot", width = 120, height = 80)
+        project.layers.add(Layer(id = "only", name = "Photo", type = LayerType.IMAGE, bitmap = Bitmap.createBitmap(120, 80, Bitmap.Config.ARGB_8888)))
+        vm.openProject(project)
+        vm.rotateSelectedLayer(90f)
+        val p = vm.uiState.value.currentProject!!
+        assertEquals("canvas turns with the picture", 80, p.width)
+        assertEquals(120, p.height)
+    }
+
+    @Test
+    fun rotate90_withSeveralLayers_rotatesOnlyTheSelectedLayer() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val vm = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "Rot2", width = 120, height = 80)
+        project.layers.add(Layer(id = "a", name = "A", type = LayerType.IMAGE, bitmap = Bitmap.createBitmap(120, 80, Bitmap.Config.ARGB_8888)))
+        project.layers.add(Layer(id = "b", name = "B", type = LayerType.IMAGE, bitmap = Bitmap.createBitmap(40, 40, Bitmap.Config.ARGB_8888)))
+        vm.openProject(project)
+        vm.selectLayer(1)
+        vm.rotateSelectedLayer(90f)
+        val p = vm.uiState.value.currentProject!!
+        assertEquals(120, p.width)
+        assertEquals(90f, p.layers[1].rotation, 0.01f)
+        assertEquals(0f, p.layers[0].rotation, 0.01f)
+    }
 }

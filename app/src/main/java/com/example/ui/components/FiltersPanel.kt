@@ -88,11 +88,17 @@ fun FiltersPanel(
     onCompareChange: (Boolean) -> Unit = {},
     onApply: () -> Unit,
     onCancel: () -> Unit,
-    onApplyProEffect: ((ProFilterType, Float, Float) -> Unit)? = null,
+    onApplyProEffect: ((ProFilterType, com.example.engine.ProEffectParams) -> Unit)? = null,
     hasActiveSelection: Boolean = false,
     onClearSelection: (() -> Unit)? = null,
     /** Shows the Pro effect live on the main canvas; null clears the preview. */
-    onPreviewProEffect: (ProFilterType?, Float, Float) -> Unit = { _, _, _ -> },
+    onPreviewProEffect: (ProFilterType?, com.example.engine.ProEffectParams?) -> Unit = { _, _ -> },
+    /** Centre of radial blur / tilt-shift, normalised to the layer image (set by tapping the image). */
+    proCenter: Pair<Float, Float> = 0.5f to 0.5f,
+    /** True while the selected effect wants canvas taps to place its centre. */
+    onProCenterPickChange: (Boolean) -> Unit = {},
+    /** Effects only apply to image layers; other layers show a hint and Apply is disabled. */
+    isImageLayer: Boolean = true,
     selectedLutId: String? = null,
     luts: List<com.example.engine.LutInfo> = emptyList(),
     customPresets: List<com.example.engine.CustomPreset> = emptyList(),
@@ -120,8 +126,8 @@ fun FiltersPanel(
 
     // Pro effects state
     var selectedProEffect by remember { mutableStateOf(ProFilterType.GAUSSIAN_BLUR) }
-    var param1 by remember { mutableFloatStateOf(15f) }
-    var param2 by remember { mutableFloatStateOf(20f) }
+    var proParams by remember { mutableStateOf(com.example.engine.ProEffects.defaults(ProFilterType.GAUSSIAN_BLUR)) }
+    val effectiveProParams = proParams.copy(centerX = proCenter.first, centerY = proCenter.second)
 
     // "Original": a tap toggles the before view on/off; press and hold shows it only while held.
     val compareInteraction = remember { MutableInteractionSource() }
@@ -193,19 +199,24 @@ fun FiltersPanel(
     // Pro effects are previewed live on the main image (scoped to the selection, like the real
     // effect). Slider drags are debounced so the canvas is not re-rendered for every tiny step.
     val latestPreviewProEffect by rememberUpdatedState(onPreviewProEffect)
-    LaunchedEffect(activeTab, selectedProEffect, param1, param2, sourceBitmap) {
+    LaunchedEffect(activeTab, selectedProEffect, effectiveProParams, sourceBitmap) {
         if (activeTab == FilterPanelTab.PRO_EFFECTS) {
             delay(150)
-            latestPreviewProEffect(selectedProEffect, param1, param2)
+            latestPreviewProEffect(selectedProEffect, effectiveProParams)
         } else {
-            latestPreviewProEffect(null, 0f, 0f)
+            latestPreviewProEffect(null, null)
         }
+    }
+    val latestCenterPick by rememberUpdatedState(onProCenterPickChange)
+    LaunchedEffect(activeTab, selectedProEffect) {
+        latestCenterPick(activeTab == FilterPanelTab.PRO_EFFECTS && com.example.engine.ProEffects.usesCenter(selectedProEffect))
     }
 
     DisposableEffect(Unit) {
         onDispose {
             previews.values.forEach { if (!it.isRecycled) it.recycle() }
-            latestPreviewProEffect(null, 0f, 0f)
+            latestPreviewProEffect(null, null)
+            latestCenterPick(false)
         }
     }
 
@@ -530,16 +541,9 @@ fun FiltersPanel(
                     FilterChip(
                         selected = isSelected,
                         onClick = {
-                            selectedProEffect = effect
-                            // Reset default parameters for the effect
-                            when (effect) {
-                                ProFilterType.GAUSSIAN_BLUR -> { param1 = 15f; param2 = 0f }
-                                ProFilterType.SURFACE_BLUR -> { param1 = 10f; param2 = 25f }
-                                ProFilterType.OIL_PAINT -> { param1 = 5f; param2 = 12f }
-                                ProFilterType.SHARPEN -> { param1 = 120f; param2 = 1.5f }
-                                ProFilterType.NOISE_REDUCTION -> { param1 = 3f; param2 = 15f }
-                                ProFilterType.MOTION_BLUR -> { param1 = 20f; param2 = 0f }
-                                ProFilterType.RADIAL_BLUR -> { param1 = 25f; param2 = 0f }
+                            if (effect != selectedProEffect) {
+                                selectedProEffect = effect
+                                proParams = com.example.engine.ProEffects.defaults(effect)
                             }
                         },
                         label = {
@@ -556,135 +560,100 @@ fun FiltersPanel(
 
             Spacer(Modifier.height(6.dp))
             Text(
-                stringResource(R.string.effect_live_preview_hint),
-                color = Color.White.copy(alpha = 0.6f),
+                stringResource(
+                    when {
+                        !isImageLayer -> R.string.effect_needs_image_layer
+                        com.example.engine.ProEffects.usesCenter(selectedProEffect) -> R.string.effect_tap_center_hint
+                        selectedProEffect == ProFilterType.HIGH_PASS -> R.string.effect_high_pass_hint
+                        else -> R.string.effect_live_preview_hint
+                    }
+                ),
+                color = if (isImageLayer) Color.White.copy(alpha = 0.6f) else AmberAccent,
                 fontSize = 11.sp,
                 modifier = Modifier.padding(horizontal = 4.dp)
             )
             Spacer(Modifier.height(8.dp))
 
-            // Sliders depending on effect
+            val p = proParams
+            fun upd(change: (com.example.engine.ProEffectParams) -> com.example.engine.ProEffectParams) { proParams = change(proParams) }
             when (selectedProEffect) {
                 ProFilterType.GAUSSIAN_BLUR -> {
-                    ProEffectSlider(
-                        label = stringResource(R.string.effect_radius),
-                        value = param1,
-                        valueRange = 1f..60f,
-                        unit = "px",
-                        onValueChange = { param1 = it }
-                    )
+                    ProEffectSlider(stringResource(R.string.effect_radius), p.p1, 0.3f..100f, "px") { v -> upd { it.copy(p1 = v) } }
                 }
-
                 ProFilterType.SURFACE_BLUR -> {
-                    ProEffectSlider(
-                        label = stringResource(R.string.effect_radius),
-                        value = param1,
-                        valueRange = 1f..25f,
-                        unit = "px",
-                        onValueChange = { param1 = it }
-                    )
-                    ProEffectSlider(
-                        label = stringResource(R.string.effect_threshold),
-                        value = param2,
-                        valueRange = 5f..80f,
-                        unit = "",
-                        onValueChange = { param2 = it }
-                    )
+                    ProEffectSlider(stringResource(R.string.effect_radius), p.p1, 1f..50f, "px") { v -> upd { it.copy(p1 = v) } }
+                    ProEffectSlider(stringResource(R.string.effect_threshold), p.p2, 2f..100f, "") { v -> upd { it.copy(p2 = v) } }
                 }
-
                 ProFilterType.OIL_PAINT -> {
-                    ProEffectSlider(
-                        label = stringResource(R.string.effect_radius),
-                        value = param1,
-                        valueRange = 1f..12f,
-                        unit = "px",
-                        onValueChange = { param1 = it }
-                    )
-                    ProEffectSlider(
-                        label = stringResource(R.string.effect_levels),
-                        value = param2,
-                        valueRange = 4f..32f,
-                        unit = "",
-                        onValueChange = { param2 = it }
-                    )
+                    ProEffectSlider(stringResource(R.string.effect_brush_size), p.p1, 1f..12f, "", step = 1f) { v -> upd { it.copy(p1 = v) } }
+                    ProEffectSlider(stringResource(R.string.effect_texture), p.p2, 0f..100f, "%") { v -> upd { it.copy(p2 = v) } }
                 }
-
                 ProFilterType.SHARPEN -> {
-                    ProEffectSlider(
-                        label = stringResource(R.string.effect_amount),
-                        value = param1,
-                        valueRange = 20f..300f,
-                        unit = "%",
-                        onValueChange = { param1 = it }
-                    )
-                    ProEffectSlider(
-                        label = stringResource(R.string.effect_radius),
-                        value = param2,
-                        valueRange = 0.5f..5f,
-                        unit = "px",
-                        onValueChange = { param2 = it }
-                    )
+                    ProEffectSlider(stringResource(R.string.effect_amount), p.p1, 0f..500f, "%") { v -> upd { it.copy(p1 = v) } }
+                    ProEffectSlider(stringResource(R.string.effect_radius), p.p2, 0.1f..10f, "px") { v -> upd { it.copy(p2 = v) } }
+                    ProEffectSlider(stringResource(R.string.effect_threshold), p.p3, 0f..50f, "") { v -> upd { it.copy(p3 = v) } }
                 }
-
                 ProFilterType.NOISE_REDUCTION -> {
-                    ProEffectSlider(
-                        label = stringResource(R.string.effect_strength),
-                        value = param1,
-                        valueRange = 1f..8f,
-                        unit = "",
-                        onValueChange = { param1 = it }
-                    )
-                    ProEffectSlider(
-                        label = stringResource(R.string.effect_threshold),
-                        value = param2,
-                        valueRange = 5f..50f,
-                        unit = "",
-                        onValueChange = { param2 = it }
-                    )
+                    ProEffectSlider(stringResource(R.string.effect_luminance_noise), p.p1, 0f..100f, "%") { v -> upd { it.copy(p1 = v) } }
+                    ProEffectSlider(stringResource(R.string.effect_color_noise), p.p2, 0f..100f, "%") { v -> upd { it.copy(p2 = v) } }
+                    ProEffectSlider(stringResource(R.string.effect_detail), p.p3, 0f..100f, "%") { v -> upd { it.copy(p3 = v) } }
                 }
-
                 ProFilterType.MOTION_BLUR -> {
-                    ProEffectSlider(
-                        label = stringResource(R.string.effect_distance),
-                        value = param1,
-                        valueRange = 2f..60f,
-                        unit = "px",
-                        onValueChange = { param1 = it }
-                    )
-                    ProEffectSlider(
-                        label = stringResource(R.string.effect_angle),
-                        value = param2,
-                        valueRange = 0f..360f,
-                        unit = "°",
-                        onValueChange = { param2 = it }
-                    )
+                    ProEffectSlider(stringResource(R.string.effect_distance), p.p1, 1f..200f, "px") { v -> upd { it.copy(p1 = v) } }
+                    ProEffectSlider(stringResource(R.string.effect_angle), p.p2, 0f..360f, "°", step = 1f) { v -> upd { it.copy(p2 = v) } }
                 }
-
                 ProFilterType.RADIAL_BLUR -> {
-                    ProEffectSlider(
-                        label = stringResource(R.string.effect_amount),
-                        value = param1,
-                        valueRange = 5f..60f,
-                        unit = "",
-                        onValueChange = { param1 = it }
-                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(horizontal = 4.dp)) {
+                        FilterChip(
+                            selected = p.mode == 0,
+                            onClick = { upd { it.copy(mode = 0) } },
+                            label = { Text(stringResource(R.string.effect_zoom), fontSize = 12.sp) },
+                            modifier = Modifier.heightIn(min = 38.dp).testTag("chip_radial_zoom")
+                        )
+                        FilterChip(
+                            selected = p.mode == 1,
+                            onClick = { upd { it.copy(mode = 1) } },
+                            label = { Text(stringResource(R.string.effect_spin), fontSize = 12.sp) },
+                            modifier = Modifier.heightIn(min = 38.dp).testTag("chip_radial_spin")
+                        )
+                    }
+                    ProEffectSlider(stringResource(R.string.effect_amount), p.p1, 1f..100f, "%") { v -> upd { it.copy(p1 = v) } }
+                }
+                ProFilterType.LENS_BLUR -> {
+                    ProEffectSlider(stringResource(R.string.effect_radius), p.p1, 1f..60f, "px") { v -> upd { it.copy(p1 = v) } }
+                    ProEffectSlider(stringResource(R.string.effect_highlights), p.p2, 0f..100f, "%") { v -> upd { it.copy(p2 = v) } }
+                }
+                ProFilterType.TILT_SHIFT -> {
+                    ProEffectSlider(stringResource(R.string.effect_radius), p.p1, 1f..60f, "px") { v -> upd { it.copy(p1 = v) } }
+                    ProEffectSlider(stringResource(R.string.effect_focus_size), p.p2, 2f..90f, "%") { v -> upd { it.copy(p2 = v) } }
+                    ProEffectSlider(stringResource(R.string.effect_transition), p.p3, 2f..80f, "%") { v -> upd { it.copy(p3 = v) } }
+                    ProEffectSlider(stringResource(R.string.effect_angle), p.angle, -90f..90f, "°", step = 1f) { v -> upd { it.copy(angle = v) } }
+                }
+                ProFilterType.HIGH_PASS -> {
+                    ProEffectSlider(stringResource(R.string.effect_radius), p.p1, 0.3f..50f, "px") { v -> upd { it.copy(p1 = v) } }
                 }
             }
+            // Every effect can be faded into the original.
+            ProEffectSlider(stringResource(R.string.effect_fade), p.fade, 0f..100f, "%", step = 1f) { v -> upd { it.copy(fade = v) } }
 
             Spacer(Modifier.height(12.dp))
 
-            // Action Buttons: Apply to Layer
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 OutlinedButton(onClick = onCancel, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) {
                     Text(stringResource(R.string.action_close), fontSize = 12.sp)
                 }
+                OutlinedButton(
+                    onClick = { proParams = com.example.engine.ProEffects.defaults(selectedProEffect) },
+                    modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("btn_reset_pro_effect")
+                ) {
+                    Text(stringResource(R.string.effect_reset), fontSize = 12.sp)
+                }
                 Button(
-                    onClick = {
-                        onApplyProEffect?.invoke(selectedProEffect, param1, param2)
-                    },
+                    onClick = { onApplyProEffect?.invoke(selectedProEffect, effectiveProParams) },
+                    enabled = isImageLayer,
                     modifier = Modifier.weight(1.5f).heightIn(min = 48.dp).testTag("btn_apply_pro_effect"),
                     colors = ButtonDefaults.buttonColors(containerColor = AmberAccent, contentColor = Color.Black)
                 ) {
@@ -703,6 +672,7 @@ private fun ProEffectSlider(
     value: Float,
     valueRange: ClosedFloatingPointRange<Float>,
     unit: String,
+    step: Float = 0f,
     onValueChange: (Float) -> Unit
 ) {
     Column(Modifier.padding(vertical = 2.dp)) {
@@ -712,16 +682,19 @@ private fun ProEffectSlider(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(label, color = Color.White, fontSize = 12.sp)
+            val shown = if (step == 0f && kotlin.math.abs(value) < 10f) {
+                (kotlin.math.round(value * 10f) / 10f).toString()
+            } else kotlin.math.round(value).toInt().toString()
             Text(
-                "${value.toInt()}$unit",
+                "$shown$unit",
                 color = AmberAccent,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold
             )
         }
         Slider(
-            value = value,
-            onValueChange = onValueChange,
+            value = value.coerceIn(valueRange.start, valueRange.endInclusive),
+            onValueChange = { v -> onValueChange(if (step > 0f) kotlin.math.round(v / step) * step else v) },
             valueRange = valueRange,
             colors = SliderDefaults.colors(
                 thumbColor = AmberAccent,

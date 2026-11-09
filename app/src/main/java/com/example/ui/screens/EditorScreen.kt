@@ -335,7 +335,9 @@ fun EditorScreen(
     val onSetEditingMask: ((Boolean) -> Unit) = { isEditing -> viewModel.setEditingMask(isEditing) }
     val onToggleMaskPaintColor: (() -> Unit) = { viewModel.toggleMaskPaintColor() }
     val isMaskEditingBlack = uiState.isMaskEditingBlack
-    val onApplyProEffect: ((com.example.data.model.ProFilterType, Float, Float) -> Unit) = { effect, p1, p2 -> viewModel.applyProFilter(effect, p1, p2) }
+    val onApplyProEffect: ((com.example.data.model.ProFilterType, com.example.engine.ProEffectParams) -> Unit) = { effect, params -> viewModel.applyProFilter(effect, params) }
+    val proEffectProgress = uiState.proEffectProgress
+    val onCancelProEffect: () -> Unit = { viewModel.cancelProEffect() }
     val onMaskDensityChange: ((Float) -> Unit) = { viewModel.setLayerMaskDensity(it) }
     val onMaskFeatherChange: ((Float) -> Unit) = { viewModel.setLayerMaskFeather(it) }
     val onRevealAllMask: (() -> Unit) = { viewModel.revealAllLayerMask() }
@@ -457,10 +459,28 @@ fun EditorScreen(
         }
     }
 
+    // Pro effects with a centre (radial blur, tilt-shift): a tap on the image places it. Stored
+    // normalised to the layer image so preview and full-resolution apply agree.
+    var proCenter by remember { mutableStateOf(0.5f to 0.5f) }
+    var proCenterPick by remember { mutableStateOf(false) }
+    LaunchedEffect(activeTool, selectedLayerIndex) { if (activeTool != ActiveTool.FILTERS) proCenterPick = false; proCenter = 0.5f to 0.5f }
+
     // Replace colour: eyedropper for (replacement index, source?).
     var replacePick by remember { mutableStateOf<Pair<Int, Boolean>?>(null) }
     LaunchedEffect(activeTool) { if (activeTool != ActiveTool.ADJUST) { curvePickMode = null; curveSample = null; replacePick = null } }
     val canvasSampler: ((Float, Float) -> Unit)? = when {
+        activeTool == ActiveTool.FILTERS && proCenterPick -> { x, y ->
+            val l = project.layers.getOrNull(selectedLayerIndex)
+            val bmp = l?.bitmap
+            if (l != null && bmp != null && !bmp.isRecycled) {
+                val inv = android.graphics.Matrix()
+                if (SelectionEngine.getLayerMatrix(l, project.width, project.height).invert(inv)) {
+                    val pts = floatArrayOf(x, y)
+                    inv.mapPoints(pts)
+                    proCenter = (pts[0] / bmp.width).coerceIn(0f, 1f) to (pts[1] / bmp.height).coerceIn(0f, 1f)
+                }
+            }
+        }
         activeTool == ActiveTool.ADJUST && replacePick != null -> { x, y ->
             val target = replacePick
             val color = onSampleReplaceColor?.invoke(x, y)
@@ -690,6 +710,24 @@ fun EditorScreen(
                         fontSize = 11.sp,
                         maxLines = 1
                     )
+                    // A Pro effect being applied: progress and cancel.
+                    val prog = proEffectProgress
+                    if (prog != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            androidx.compose.material3.LinearProgressIndicator(
+                                progress = { prog },
+                                modifier = Modifier.weight(1f).height(3.dp),
+                                color = AmberAccent
+                            )
+                            androidx.compose.material3.TextButton(
+                                onClick = onCancelProEffect,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                modifier = Modifier.heightIn(min = 32.dp).testTag("btn_cancel_pro_effect")
+                            ) {
+                                Text(stringResource(R.string.effect_cancel), color = AmberAccent, fontSize = 11.sp)
+                            }
+                        }
+                    }
                 }
 
                 val undoEnabled = canUndo && !isProcessing
@@ -856,22 +894,25 @@ fun EditorScreen(
                                 onCompareChange = { compareOriginal = it },
                                 onApply = { onCommitHistoryState(); onToolSelect(ActiveTool.NONE) },
                                 onCancel = { onCancelHistoryState(); onToolSelect(ActiveTool.NONE) },
-                                onApplyProEffect = { effect, p1, p2 ->
+                                onApplyProEffect = { effect, params ->
                                     // Keep showing exactly what is being applied until the result arrives.
-                                    proEffectPreview = com.example.engine.ProEffectPreview(layer.id, layer.bitmap, effect, p1, p2, fullResMaxDimension)
+                                    proEffectPreview = com.example.engine.ProEffectPreview(layer.id, layer.bitmap, effect, params, fullResMaxDimension)
                                     proApplyPhase = 1
-                                    onApplyProEffect?.invoke(effect, p1, p2)
+                                    onApplyProEffect?.invoke(effect, params)
                                     onToolSelect(ActiveTool.NONE)
                                 },
                                 hasActiveSelection = hasSel,
                                 onClearSelection = onClearSelection,
-                                onPreviewProEffect = { effect, p1, p2 ->
+                                onPreviewProEffect = { effect, params ->
                                     if (proApplyPhase == 0) {
-                                        proEffectPreview = effect?.let {
-                                            com.example.engine.ProEffectPreview(layer.id, layer.bitmap, it, p1, p2, fullResMaxDimension)
-                                        }
+                                        proEffectPreview = if (effect != null && params != null) {
+                                            com.example.engine.ProEffectPreview(layer.id, layer.bitmap, effect, params, fullResMaxDimension)
+                                        } else null
                                     }
-                                }
+                                },
+                                proCenter = proCenter,
+                                onProCenterPickChange = { proCenterPick = it },
+                                isImageLayer = layer.type == com.example.data.model.LayerType.IMAGE
                             )
                         }
                     }

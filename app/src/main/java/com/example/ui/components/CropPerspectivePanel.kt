@@ -159,6 +159,7 @@ fun CropPerspectivePanel(
         }
 
         Spacer(Modifier.height(6.dp))
+        Box(Modifier.padding(horizontal = 12.dp)) { ScopeLabel(stringResource(R.string.scope_whole_image)) }
         if (!isPerspectiveActive) {
             Text(stringResource(R.string.crop_pro_hint), color = Color.LightGray, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 16.dp))
             Text(
@@ -197,6 +198,13 @@ fun CropPerspectivePanel(
             }
 
             // Whole-image rotate / flip.
+            Text(
+                stringResource(R.string.crop_section_rotate_flip),
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+            )
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 12.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly

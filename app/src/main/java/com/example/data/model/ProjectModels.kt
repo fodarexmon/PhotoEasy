@@ -12,7 +12,10 @@ enum class ProFilterType(val displayNameResId: Int) {
     SHARPEN(R.string.effect_sharpen),
     NOISE_REDUCTION(R.string.effect_noise_reduction),
     MOTION_BLUR(R.string.effect_motion_blur),
-    RADIAL_BLUR(R.string.effect_radial_blur);
+    RADIAL_BLUR(R.string.effect_radial_blur),
+    LENS_BLUR(R.string.effect_lens_blur),
+    TILT_SHIFT(R.string.effect_tilt_shift),
+    HIGH_PASS(R.string.effect_high_pass);
 
     val resId: Int get() = displayNameResId
 }

@@ -84,6 +84,8 @@ data class EditorUiState(
     val activeTool: ActiveTool = ActiveTool.NONE,
     val isProcessing: Boolean = false,
     val statusMessage: String? = null,
+    /** Progress 0..1 of a Pro effect being applied (null = none running). */
+    val proEffectProgress: Float? = null,
     val activeSelectionTool: SelectionToolType = SelectionToolType.QUICK_BRUSH,
     val selectionMode: SelectionMode = SelectionMode.ADD,
     val selectionMask: Bitmap? = null,
@@ -1546,6 +1548,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_layer_locked))
                 return
             }
+            // A one-layer image: rotating by 90 degrees means rotating the picture, so the canvas
+            // turns with it (no cut-off corners or empty bands on a non-square image).
+            if (proj.layers.size == 1 && kotlin.math.abs(kotlin.math.abs(degrees) - 90f) < 0.01f) {
+                rotateCanvas90(degrees > 0f, R.string.status_rotated_whole_image)
+                return
+            }
             saveHistoryState()
             layer.ensureMaskAnchor()
             layer.rotation = (layer.rotation + degrees) % 360f
@@ -1627,7 +1635,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /** Rotates the whole image (canvas and every layer) by 90 degrees. */
-    fun rotateCanvas90(clockwise: Boolean) {
+    fun rotateCanvas90(clockwise: Boolean, @StringRes statusRes: Int = R.string.status_canvas_rotated) {
         val proj = _uiState.value.currentProject ?: return
         val w = proj.width
         val h = proj.height
@@ -1650,7 +1658,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         proj.width = h
         proj.height = w
         commitProjectMutation(
-            statusMessage = tr(R.string.status_canvas_rotated),
+            statusMessage = tr(statusRes),
             transformState = {
                 it.copy(
                     selectionMask = SelectionEngine.createBlankMask(h, w),
@@ -3702,21 +3710,48 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.value = _uiState.value.copy(maskBrushSizeDp = sizeDp.coerceIn(2f, 120f))
     }
 
-    fun applyProFilter(effect: ProFilterType, param1: Float, param2: Float = 0f) {
+    private var proEffectJob: Job? = null
+
+    /** Cancels a Pro effect that is being applied (the layer stays unchanged). */
+    fun cancelProEffect() {
+        proEffectJob?.cancel()
+    }
+
+    fun applyProFilter(effect: ProFilterType, params: com.example.engine.ProEffectParams) {
         val proj = _uiState.value.currentProject ?: return
         val idx = _uiState.value.selectedLayerIndex
         val layer = proj.layers.getOrNull(idx) ?: return
-        if (layer.isLocked || layer.type != LayerType.IMAGE) return
+        if (layer.isLocked) {
+            _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_layer_locked))
+            return
+        }
+        if (layer.type != LayerType.IMAGE) {
+            _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.effect_needs_image_layer))
+            return
+        }
+        if (proEffectJob?.isActive == true) return
 
-        viewModelScope.launch {
+        proEffectJob = viewModelScope.launch {
             _uiState.value = _uiState.value.copy(
                 isProcessing = true,
+                proEffectProgress = 0f,
                 statusMessage = tr(R.string.status_processing)
             )
+            val job = currentCoroutineContext()[Job]
             try {
                 val src = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Image unavailable")
                 val processed = withContext(Dispatchers.Default) {
-                    ImageProcessor.applyProEffect(src, effect, param1, param2)
+                    ImageProcessor.applyProEffect(
+                        src, effect, params,
+                        isCancelled = { job?.isCancelled == true },
+                        onProgress = { f ->
+                            viewModelScope.launch(Dispatchers.Main) {
+                                if (_uiState.value.proEffectProgress != null) {
+                                    _uiState.value = _uiState.value.copy(proEffectProgress = f * 0.95f)
+                                }
+                            }
+                        }
+                    )
                 }
 
                 // Scope effect strictly to selection if an active selection exists
@@ -3738,17 +3773,26 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 if (finalProcessed !== layer.bitmap && !finalProcessed.isRecycled) finalProcessed.recycle()
                 commitProjectMutation(
                     statusMessage = tr(R.string.status_effect_applied),
-                    transformState = { it.copy(isProcessing = false) }
+                    transformState = { it.copy(isProcessing = false, proEffectProgress = null) }
                 )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                _uiState.value = _uiState.value.copy(
+                    isProcessing = false,
+                    proEffectProgress = null,
+                    statusMessage = tr(R.string.effect_cancelled)
+                )
+                throw e
             } catch (e: OutOfMemoryError) {
                 System.gc()
                 _uiState.value = _uiState.value.copy(
                     isProcessing = false,
+                    proEffectProgress = null,
                     statusMessage = tr(R.string.status_processing_failed_memory)
                 )
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(
                     isProcessing = false,
+                    proEffectProgress = null,
                     statusMessage = tr(R.string.status_effect_failed)
                 )
             }

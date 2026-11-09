@@ -97,10 +97,10 @@
     
     <!-- Crop & Transform -->
     <string name="crop_free">قص حر</string>
-    <string name="rotate_left">تدوير يسار</string>
-    <string name="rotate_right">تدوير يمين</string>
+    <string name="rotate_left">تدوير لليسار</string>
+    <string name="rotate_right">تدوير لليمين</string>
     <string name="flip_h">عكس أفقي</string>
-    <string name="flip_v">عكس رأسي</string>
+    <string name="flip_v">عكس عمودي</string>
     <string name="perspective_transform">قص منظوري</string>
     <string name="drag_corners_perspective">اسحب الزوايا الأربع لتطابق حواف العنصر ثم اضغط تطبيق للقص والاستعدال.</string>
     
@@ -338,8 +338,8 @@
     <string name="crop_straighten">تسوية الأفق</string>
     <string name="crop_rotate_left">تدوير لليسار</string>
     <string name="crop_rotate_right">تدوير لليمين</string>
-    <string name="crop_flip_h">قلب أفقي</string>
-    <string name="crop_flip_v">قلب عمودي</string>
+    <string name="crop_flip_h">عكس أفقي</string>
+    <string name="crop_flip_v">عكس عمودي</string>
     <string name="crop_swap_orientation">تبديل طولي / عرضي</string>
     <string name="crop_size_post_square">منشور</string>
     <string name="crop_size_post_portrait">منشور طولي</string>
@@ -483,7 +483,7 @@
     <string name="select_quick_subtract_hint">يمتد التحديد حتى حدود العنصر من ضربة قصيرة. استخدم الطرح (أو الضغط المطوّل) لإزالة أجزاء بنفس الذكاء.</string>
 
     <!-- Perspective Crop Strings -->
-    <string name="perspective_fit_canvas">ملاءمة للصورة</string>
+    <string name="perspective_fit_canvas">الإطار على كامل الصورة</string>
     <string name="perspective_drag_hint">اسحب الزوايا أو مقابض الحواف. اسحب داخل الإطار لتحريكه بالكامل.</string>
     <string name="perspective_loupe">عدسة مكبرة</string>
 
@@ -573,9 +573,9 @@
     <string name="transform_proportional">قفل النسبة والتناسب</string>
     <string name="transform_pos_x">الموضع الأفقي X</string>
     <string name="transform_pos_y">الموضع الرأسي Y</string>
-    <string name="transform_center_canvas">توسيط في اللوحة</string>
-    <string name="transform_fit_canvas">ملاءمة للوحة</string>
-    <string name="transform_fill_canvas">تعبئة اللوحة</string>
+    <string name="transform_center_canvas">توسيط في الصورة</string>
+    <string name="transform_fit_canvas">ملاءمة الطبقة داخل الصورة</string>
+    <string name="transform_fill_canvas">ملء الصورة بالطبقة</string>
     <string name="transform_exact_values">قيم دقيقة</string>
     <string name="transform_mode_free">حر</string>
     <string name="transform_mode_skew">إمالة</string>
@@ -583,6 +583,13 @@
     <string name="transform_hint_free">الزوايا تكبّر من الزاوية المقابلة، والحواف على محاور الطبقة، والمقبض العلوي للتدوير. إصبعان على الطبقة: تكبير وتدوير.</string>
     <string name="transform_hint_skew">اسحب حافة على امتدادها لإمالة الطبقة.</string>
     <string name="transform_hint_distort">اسحب كل زاوية بحرية، مثلاً لوضع صورة على شاشة أو لافتة.</string>
+    <string name="scope_selected_layer">يغيّر الطبقة المحددة فقط</string>
+    <string name="scope_whole_image">يغيّر الصورة كاملة (كل الطبقات)</string>
+    <string name="transform_section_rotate_flip">تدوير وعكس الطبقة</string>
+    <string name="crop_section_rotate_flip">تدوير وعكس الصورة كاملة</string>
+    <string name="transform_tilted_photo_hint">لتعديل صورة مائلة استخدم «تسوية الأفق» في القص.</string>
+    <string name="transform_distort_vs_perspective_hint">لتصحيح منظور مستند أو مبنى في الصورة كاملة استخدم «القص المنظوري».</string>
+    <string name="status_rotated_whole_image">صورة بطبقة واحدة: تم تدوير الصورة كاملة</string>
     <string name="transform_from_center">من المركز</string>
     <string name="transform_snap">التقاط وأدلة</string>
     <string name="transform_skew_h">إمالة أفقية</string>
@@ -630,10 +637,30 @@
     <string name="effect_noise_reduction">إزالة التشويش (Denoise)</string>
     <string name="effect_motion_blur">تمويه حركي (Motion Blur)</string>
     <string name="effect_radial_blur">تمويه شعاعي (Radial Blur)</string>
+    <string name="effect_lens_blur">تمويه العدسة (بوكيه)</string>
+    <string name="effect_tilt_shift">إمالة وإزاحة (Tilt-Shift)</string>
+    <string name="effect_high_pass">تمرير عالٍ (High Pass)</string>
+    <string name="effect_brush_size">حجم الفرشاة</string>
+    <string name="effect_texture">ملمس الشعيرات</string>
+    <string name="effect_luminance_noise">ضوضاء الإضاءة</string>
+    <string name="effect_color_noise">ضوضاء الألوان</string>
+    <string name="effect_detail">الحفاظ على التفاصيل</string>
+    <string name="effect_highlights">إبراز النقاط المضيئة</string>
+    <string name="effect_focus_size">حجم منطقة التركيز</string>
+    <string name="effect_transition">نعومة الانتقال</string>
+    <string name="effect_fade">شدة التأثير</string>
+    <string name="effect_zoom">تقريب</string>
+    <string name="effect_spin">دوران</string>
+    <string name="effect_tap_center_hint">المس الصورة لتحديد المركز. المعاينة مباشرة ولا يتغير شيء حتى تضغط تطبيق.</string>
+    <string name="effect_cancelled">تم إلغاء التأثير</string>
+    <string name="effect_needs_image_layer">التأثيرات تعمل على طبقات الصور. اختر طبقة صورة (أو حوّل هذه الطبقة إلى صورة).</string>
+    <string name="effect_cancel">إلغاء</string>
+    <string name="effect_reset">إعادة ضبط</string>
+    <string name="effect_high_pass_hint">نصيحة: اجعل وضع دمج الطبقة تراكب (Overlay) أو ضوء ناعم لتحصل على حدة بها.</string>
     <string name="effect_radius">نصف القطر</string>
     <string name="effect_threshold">عتبة الحواف (Threshold)</string>
     <string name="effect_levels">مستويات التنعيم والطلاء</string>
-    <string name="effect_amount">مقدار الحدة</string>
+    <string name="effect_amount">المقدار</string>
     <string name="effect_strength">قوة تنقية التشويش</string>
     <string name="effect_distance">مسافة الحركة</string>
     <string name="effect_angle">الزاوية</string>

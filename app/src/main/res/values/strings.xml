@@ -97,10 +97,10 @@
     
     <!-- Crop & Transform -->
     <string name="crop_free">Freeform</string>
-    <string name="rotate_left">Rotate Left</string>
-    <string name="rotate_right">Rotate Right</string>
-    <string name="flip_h">Flip H</string>
-    <string name="flip_v">Flip V</string>
+    <string name="rotate_left">Rotate left</string>
+    <string name="rotate_right">Rotate right</string>
+    <string name="flip_h">Flip horizontal</string>
+    <string name="flip_v">Flip vertical</string>
     <string name="perspective_transform">Perspective Crop</string>
     <string name="drag_corners_perspective">Drag the 4 corners to fit the object. Tap Apply to crop and straighten.</string>
     
@@ -338,8 +338,8 @@
     <string name="crop_straighten">Straighten</string>
     <string name="crop_rotate_left">Rotate left</string>
     <string name="crop_rotate_right">Rotate right</string>
-    <string name="crop_flip_h">Flip H</string>
-    <string name="crop_flip_v">Flip V</string>
+    <string name="crop_flip_h">Flip horizontal</string>
+    <string name="crop_flip_v">Flip vertical</string>
     <string name="crop_swap_orientation">Swap portrait / landscape</string>
     <string name="crop_size_post_square">Post</string>
     <string name="crop_size_post_portrait">Portrait post</string>
@@ -483,7 +483,7 @@
     <string name="select_quick_subtract_hint">Grows to the object edge from a short stroke. Use Subtract (or hold) to remove parts the same way.</string>
 
     <!-- Perspective Crop Strings -->
-    <string name="perspective_fit_canvas">Fit to Image</string>
+    <string name="perspective_fit_canvas">Frame whole image</string>
     <string name="perspective_drag_hint">Drag corners or edge handles. Drag inside to move quad.</string>
     <string name="perspective_loupe">Loupe</string>
 
@@ -573,9 +573,9 @@
     <string name="transform_proportional">Lock Proportions</string>
     <string name="transform_pos_x">Position X</string>
     <string name="transform_pos_y">Position Y</string>
-    <string name="transform_center_canvas">Center on Canvas</string>
-    <string name="transform_fit_canvas">Fit to Canvas</string>
-    <string name="transform_fill_canvas">Fill Canvas</string>
+    <string name="transform_center_canvas">Center in image</string>
+    <string name="transform_fit_canvas">Fit layer in image</string>
+    <string name="transform_fill_canvas">Fill image with layer</string>
     <string name="transform_exact_values">Exact values</string>
     <string name="transform_mode_free">Free</string>
     <string name="transform_mode_skew">Skew</string>
@@ -583,6 +583,13 @@
     <string name="transform_hint_free">Corners scale from the opposite corner, edges along the layer, the top handle rotates. Two fingers on the layer: scale and rotate.</string>
     <string name="transform_hint_skew">Drag an edge along itself to slant the layer.</string>
     <string name="transform_hint_distort">Drag each corner freely, e.g. to place an image on a screen or a sign.</string>
+    <string name="scope_selected_layer">Changes the selected layer only</string>
+    <string name="scope_whole_image">Changes the whole image (all layers)</string>
+    <string name="transform_section_rotate_flip">Rotate &amp; flip layer</string>
+    <string name="crop_section_rotate_flip">Rotate &amp; flip whole image</string>
+    <string name="transform_tilted_photo_hint">To fix a tilted photo, use Straighten in Crop.</string>
+    <string name="transform_distort_vs_perspective_hint">To correct a document or building in the whole image, use Perspective crop.</string>
+    <string name="status_rotated_whole_image">One-layer image: the whole image was rotated</string>
     <string name="transform_from_center">From center</string>
     <string name="transform_snap">Snap &amp; guides</string>
     <string name="transform_skew_h">Horizontal skew</string>
@@ -630,10 +637,30 @@
     <string name="effect_noise_reduction">Noise Reduction</string>
     <string name="effect_motion_blur">Motion Blur</string>
     <string name="effect_radial_blur">Radial / Zoom Blur</string>
+    <string name="effect_lens_blur">Lens Blur (Bokeh)</string>
+    <string name="effect_tilt_shift">Tilt-Shift</string>
+    <string name="effect_high_pass">High Pass</string>
+    <string name="effect_brush_size">Brush size</string>
+    <string name="effect_texture">Bristle texture</string>
+    <string name="effect_luminance_noise">Luminance noise</string>
+    <string name="effect_color_noise">Colour noise</string>
+    <string name="effect_detail">Preserve detail</string>
+    <string name="effect_highlights">Bright highlights</string>
+    <string name="effect_focus_size">Focus size</string>
+    <string name="effect_transition">Transition</string>
+    <string name="effect_fade">Effect opacity</string>
+    <string name="effect_zoom">Zoom</string>
+    <string name="effect_spin">Spin</string>
+    <string name="effect_tap_center_hint">Tap the image to place the centre. Previewed live; nothing changes until you apply.</string>
+    <string name="effect_cancelled">Effect cancelled</string>
+    <string name="effect_needs_image_layer">Effects work on image layers. Select an image layer (or rasterize this one).</string>
+    <string name="effect_cancel">Cancel</string>
+    <string name="effect_reset">Reset</string>
+    <string name="effect_high_pass_hint">Tip: set the layer blend mode to Overlay or Soft Light to sharpen with it.</string>
     <string name="effect_radius">Radius</string>
     <string name="effect_threshold">Edge Threshold</string>
     <string name="effect_levels">Smoothness &amp; Paint Levels</string>
-    <string name="effect_amount">Sharpen Amount</string>
+    <string name="effect_amount">Amount</string>
     <string name="effect_strength">Denoise Strength</string>
     <string name="effect_distance">Motion Distance</string>
     <string name="effect_angle">Angle</string>

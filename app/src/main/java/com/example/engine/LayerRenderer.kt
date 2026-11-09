@@ -42,8 +42,7 @@ data class ProEffectPreview(
     val layerId: String,
     val sourceBitmap: Bitmap?,
     val effect: com.example.data.model.ProFilterType,
-    val param1: Float,
-    val param2: Float,
+    val params: ProEffectParams,
     val fullResMaxDimension: Int
 )
 
@@ -70,15 +69,15 @@ object LayerRenderer {
             (inputMax.toFloat() / preview.fullResMaxDimension.toFloat()).coerceAtMost(1f)
         } else 1f
         val key = "${System.identityHashCode(preview.sourceBitmap)}:${preview.sourceBitmap?.generationId}:" +
-                "${input.width}x${input.height}:${preview.effect}:${preview.param1}:${preview.param2}:${preview.fullResMaxDimension}"
+                "${input.width}x${input.height}:${preview.effect}:${preview.params}:${preview.fullResMaxDimension}"
         synchronized(proCacheLock) {
             val cached = proCacheBitmap
             if (key == proCacheKey && cached != null && !cached.isRecycled) {
                 return cached.copy(Bitmap.Config.ARGB_8888, true)
             }
         }
-        val (p1, p2) = ImageProcessor.scaleProEffectParams(preview.effect, preview.param1, preview.param2, ratio)
-        var result = ImageProcessor.applyProEffect(input, preview.effect, p1, p2, isCancelled)
+        val scaled = ProEffects.scaleForPreview(preview.effect, preview.params, ratio)
+        var result = ProEffects.apply(input, preview.effect, scaled, isCancelled)
         if (result === input) result = input.copy(Bitmap.Config.ARGB_8888, true)
         // A cancelled effect may stop early with partial pixels; never cache those.
         try {
