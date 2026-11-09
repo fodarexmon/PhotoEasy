@@ -631,32 +631,6 @@ fun CanvasView(
      * for [layer]. Text layers are measured with the same StaticLayout the renderer uses and are
      * centred on their position; bitmap layers use the layer matrix.
      */
-    /** True when the document point lies inside [layer]'s (possibly rotated) box. */
-    fun layerContainsDoc(layer: Layer, x: Float, y: Float): Boolean {
-        val c = layerCornersDoc(layer)
-        var sign = 0
-        for (i in 0 until 4) {
-            val ax = c[i * 2]; val ay = c[i * 2 + 1]
-            val bx = c[((i + 1) % 4) * 2]; val by = c[((i + 1) % 4) * 2 + 1]
-            val cross = (bx - ax) * (y - ay) - (by - ay) * (x - ax)
-            val s = if (cross > 0f) 1 else if (cross < 0f) -1 else 0
-            if (s != 0) {
-                if (sign == 0) sign = s else if (s != sign) return false
-            }
-        }
-        return true
-    }
-
-    /** Topmost visible text layer under a document point, or -1. */
-    fun textLayerIndexAt(x: Float, y: Float): Int {
-        val layers = latestProject.layers
-        for (i in layers.indices.reversed()) {
-            val l = layers[i]
-            if (l.isVisible && l.type == com.example.data.model.LayerType.TEXT && layerContainsDoc(l, x, y)) return i
-        }
-        return -1
-    }
-
     /**
      * Placement of the layer's box WITHOUT its skew / distort: local -> document matrix and the
      * local box size (bitmap pixels, or the text layout / canvas size).
@@ -698,6 +672,32 @@ fun CanvasView(
         val pts = floatArrayOf(0f, 0f, w, 0f, w, h, 0f, h)
         matrix.mapPoints(pts)
         return pts
+    }
+
+    /** True when the document point lies inside [layer]'s (possibly rotated) box. */
+    fun layerContainsDoc(layer: Layer, x: Float, y: Float): Boolean {
+        val c = layerCornersDoc(layer)
+        var sign = 0
+        for (i in 0 until 4) {
+            val ax = c[i * 2]; val ay = c[i * 2 + 1]
+            val bx = c[((i + 1) % 4) * 2]; val by = c[((i + 1) % 4) * 2 + 1]
+            val cross = (bx - ax) * (y - ay) - (by - ay) * (x - ax)
+            val s = if (cross > 0f) 1 else if (cross < 0f) -1 else 0
+            if (s != 0) {
+                if (sign == 0) sign = s else if (s != sign) return false
+            }
+        }
+        return true
+    }
+
+    /** Topmost visible text layer under a document point, or -1. */
+    fun textLayerIndexAt(x: Float, y: Float): Int {
+        val layers = latestProject.layers
+        for (i in layers.indices.reversed()) {
+            val l = layers[i]
+            if (l.isVisible && l.type == com.example.data.model.LayerType.TEXT && layerContainsDoc(l, x, y)) return i
+        }
+        return -1
     }
 
     Box(
@@ -1421,7 +1421,7 @@ fun CanvasView(
                                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                                 if (!change.pressed) break
                                 change.consume()
-                                val dx = (change.position.x - down.position.x) / density
+                                val dx = (change.position.x - down.position.x) / density.density
                                 if (abs(dx - lastDx) >= 0.5f) {
                                     lastDx = dx
                                     latestOnTargetedDrag?.invoke(d.x, d.y, dx, com.example.ui.viewmodel.StrokePhase.MOVE)

@@ -33,6 +33,7 @@ import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
+@org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
 class PhotoEasyRobolectricTest {
 
     private lateinit var context: Context
@@ -1393,7 +1394,7 @@ class PhotoEasyRobolectricTest {
         assertTrue("bright red becomes blue", Color.blue(bright) > Color.red(bright))
         assertTrue("shadowed red becomes blue too", Color.blue(dark) > Color.red(dark))
         assertTrue("shading is kept", Color.blue(dark) < Color.blue(bright))
-        assertEquals(128, Color.red(out.getPixel(2, 0)), 2)
+        assertEquals(128f, Color.red(out.getPixel(2, 0)).toFloat(), 2f)
     }
 
     @Test
@@ -1457,7 +1458,6 @@ class PhotoEasyRobolectricTest {
 
     // --- Selection refine ----------------------------------------------------------------------------
 
-    private fun alphaAt(mask: Bitmap, x: Int, y: Int) = (mask.getPixel(x, y) ushr 24) and 0xFF
 
     private fun squareSelection(size: Int, x0: Int, y0: Int, x1: Int, y1: Int): Bitmap {
         val m = Bitmap.createBitmap(size, size, Bitmap.Config.ALPHA_8)

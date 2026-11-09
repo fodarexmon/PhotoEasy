@@ -618,7 +618,7 @@ object InpaintEngine {
             pyramid.add(next)
         }
 
-        val rnd = Random(seed)
+        val rnd = Random(seed.toLong())
         var prevNnf: IntArray? = null
         var prevW = 0
         var prevH = 0

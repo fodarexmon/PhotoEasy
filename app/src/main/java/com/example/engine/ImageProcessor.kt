@@ -453,7 +453,7 @@ object ImageProcessor {
         }
         val colorizeAngle = kotlin.math.atan2(colorizeLab[2], colorizeLab[1])
         val colorizeChroma = adj.colorizeSaturation.coerceIn(0f, 100f) / 100f * 70f
-        val hasHsl = bands.isNotEmpty()
+        val hasHsl = bands.isNotEmpty() || adj.colorizeEnabled
         // Colour replacements, matched and transferred in CIE Lab (perceptual).
         val replaceSpecs = adj.effectiveReplacements().filter { it.enabled }.map { ReplaceSpec.of(it) }
         val previewMask = adj.replacePreviewMask
@@ -1299,8 +1299,17 @@ object ImageProcessor {
             }
             kotlin.math.sqrt(norm2(n21, n22, n23) / norm2(n31, n32, n33))
         } else {
-            // Opposite sides (almost) parallel: no perspective to undo, plain side ratio.
-            kotlin.math.sqrt((n21 * n21 + n22 * n22) / (n31 * n31 + n32 * n32))
+            // Opposite sides (almost) parallel: trapezoid / rectangle geometry.
+            val top = kotlin.math.hypot(x2 - x1, y2 - y1)
+            val bot = kotlin.math.hypot(x4 - x3, y4 - y3)
+            val dx12 = x2 - x1; val dy12 = y2 - y1
+            val l12 = kotlin.math.hypot(dx12, dy12)
+            val hDist = if (l12 > 1e-6) (
+                kotlin.math.abs(dx12 * (y1 - y3) - (x1 - x3) * dy12) +
+                kotlin.math.abs(dx12 * (y1 - y4) - (x1 - x4) * dy12)
+            ) / (2.0 * l12) else 0.0
+            val avgW = (top + bot) / 2.0
+            if (hDist > 1e-6) avgW / hDist else kotlin.math.sqrt((n21 * n21 + n22 * n22) / (n31 * n31 + n32 * n32))
         }
         if (!ratio.isFinite() || ratio <= 0.0) return null
         return ratio.toFloat().coerceIn(0.1f, 10f)

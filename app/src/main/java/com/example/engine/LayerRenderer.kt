@@ -488,12 +488,11 @@ object LayerRenderer {
                         if (srcFile.exists()) fullResSourceBmp = ImageProcessor.decodeFileWithExifSampled(srcFile, max(canvasWidth, canvasHeight))
                     }
 
-                    val baseBmp = fullResSourceBmp ?: layer.bitmap
-                    if (baseBmp == null) {
+                    val baseBmp = fullResSourceBmp ?: layer.bitmap ?: run {
                         if (!output.isRecycled) output.recycle()
                         return null
                     }
-                    var processedBmp = baseBmp
+                    var processedBmp: Bitmap = baseBmp
 
                     // Optimize preview rendering by downscaling first before running heavy color matrices and filters
                     if (scaleRatio < 1.0f && (baseBmp.width > 800 || baseBmp.height > 800)) {

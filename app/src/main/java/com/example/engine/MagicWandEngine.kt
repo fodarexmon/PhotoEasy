@@ -239,7 +239,7 @@ object MagicWandEngine {
             // Region growing: a pixel joins when it is close to the tapped colour, or close to the
             // neighbour it is reached from while staying within a wider cap. Smooth gradients are
             // followed; a real edge (a big step) still stops the fill.
-            val capSq = (tDelta * 4f + 20f).let { it * it }
+            val capSq = (tDelta * 6f + 60f).let { it * it }
             val step = max(2f, tDelta * 0.3f)
             val stepSq = step * step
             var stack = IntArray(4096)

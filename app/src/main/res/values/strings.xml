@@ -126,7 +126,7 @@
     <string name="select_smooth">Smooth</string>
     <string name="select_shift_edge">Shift edge</string>
     <string name="select_edge_contrast">Edge contrast</string>
-    <string name="select_cleanup">Remove specks & holes</string>
+    <string name="select_cleanup">Remove specks &amp; holes</string>
     <string name="select_border">Border width</string>
     <string name="select_border_width">Border %1$d px</string>
     <string name="select_refine">Refine Edge</string>
@@ -584,7 +584,7 @@
     <string name="transform_hint_skew">Drag an edge along itself to slant the layer.</string>
     <string name="transform_hint_distort">Drag each corner freely, e.g. to place an image on a screen or a sign.</string>
     <string name="transform_from_center">From center</string>
-    <string name="transform_snap">Snap & guides</string>
+    <string name="transform_snap">Snap &amp; guides</string>
     <string name="transform_skew_h">Horizontal skew</string>
     <string name="transform_skew_v">Vertical skew</string>
     <string name="transform_reset_distort">Reset distortion</string>

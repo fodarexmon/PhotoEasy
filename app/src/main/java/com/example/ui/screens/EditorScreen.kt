@@ -126,232 +126,271 @@ import com.example.ui.theme.StudioSurfaceVariant
 import androidx.activity.result.PickVisualMediaRequest
 import com.example.ui.viewmodel.ActiveTool
 
+import com.example.ui.viewmodel.EditorViewModel
+import com.example.ui.viewmodel.EditorUiState
+
 @Composable
 fun EditorScreen(
-    project: Project,
-    renderRevision: Long = project.renderRevision,
-    selectedLayerIndex: Int,
-    activeTool: ActiveTool,
-    activeSelectionTool: SelectionToolType,
-    inpaintSelectionMode: com.example.ui.viewmodel.InpaintSelectionMode = com.example.ui.viewmodel.InpaintSelectionMode.BRUSH,
-    selectionMask: Bitmap?,
-    brushSizeDp: Float,
-    magicWandTolerance: Int,
-    isMagicWandContiguous: Boolean = true,
-    wandOptions: com.example.engine.WandOptions = com.example.engine.WandOptions(),
-    onWandOptionsChange: (com.example.engine.WandOptions) -> Unit = {},
-    inpaintRadiusPx: Float = 5f,
-    inpaintFeatherPx: Int = 4,
-    inpaintEngineMode: com.example.engine.InpaintEngineMode = com.example.engine.InpaintEngineMode.SMART,
-    isInpaintProtectMode: Boolean = false,
-    onToggleInpaintProtect: () -> Unit = {},
-    onClearInpaintProtect: () -> Unit = {},
-    inpaintProtectMask: android.graphics.Bitmap? = null,
-    inpaintProtectRevision: Long = 0L,
-    canRetryRemoval: Boolean = false,
-    onRetryRemoval: () -> Unit = {},
-    isSmartEdgeSnapEnabled: Boolean = true,
-    isSeamlessBlendEnabled: Boolean = true,
-    canUndo: Boolean,
-    canRedo: Boolean,
-    canUndoSelection: Boolean = false,
-    canRedoSelection: Boolean = false,
-    isProjectDirty: Boolean = false,
-    isProcessing: Boolean,
-    statusMessage: String?,
-    isPerspectiveActive: Boolean,
-    perspectiveCorners: List<PointF>,
-    selectedAspectRatio: Float?,
-    isResizeDialogOpen: Boolean,
-    isUnsavedChangesDialogOpen: Boolean = false,
-    onDismissUnsavedDialog: () -> Unit = {},
-    onSaveAndExit: () -> Unit = {},
-    onDiscardAndExit: () -> Unit = {},
-    onBackClick: () -> Unit,
-    onToolSelect: (ActiveTool) -> Unit,
-    onSelectLayer: (Int) -> Unit,
-    onUpdateLayer: ((Layer) -> Unit) -> Unit,
-    onUpdateLayerTransient: ((Layer) -> Unit) -> Unit,
-    onCommitHistoryState: () -> Unit,
-    onCancelHistoryState: () -> Unit = {},
-    onOpacityChange: (Float) -> Unit,
-    onBlendModeChange: (BlendModeType) -> Unit,
-    onToggleVisibility: () -> Unit,
-    onToggleLock: () -> Unit,
-    onMoveUp: () -> Unit,
-    onMoveDown: () -> Unit,
-    onDuplicate: () -> Unit,
-    onDelete: () -> Unit,
-    onMergeDown: () -> Unit,
-    onAddImageUri: (Uri) -> Unit,
-    onAddText: (String) -> Unit,
-    onAddAdjustmentLayer: () -> Unit = {},
-    onSmartAutoClick: () -> Unit,
-    onObjectRemovalClick: () -> Unit,
-    onInpaintSelectionModeChange: (com.example.ui.viewmodel.InpaintSelectionMode) -> Unit = {},
-    onInpaintEngineModeChange: (com.example.engine.InpaintEngineMode) -> Unit = {},
-    onToggleSmartEdgeSnap: () -> Unit = {},
-    onToggleSeamlessBlend: () -> Unit = {},
-    onInpaintRadiusChange: (Float) -> Unit = {},
-    onInpaintFeatherChange: (Int) -> Unit = {},
-    onSelectionToolSelect: (SelectionToolType) -> Unit,
-    isRefineEdgeDialogOpen: Boolean = false,
-    onOpenRefineEdgeDialog: () -> Unit = {},
-    onCloseRefineEdgeDialog: () -> Unit = {},
-    onApplyRefineEdge: (com.example.engine.RefineEdgeConfig) -> Unit = {},
-    onSelectSubject: () -> Unit = {},
-    isMagneticSnap: Boolean = false,
-    onToggleMagneticSnap: () -> Unit = {},
-    selectionMode: SelectionMode = SelectionMode.ADD,
-    onSelectionModeSelect: (SelectionMode) -> Unit = {},
-    onBrushSizeChange: (Float) -> Unit,
-    onToleranceChange: (Int) -> Unit,
-    onToggleMagicWandContiguous: (Boolean) -> Unit = {},
-    onBrushStrokeComplete: (List<PointF>, Float) -> Unit,
-    onLassoComplete: (List<PointF>) -> Unit,
-    onRectangleSelection: (PointF, PointF) -> Unit = { _, _ -> },
-    onEllipseSelection: (PointF, PointF) -> Unit = { _, _ -> },
-    onPolygonComplete: (List<PointF>) -> Unit = {},
-    onMagicWandTap: (Int, Int) -> Unit,
-    onFeatherSelection: (Float) -> Unit = {},
-    onGrowSelection: (Int) -> Unit = {},
-    onShrinkSelection: (Int) -> Unit = {},
-    onSmoothSelection: (Int) -> Unit = {},
-    onRefineSelectionEdge: () -> Unit = {},
-    onSelectAll: () -> Unit = {},
-    onInvertSelection: () -> Unit,
-    onClearSelection: () -> Unit,
-    onCopySelectionToLayer: () -> Unit,
-    onUndoSelection: () -> Unit = {},
-    onRedoSelection: () -> Unit = {},
-    onSaveProject: () -> Unit,
-    onExportConfirm: (isPng: Boolean, quality: Int) -> Unit,
-    luts: List<com.example.engine.LutInfo> = emptyList(),
-    customPresets: List<com.example.engine.CustomPreset> = emptyList(),
-    favoriteFilters: Set<String> = emptySet(),
-    onToggleFavoriteFilter: (String) -> Unit = {},
-    onImportLut: (Uri) -> Unit = {},
-    onDeleteLut: (String) -> Unit = {},
-    onSaveLook: (String) -> Unit = {},
-    onDeleteCustomPreset: (String) -> Unit = {},
-    onStrokeSegment: ((List<PointF>, Float, com.example.ui.viewmodel.StrokePhase) -> Unit)? = null,
-    selectionRevision: Long = 0L,
-    onMagicWandDrag: ((Int, Int, Int, com.example.ui.viewmodel.StrokePhase) -> Unit)? = null,
-    editableShape: com.example.ui.viewmodel.EditableShape? = null,
-    shapeFromCenter: Boolean = false,
-    shapeLockSquare: Boolean = false,
-    onToggleShapeFromCenter: (Boolean) -> Unit = {},
-    onToggleShapeLockSquare: (Boolean) -> Unit = {},
-    onShapeCreated: ((android.graphics.RectF, Boolean) -> Unit)? = null,
-    onShapeEdited: ((android.graphics.RectF) -> Unit)? = null,
-    onMoveSelection: ((Float, Float) -> Unit)? = null,
-    isQuickMaskView: Boolean = false,
-    onToggleQuickMask: () -> Unit = {},
-    onTemporarySubtract: ((Boolean) -> Unit)? = null,
-    modifierOp: com.example.ui.viewmodel.SelectionModifierOp = com.example.ui.viewmodel.SelectionModifierOp.FEATHER,
-    modifierAmount: Float = 0f,
-    onModifierPreview: (com.example.ui.viewmodel.SelectionModifierOp, Float) -> Unit = { _, _ -> },
-    onModifierCommit: () -> Unit = {},
-    selectionRefine: com.example.ui.viewmodel.SelectionRefineParams = com.example.ui.viewmodel.SelectionRefineParams(),
-    onSelectionRefinePreview: (com.example.ui.viewmodel.SelectionRefineParams) -> Unit = {},
-    onSelectionRefineApply: () -> Unit = {},
-    onSelectionRefineReset: () -> Unit = {},
-    onBorderSelection: (Float) -> Unit = {},
-    onCleanupSelection: () -> Unit = {},
-    isQuickAutoEnhance: Boolean = true,
-    onToggleQuickAutoEnhance: (Boolean) -> Unit = {},
-    isQuickSampleAll: Boolean = false,
-    onToggleQuickSampleAll: (Boolean) -> Unit = {},
-    quickSelectionTolerance: Int = 35,
-    onQuickSelectionToleranceChange: (Int) -> Unit = {},
-    quickSelectionEdgeSensitivity: Int = 60,
-    onQuickSelectionEdgeSensitivityChange: (Int) -> Unit = {},
-    refinePreview: Bitmap? = null,
-    refinePreviewMode: com.example.ui.viewmodel.RefinePreviewMode = com.example.ui.viewmodel.RefinePreviewMode.OVERLAY,
-    onRefinePreviewModeChange: (com.example.ui.viewmodel.RefinePreviewMode) -> Unit = {},
-    onRequestRefinePreview: (com.example.engine.RefineEdgeConfig) -> Unit = {},
-    exportSuccessUri: Uri? = null,
-    onExportResultConsumed: () -> Unit = {},
-    onRenameProject: (String) -> Unit = {},
-    onUndo: () -> Unit,
-    onRedo: () -> Unit,
-    onClearStatusMessage: () -> Unit,
-    onOpenResizeDialog: () -> Unit,
-    onCloseResizeDialog: () -> Unit,
-    onConfirmResizeCanvas: (Int, Int, Boolean) -> Unit,
-    onRotate90Left: () -> Unit,
-    onRotate90Right: () -> Unit,
-    onFlipHorizontal: () -> Unit,
-    onFlipVertical: () -> Unit,
-    onRotationChange: (Float) -> Unit,
-    onCenterSelectedLayer: () -> Unit = {},
-    onFitSelectedLayerToCanvas: () -> Unit = {},
-    onFillSelectedLayerToCanvas: () -> Unit = {},
-    onResetTransform: () -> Unit = {},
-    onSelectAspectRatio: (Float?) -> Unit,
-    onTogglePerspective: (Boolean) -> Unit,
-    onApplyCrop: (android.graphics.RectF?) -> Unit,
-    onResetCrop: () -> Unit = {},
-    onApplyPerspective: () -> Unit,
-    onResetPerspective: () -> Unit,
-    onUpdatePerspectiveCorner: (Int, Float, Float) -> Unit,
-    onUpdatePerspectiveCorners: ((List<PointF>) -> Unit)? = null,
-    onFitPerspectiveToCanvas: () -> Unit = {},
-    onAddLayerMask: ((Boolean) -> Unit)? = null,
-    onInvertLayerMask: (() -> Unit)? = null,
-    onToggleLayerMaskEnabled: (() -> Unit)? = null,
-    onDeleteLayerMask: (() -> Unit)? = null,
-    onApplyLayerMask: (() -> Unit)? = null,
-    onSetEditingMask: ((Boolean) -> Unit)? = null,
-    onToggleMaskPaintColor: (() -> Unit)? = null,
-    isMaskEditingBlack: Boolean = true,
-    onApplyProEffect: ((com.example.data.model.ProFilterType, Float, Float) -> Unit)? = null,
-    onMaskDensityChange: ((Float) -> Unit)? = null,
-    onMaskFeatherChange: ((Float) -> Unit)? = null,
-    onRevealAllMask: (() -> Unit)? = null,
-    onHideAllMask: (() -> Unit)? = null,
-    onToggleRubyOverlay: (() -> Unit)? = null,
-    showMaskRubyOverlay: Boolean = false,
-    maskBrushSizeDp: Float = 24f,
-    onMaskBrushSizeChange: ((Float) -> Unit)? = null,
-    layerActions: com.example.ui.components.LayerPanelActions = com.example.ui.components.LayerPanelActions(),
-    maskBrushHardness: Float = 0.6f,
-    maskBrushOpacity: Float = 1f,
-    onTextConfigChange: ((com.example.data.model.TextLayerConfig) -> Unit)? = null,
-    smartAutoStrength: Float? = null,
-    onSmartAutoStrengthChange: (Float) -> Unit = {},
-    onCreateAdjustmentLayerFromSelection: (() -> Unit)? = null,
-    /** Colour of the image at a document point as it enters the curves (null = nothing there). */
-    onSampleCurveColor: ((Float, Float) -> Int?)? = null,
-    onSampleReplaceColor: ((Float, Float) -> Int?)? = null,
-    onSampleHslColor: ((Float, Float) -> Int?)? = null,
-    cropStraighten: Float = 0f,
-    onCropStraightenChange: (Float) -> Unit = {},
-    cropGrid: String = "THIRDS",
-    onCropGridChange: (String) -> Unit = {},
-    cropExpandCanvas: Boolean = false,
-    onToggleCropExpandCanvas: () -> Unit = {},
-    cropTargetWidth: Int = 0,
-    cropTargetHeight: Int = 0,
-    onCropTargetSize: (Int, Int) -> Unit = { _, _ -> },
-    onSwapCropOrientation: () -> Unit = {},
-    onRotateCanvas: (Boolean) -> Unit = {},
-    onFlipCanvas: (Boolean) -> Unit = {},
-    perspectiveVertical: Float = 0f,
-    perspectiveHorizontal: Float = 0f,
-    onKeystoneChange: (Float, Float) -> Unit = { _, _ -> },
-    onAutoDetectDocument: () -> Unit = {},
-    transformMode: String = "FREE",
-    onTransformModeChange: (String) -> Unit = {},
-    transformPivot: Int = 4,
-    onTransformPivotChange: (Int) -> Unit = {},
-    transformFromCenter: Boolean = false,
-    onToggleTransformFromCenter: () -> Unit = {},
-    transformLockAspect: Boolean = true,
-    onToggleTransformLockAspect: () -> Unit = {},
-    transformSnap: Boolean = true,
-    onToggleTransformSnap: () -> Unit = {}
+    viewModel: EditorViewModel,
+    uiState: EditorUiState,
+    onExportConfirm: (isPng: Boolean, quality: Int) -> Unit
 ) {
+    val project = uiState.currentProject ?: return
+    val renderRevision = uiState.renderRevision
+    val selectedLayerIndex = uiState.selectedLayerIndex
+    val activeTool = uiState.activeTool
+    val activeSelectionTool = uiState.activeSelectionTool
+    val inpaintSelectionMode = uiState.inpaintSelectionMode
+    val selectionMask = uiState.selectionMask
+    val brushSizeDp = uiState.brushSizeDp
+    val magicWandTolerance = uiState.magicWandTolerance
+    val isMagicWandContiguous = uiState.isMagicWandContiguous
+    val wandOptions = uiState.wandOptions
+    val onWandOptionsChange: (com.example.engine.WandOptions) -> Unit = { viewModel.setWandOptions(it) }
+    val inpaintRadiusPx = uiState.inpaintRadiusPx
+    val inpaintFeatherPx = uiState.inpaintFeatherPx
+    val inpaintEngineMode = uiState.inpaintEngineMode
+    val isInpaintProtectMode = uiState.isInpaintProtectMode
+    val onToggleInpaintProtect: () -> Unit = { viewModel.setInpaintProtectMode(!uiState.isInpaintProtectMode) }
+    val onClearInpaintProtect: () -> Unit = { viewModel.clearInpaintProtect() }
+    val inpaintProtectMask = uiState.inpaintProtectMask
+    val inpaintProtectRevision = uiState.inpaintProtectRevision
+    val canRetryRemoval = uiState.canRetryRemoval
+    val onRetryRemoval: () -> Unit = { viewModel.retryObjectRemoval() }
+    val isSmartEdgeSnapEnabled = uiState.isSmartEdgeSnapEnabled
+    val isSeamlessBlendEnabled = uiState.isSeamlessBlendEnabled
+    val canUndo = uiState.canUndo
+    val canRedo = uiState.canRedo
+    val canUndoSelection = uiState.canUndoSelection
+    val canRedoSelection = uiState.canRedoSelection
+    val isProjectDirty = uiState.isProjectDirty
+    val isProcessing = uiState.isProcessing
+    val statusMessage = uiState.statusMessage
+    val isPerspectiveActive = uiState.isPerspectiveModeActive
+    val perspectiveCorners = uiState.perspectiveCorners
+    val selectedAspectRatio = uiState.selectedAspectRatio
+    val isResizeDialogOpen = uiState.isResizeDialogOpen
+    val isUnsavedChangesDialogOpen = uiState.isUnsavedChangesDialogOpen
+    val onDismissUnsavedDialog: () -> Unit = { viewModel.dismissUnsavedDialog() }
+    val onSaveAndExit: () -> Unit = { viewModel.saveAndExitEditor() }
+    val onDiscardAndExit: () -> Unit = { viewModel.discardAndExitEditor() }
+    val onBackClick: () -> Unit = { viewModel.handleBackNavigation() }
+    val onToolSelect: (ActiveTool) -> Unit = { viewModel.selectTool(it) }
+    val onSelectLayer: (Int) -> Unit = { viewModel.selectLayer(it) }
+    val onUpdateLayer: ((Layer) -> Unit) -> Unit = { action -> viewModel.updateSelectedLayer(action) }
+    val onUpdateLayerTransient: ((Layer) -> Unit) -> Unit = { action -> viewModel.updateSelectedLayerTransient(action) }
+    val onCommitHistoryState: () -> Unit = { viewModel.commitPendingHistory() }
+    val onCancelHistoryState: () -> Unit = { viewModel.cancelHistoryTransaction() }
+    val onOpacityChange: (Float) -> Unit = { op -> viewModel.updateSelectedLayerTransient { l -> l.opacity = op } }
+    val onBlendModeChange: (BlendModeType) -> Unit = { mode -> viewModel.updateSelectedLayer { l -> l.blendMode = mode } }
+    val onToggleVisibility: () -> Unit = { viewModel.toggleSelectedLayerVisibility() }
+    val onToggleLock: () -> Unit = { viewModel.toggleSelectedLayerLock() }
+    val onMoveUp: () -> Unit = { viewModel.moveLayerUp() }
+    val onMoveDown: () -> Unit = { viewModel.moveLayerDown() }
+    val onDuplicate: () -> Unit = { viewModel.duplicateSelectedLayer() }
+    val onDelete: () -> Unit = { viewModel.deleteSelectedLayer() }
+    val onMergeDown: () -> Unit = { viewModel.mergeSelectedLayerDown() }
+    val onAddImageUri: (Uri) -> Unit = { uri -> viewModel.addImageFromUri(uri) }
+    val onAddText: (String) -> Unit = { text -> viewModel.addTextLayer(text) }
+    val onAddAdjustmentLayer: () -> Unit = { viewModel.addAdjustmentLayer() }
+    val onSmartAutoClick: () -> Unit = { viewModel.applySmartAutoCorrection() }
+    val onObjectRemovalClick: () -> Unit = { viewModel.applyObjectRemoval() }
+    val onInpaintSelectionModeChange: (com.example.ui.viewmodel.InpaintSelectionMode) -> Unit = { viewModel.setInpaintSelectionMode(it) }
+    val onInpaintEngineModeChange: (com.example.engine.InpaintEngineMode) -> Unit = { viewModel.setInpaintEngineMode(it) }
+    val onToggleSmartEdgeSnap: () -> Unit = { viewModel.toggleSmartEdgeSnap() }
+    val onToggleSeamlessBlend: () -> Unit = { viewModel.toggleSeamlessBlend() }
+    val onInpaintRadiusChange: (Float) -> Unit = { viewModel.setInpaintRadius(it) }
+    val onInpaintFeatherChange: (Int) -> Unit = { viewModel.setInpaintFeather(it) }
+    val onSelectionToolSelect: (SelectionToolType) -> Unit = { viewModel.setSelectionTool(it) }
+    val isRefineEdgeDialogOpen = uiState.isRefineEdgeDialogOpen
+    val onOpenRefineEdgeDialog: () -> Unit = { viewModel.openRefineEdgeDialog() }
+    val onCloseRefineEdgeDialog: () -> Unit = { viewModel.closeRefineEdgeDialog() }
+    val onApplyRefineEdge: (com.example.engine.RefineEdgeConfig) -> Unit = { viewModel.applyRefineEdgeMatting(it) }
+    val onSelectSubject: () -> Unit = { viewModel.autoSelectSubject() }
+    val isMagneticSnap = uiState.isMagneticSnapEnabled
+    val onToggleMagneticSnap: () -> Unit = { viewModel.toggleMagneticSnap() }
+    val selectionMode = uiState.selectionMode
+    val onSelectionModeSelect: (SelectionMode) -> Unit = { viewModel.setSelectionMode(it) }
+    val onBrushSizeChange: (Float) -> Unit = { viewModel.setBrushSize(it) }
+    val onToleranceChange: (Int) -> Unit = { viewModel.setMagicWandTolerance(it) }
+    val onToggleMagicWandContiguous: (Boolean) -> Unit = { viewModel.setMagicWandContiguous(it) }
+    val onBrushStrokeComplete: (List<PointF>, Float) -> Unit = { points, docRadius ->
+        val activeLayer = project.layers.getOrNull(uiState.selectedLayerIndex)
+        if (uiState.activeTool == ActiveTool.OBJECT_REMOVAL && uiState.isInpaintProtectMode) {
+            viewModel.paintProtectSegment(points, docRadius, com.example.ui.viewmodel.StrokePhase.END)
+        } else if (activeLayer?.isEditingMask == true) {
+            viewModel.paintOnLayerMask(points, docRadius, isReveal = !uiState.isMaskEditingBlack)
+        } else if (uiState.activeSelectionTool == SelectionToolType.QUICK_SELECTION && uiState.activeTool == ActiveTool.SELECTION) {
+            viewModel.applyQuickSelection(points, isEraser = false, docRadius = docRadius)
+        } else {
+            viewModel.applyBrushStroke(points, isEraser = false, docRadius = docRadius)
+        }
+    }
+    val onLassoComplete: (List<PointF>) -> Unit = { points -> viewModel.applyLassoSelection(points) }
+    val onRectangleSelection: (PointF, PointF) -> Unit = { a, b -> viewModel.applyRectangleSelection(a, b) }
+    val onEllipseSelection: (PointF, PointF) -> Unit = { a, b -> viewModel.applyEllipseSelection(a, b) }
+    val onPolygonComplete: (List<PointF>) -> Unit = { points -> viewModel.applyPolygonSelection(points) }
+    val onMagicWandTap: (Int, Int) -> Unit = { x, y -> viewModel.applyMagicWand(x, y) }
+    val onFeatherSelection: (Float) -> Unit = { r -> viewModel.featherSelection(r) }
+    val onGrowSelection: (Int) -> Unit = { r -> viewModel.growSelection(r) }
+    val onShrinkSelection: (Int) -> Unit = { r -> viewModel.shrinkSelection(r) }
+    val onSmoothSelection: (Int) -> Unit = { r -> viewModel.smoothSelection(r) }
+    val onRefineSelectionEdge: () -> Unit = { viewModel.refineSelectionEdge() }
+    val onSelectAll: () -> Unit = { viewModel.selectAll() }
+    val onInvertSelection: () -> Unit = { viewModel.invertSelection() }
+    val onClearSelection: () -> Unit = { viewModel.clearSelection() }
+    val onCopySelectionToLayer: () -> Unit = { viewModel.copySelectionToNewLayer() }
+    val onUndoSelection: () -> Unit = { viewModel.undoSelection() }
+    val onRedoSelection: () -> Unit = { viewModel.redoSelection() }
+    val onSaveProject: () -> Unit = { viewModel.saveCurrentProject() }
+    val luts = uiState.luts
+    val customPresets = uiState.customPresets
+    val favoriteFilters = uiState.favoriteFilters
+    val onToggleFavoriteFilter: (String) -> Unit = { viewModel.toggleFavoriteFilter(it) }
+    val onImportLut: (Uri) -> Unit = { viewModel.importLut(it) }
+    val onDeleteLut: (String) -> Unit = { viewModel.deleteLut(it) }
+    val onSaveLook: (String) -> Unit = { viewModel.saveCurrentLookAsPreset(it) }
+    val onDeleteCustomPreset: (String) -> Unit = { viewModel.deleteCustomPreset(it) }
+    val onStrokeSegment: ((List<PointF>, Float, com.example.ui.viewmodel.StrokePhase) -> Unit) = { points, radius, phase ->
+        val activeLayer = project.layers.getOrNull(uiState.selectedLayerIndex)
+        when {
+            uiState.activeTool == ActiveTool.OBJECT_REMOVAL && uiState.isInpaintProtectMode ->
+                viewModel.paintProtectSegment(points, radius, phase)
+            uiState.activeTool == ActiveTool.LAYERS && activeLayer?.isEditingMask == true ->
+                viewModel.paintMaskSegment(points, radius, isReveal = !uiState.isMaskEditingBlack, phase = phase)
+            uiState.activeTool == ActiveTool.SELECTION && uiState.activeSelectionTool == SelectionToolType.QUICK_SELECTION ->
+                viewModel.quickSelectionSegment(points, radius, phase)
+            else -> viewModel.brushSelectionSegment(points, radius, phase)
+        }
+    }
+    val selectionRevision = uiState.selectionRevision
+    val onMagicWandDrag: ((Int, Int, Int, com.example.ui.viewmodel.StrokePhase) -> Unit) = { x, y, tol, phase -> viewModel.magicWandDrag(x, y, tol, phase) }
+    val editableShape = uiState.editableShape
+    val shapeFromCenter = uiState.shapeFromCenter
+    val shapeLockSquare = uiState.shapeLockSquare
+    val onToggleShapeFromCenter: (Boolean) -> Unit = { viewModel.setShapeFromCenter(it) }
+    val onToggleShapeLockSquare: (Boolean) -> Unit = { viewModel.setShapeLockSquare(it) }
+    val onShapeCreated: ((android.graphics.RectF, Boolean) -> Unit) = { rect, isEllipse -> viewModel.applyShapeSelection(rect, isEllipse) }
+    val onShapeEdited: ((android.graphics.RectF) -> Unit) = { rect -> viewModel.editShapeSelection(rect) }
+    val onMoveSelection: ((Float, Float) -> Unit) = { dx, dy -> viewModel.moveSelection(dx, dy) }
+    val isQuickMaskView = uiState.isQuickMaskView
+    val onToggleQuickMask: () -> Unit = { viewModel.toggleQuickMaskView() }
+    val onTemporarySubtract: ((Boolean) -> Unit) = { held ->
+        viewModel.setSelectionModeOverride(if (held) com.example.data.model.SelectionMode.SUBTRACT else null)
+    }
+    val modifierOp = uiState.selectionModifierOp
+    val modifierAmount = uiState.selectionModifierAmount
+    val onModifierPreview: (com.example.ui.viewmodel.SelectionModifierOp, Float) -> Unit = { op, amount -> viewModel.previewSelectionModifier(op, amount) }
+    val onModifierCommit: () -> Unit = { viewModel.endSelectionModifier() }
+    val selectionRefine = uiState.selectionRefine
+    val onSelectionRefinePreview: (com.example.ui.viewmodel.SelectionRefineParams) -> Unit = { viewModel.previewSelectionRefine(it) }
+    val onSelectionRefineApply: () -> Unit = { viewModel.applySelectionRefine() }
+    val onSelectionRefineReset: () -> Unit = { viewModel.resetSelectionRefine() }
+    val onBorderSelection: (Float) -> Unit = { viewModel.borderSelection(it) }
+    val onCleanupSelection: () -> Unit = { viewModel.cleanupSelection() }
+    val isQuickAutoEnhance = uiState.isQuickSelectionAutoEnhance
+    val onToggleQuickAutoEnhance: (Boolean) -> Unit = { viewModel.setQuickSelectionAutoEnhance(it) }
+    val isQuickSampleAll = uiState.isQuickSelectionSampleAll
+    val onToggleQuickSampleAll: (Boolean) -> Unit = { viewModel.setQuickSelectionSampleAll(it) }
+    val quickSelectionTolerance = uiState.quickSelectionTolerance
+    val onQuickSelectionToleranceChange: (Int) -> Unit = { viewModel.setQuickSelectionTolerance(it) }
+    val quickSelectionEdgeSensitivity = uiState.quickSelectionEdgeSensitivity
+    val onQuickSelectionEdgeSensitivityChange: (Int) -> Unit = { viewModel.setQuickSelectionEdgeSensitivity(it) }
+    val refinePreview = uiState.refinePreview
+    val refinePreviewMode = uiState.refinePreviewMode
+    val onRefinePreviewModeChange: (com.example.ui.viewmodel.RefinePreviewMode) -> Unit = { viewModel.setRefinePreviewMode(it) }
+    val onRequestRefinePreview: (com.example.engine.RefineEdgeConfig) -> Unit = { viewModel.requestRefinePreview(it) }
+    val exportSuccessUri = uiState.exportSuccessUri
+    val onExportResultConsumed: () -> Unit = { viewModel.consumeExportResult() }
+    val onRenameProject: (String) -> Unit = { name -> viewModel.renameProject(project.id, name) }
+    val onUndo: () -> Unit = { viewModel.undo() }
+    val onRedo: () -> Unit = { viewModel.redo() }
+    val onClearStatusMessage: () -> Unit = { viewModel.clearStatusMessage() }
+    val onOpenResizeDialog: () -> Unit = { viewModel.setResizeDialogOpen(true) }
+    val onCloseResizeDialog: () -> Unit = { viewModel.setResizeDialogOpen(false) }
+    val onConfirmResizeCanvas: (Int, Int, Boolean) -> Unit = { w, h, scale -> viewModel.resizeCanvas(w, h, scale) }
+    val onRotate90Left: () -> Unit = { viewModel.rotateSelectedLayer(-90f) }
+    val onRotate90Right: () -> Unit = { viewModel.rotateSelectedLayer(90f) }
+    val onFlipHorizontal: () -> Unit = { viewModel.flipSelectedLayer(true) }
+    val onFlipVertical: () -> Unit = { viewModel.flipSelectedLayer(false) }
+    val onRotationChange: (Float) -> Unit = { viewModel.setLayerRotation(it) }
+    val onCenterSelectedLayer: () -> Unit = { viewModel.centerSelectedLayer() }
+    val onFitSelectedLayerToCanvas: () -> Unit = { viewModel.fitSelectedLayerToCanvas() }
+    val onFillSelectedLayerToCanvas: () -> Unit = { viewModel.fillSelectedLayerToCanvas() }
+    val onResetTransform: () -> Unit = { viewModel.resetSelectedLayerTransform() }
+    val onSelectAspectRatio: (Float?) -> Unit = { viewModel.setCropAspectRatio(it) }
+    val onTogglePerspective: (Boolean) -> Unit = { viewModel.setPerspectiveMode(it) }
+    val onApplyCrop: (android.graphics.RectF?) -> Unit = { cropRect -> viewModel.applyCrop(cropRect, uiState.selectedAspectRatio) }
+    val onResetCrop: () -> Unit = { viewModel.resetCrop() }
+    val onApplyPerspective: () -> Unit = { viewModel.applyPerspectiveTransform() }
+    val onResetPerspective: () -> Unit = { viewModel.resetPerspectiveCorners() }
+    val onUpdatePerspectiveCorner: (Int, Float, Float) -> Unit = { idx, x, y -> viewModel.updatePerspectiveCorner(idx, x, y) }
+    val onUpdatePerspectiveCorners: ((List<PointF>) -> Unit) = { corners -> viewModel.updatePerspectiveCorners(corners) }
+    val onFitPerspectiveToCanvas: () -> Unit = { viewModel.fitPerspectiveCornersToCanvas() }
+    val onAddLayerMask: ((Boolean) -> Unit) = { fromSel -> viewModel.addLayerMask(fromSel) }
+    val onInvertLayerMask: (() -> Unit) = { viewModel.invertLayerMask() }
+    val onToggleLayerMaskEnabled: (() -> Unit) = { viewModel.toggleLayerMaskEnabled() }
+    val onDeleteLayerMask: (() -> Unit) = { viewModel.deleteLayerMask() }
+    val onApplyLayerMask: (() -> Unit) = { viewModel.applyLayerMask() }
+    val onSetEditingMask: ((Boolean) -> Unit) = { isEditing -> viewModel.setEditingMask(isEditing) }
+    val onToggleMaskPaintColor: (() -> Unit) = { viewModel.toggleMaskPaintColor() }
+    val isMaskEditingBlack = uiState.isMaskEditingBlack
+    val onApplyProEffect: ((com.example.data.model.ProFilterType, Float, Float) -> Unit) = { effect, p1, p2 -> viewModel.applyProFilter(effect, p1, p2) }
+    val onMaskDensityChange: ((Float) -> Unit) = { viewModel.setLayerMaskDensity(it) }
+    val onMaskFeatherChange: ((Float) -> Unit) = { viewModel.setLayerMaskFeather(it) }
+    val onRevealAllMask: (() -> Unit) = { viewModel.revealAllLayerMask() }
+    val onHideAllMask: (() -> Unit) = { viewModel.hideAllLayerMask() }
+    val onToggleRubyOverlay: (() -> Unit) = { viewModel.toggleMaskRubyOverlay() }
+    val showMaskRubyOverlay = uiState.showMaskRubyOverlay
+    val maskBrushSizeDp = uiState.maskBrushSizeDp
+    val onMaskBrushSizeChange: ((Float) -> Unit) = { viewModel.setMaskBrushSize(it) }
+    val maskBrushHardness = uiState.maskBrushHardness
+    val onTextConfigChange: ((com.example.data.model.TextLayerConfig) -> Unit) = { viewModel.updateTextConfigTransient(it) }
+    val smartAutoStrength = uiState.smartAutoStrength
+    val onSmartAutoStrengthChange: (Float) -> Unit = { viewModel.setSmartAutoStrength(it) }
+    val onCreateAdjustmentLayerFromSelection: (() -> Unit) = { viewModel.createAdjustmentLayerFromSelection() }
+    val onSampleCurveColor: ((Float, Float) -> Int?) = { x, y -> viewModel.sampleColorForCurves(x, y) }
+    val onSampleReplaceColor: ((Float, Float) -> Int?) = { x, y -> viewModel.sampleColorForReplace(x, y) }
+    val onSampleHslColor: ((Float, Float) -> Int?) = { x, y -> viewModel.sampleColorForHsl(x, y) }
+    val cropStraighten = uiState.cropStraighten
+    val onCropStraightenChange: (Float) -> Unit = { viewModel.setCropStraighten(it) }
+    val cropGrid = uiState.cropGrid
+    val onCropGridChange: (String) -> Unit = { viewModel.setCropGrid(it) }
+    val cropExpandCanvas = uiState.cropExpandCanvas
+    val onToggleCropExpandCanvas: () -> Unit = { viewModel.setCropExpandCanvas(!uiState.cropExpandCanvas) }
+    val cropTargetWidth = uiState.cropTargetWidth
+    val cropTargetHeight = uiState.cropTargetHeight
+    val onCropTargetSize: (Int, Int) -> Unit = { w, h -> viewModel.setCropTargetSize(w, h) }
+    val onSwapCropOrientation: () -> Unit = { viewModel.swapCropOrientation() }
+    val onRotateCanvas: (Boolean) -> Unit = { viewModel.rotateCanvas90(it) }
+    val onFlipCanvas: (Boolean) -> Unit = { viewModel.flipCanvas(it) }
+    val perspectiveVertical = uiState.perspectiveVertical
+    val perspectiveHorizontal = uiState.perspectiveHorizontal
+    val onKeystoneChange: (Float, Float) -> Unit = { v, h -> viewModel.setPerspectiveKeystone(v, h) }
+    val onAutoDetectDocument: () -> Unit = { viewModel.autoDetectPerspective() }
+    val transformMode = uiState.transformMode
+    val onTransformModeChange: (String) -> Unit = { viewModel.setTransformMode(it) }
+    val transformPivot = uiState.transformPivot
+    val onTransformPivotChange: (Int) -> Unit = { viewModel.setTransformPivot(it) }
+    val transformFromCenter = uiState.transformFromCenter
+    val onToggleTransformFromCenter: () -> Unit = { viewModel.toggleTransformFromCenter() }
+    val transformLockAspect = uiState.transformLockAspect
+    val onToggleTransformLockAspect: () -> Unit = { viewModel.toggleTransformLockAspect() }
+    val transformSnap = uiState.transformSnap
+    val onToggleTransformSnap: () -> Unit = { viewModel.toggleTransformSnap() }
+    val maskBrushOpacity = uiState.maskBrushOpacity
+    val layerActions = com.example.ui.components.LayerPanelActions(
+        onToggleVisibilityAt = { viewModel.toggleLayerVisibilityAt(it) },
+        onToggleLockAt = { viewModel.toggleLayerLockAt(it) },
+        onMoveLayer = { from, to -> viewModel.moveLayer(from, to) },
+        onRenameLayer = { index, name -> viewModel.renameLayer(index, name) },
+        onToggleClip = { viewModel.toggleClippingMask() },
+        onToggleMaskLink = { viewModel.toggleMaskLink() },
+        onSelectLayerPixels = { viewModel.selectLayerPixels(it) },
+        onMaskGradient = { viewModel.applyMaskGradient(it) },
+        onMaskBrushHardnessChange = { viewModel.setMaskBrushHardness(it) },
+        onMaskBrushOpacityChange = { viewModel.setMaskBrushOpacity(it) }
+    )
     var currentCropRect by remember { mutableStateOf<android.graphics.RectF?>(null) }
     var showExportDialog by remember { mutableStateOf(false) }
     var showTopMenu by remember { mutableStateOf(false) }
