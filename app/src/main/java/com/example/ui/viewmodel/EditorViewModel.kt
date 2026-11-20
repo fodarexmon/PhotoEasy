@@ -584,7 +584,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         protectLastPoint = null
         maskStroke = null
         retouchSession = null
-        retouchStrokeActive = false
+        retouchPending = 0
+        retouchStepOpen = false
         cloneOffsetDoc = null
         pendingTransactionSnapshot = null
         pendingTransactionWasDirty = false
@@ -703,7 +704,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         pendingTransactionSnapshot = null
         maskStroke = null
         retouchSession = null
-        retouchStrokeActive = false
+        retouchPending = 0
+        retouchStepOpen = false
         cloneOffsetDoc = null
         undoStack.clear()
         redoStack.clear()
@@ -4044,14 +4046,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private sealed class RetouchEvent {
         class Start(
             val layer: Layer, val docW: Int, val docH: Int, val tool: com.example.engine.RetouchTool,
-            val brush: com.example.engine.RetouchBrush, val cloneOffsetDoc: PointF?, val preview: Bitmap,
+            val brush: com.example.engine.RetouchBrush, val cloneOffsetDoc: PointF?,
             val points: List<PointF>, val docRadius: Float
         ) : RetouchEvent()
         class Move(val points: List<PointF>, val docRadius: Float) : RetouchEvent()
         class End(val points: List<PointF>, val docRadius: Float) : RetouchEvent()
         class Patch(
             val layer: Layer, val docW: Int, val docH: Int, val selection: Bitmap,
-            val dxDoc: Float, val dyDoc: Float, val preview: Bitmap
+            val dxDoc: Float, val dyDoc: Float
         ) : RetouchEvent()
     }
 
@@ -4066,8 +4068,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private val retouchEvents = kotlinx.coroutines.channels.Channel<RetouchEvent>(kotlinx.coroutines.channels.Channel.UNLIMITED)
     private var retouchConsumer: Job? = null
     private val retouchWrites = java.util.Collections.synchronizedList(mutableListOf<Job>())
-    /** A retouch stroke is being painted: autosave waits until it is committed. */
-    private var retouchStrokeActive = false
+    /** Retouch strokes queued or being painted: autosave waits until they are committed. */
+    private var retouchPending = 0
+    private val retouchStrokeActive: Boolean get() = retouchPending > 0
+    /** The stroke being processed has recorded its undo step (roll it back if it fails). */
+    private var retouchStepOpen = false
     private var retouchStrokeRejected = false
     private var retouchStrokeFailed = false
     private var patchStartDoc: PointF? = null
@@ -4137,10 +4142,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 val src = st.cloneSourceDoc!!
                 if (cloneOffsetDoc == null) cloneOffsetDoc = PointF(src.x - first.x, src.y - first.y)
             }
-            val preview = beginRetouchStep(layer!!) ?: return
-            retouchEvents.trySend(RetouchEvent.Start(
-                layer, proj.width, proj.height, tool, st.retouchBrush,
-                if (tool == com.example.engine.RetouchTool.CLONE) cloneOffsetDoc else null, preview, points.toList(), docRadius
+            queueRetouch(RetouchEvent.Start(
+                layer!!, proj.width, proj.height, tool, st.retouchBrush,
+                if (tool == com.example.engine.RetouchTool.CLONE) cloneOffsetDoc else null, points.toList(), docRadius
             ))
             return
         }
@@ -4156,8 +4160,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.value = st.copy(statusMessage = tr(R.string.retouch_patch_hint))
                 return
             }
-            val preview = beginRetouchStep(layer) ?: return
-            retouchEvents.trySend(RetouchEvent.Patch(layer, proj.width, proj.height, sel, end.x - start.x, end.y - start.y, preview))
+            queueRetouch(RetouchEvent.Patch(layer, proj.width, proj.height, sel, end.x - start.x, end.y - start.y))
             return
         }
         if (phase == StrokePhase.MOVE) retouchEvents.trySend(RetouchEvent.Move(points.toList(), docRadius))
@@ -4165,19 +4168,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
-     * One undo step for a retouch stroke: history first, then the layer gets its own preview copy
-     * that the stroke updates live (history keeps the old one). Returns that copy.
+     * Queues a stroke start / patch. Strokes are handled strictly in order: the next stroke's undo
+     * step is only recorded once the previous one is committed.
      */
-    private fun beginRetouchStep(layer: Layer): Bitmap? {
-        val old = layer.bitmap?.takeIf { !it.isRecycled } ?: return null
-        if (pendingTransactionSnapshot != null) saveHistoryState()
-        saveHistoryState()
-        val preview = try { old.copy(Bitmap.Config.ARGB_8888, true) } catch (e: OutOfMemoryError) { null } ?: run {
-            rollbackToLastHistoryState(); return null
-        }
-        layer.bitmap = preview
-        retouchStrokeActive = true
-        retouchStrokeFailed = false
+    private fun queueRetouch(ev: RetouchEvent) {
+        retouchPending++
+        retouchEvents.trySend(ev)
         if (retouchConsumer?.isActive != true) {
             retouchConsumer = viewModelScope.launch {
                 for (ev in retouchEvents) {
@@ -4193,12 +4189,31 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
         }
+    }
+
+    /**
+     * One undo step for a retouch stroke: history first, then the layer gets its own preview copy
+     * that the stroke updates live (history keeps the old one). Returns that copy.
+     */
+    private fun beginRetouchStep(layer: Layer): Bitmap? {
+        val old = layer.bitmap?.takeIf { !it.isRecycled } ?: return null
+        if (pendingTransactionSnapshot != null) saveHistoryState()
+        saveHistoryState()
+        val preview = try { old.copy(Bitmap.Config.ARGB_8888, true) } catch (e: OutOfMemoryError) { null } ?: run {
+            rollbackToLastHistoryState(); return null
+        }
+        layer.bitmap = preview
+        retouchStepOpen = true
+        retouchStrokeFailed = false
         return preview
     }
 
     private fun onRetouchFailed(@StringRes msg: Int) {
-        if (retouchStrokeActive) rollbackToLastHistoryState()
-        retouchStrokeActive = false
+        if (retouchStepOpen) {
+            rollbackToLastHistoryState()
+            retouchStepOpen = false
+            retouchPending = (retouchPending - 1).coerceAtLeast(0)
+        }
         retouchStrokeFailed = true
         retouchSession = null
         _uiState.value = _uiState.value.copy(statusMessage = tr(msg))
@@ -4262,8 +4277,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private suspend fun handleRetouchEvent(ev: RetouchEvent) {
         when (ev) {
             is RetouchEvent.Start -> {
+                val preview = beginRetouchStep(ev.layer) ?: run { retouchStrokeFailed = true; retouchPending = (retouchPending - 1).coerceAtLeast(0); return }
                 strokeLayer = ev.layer
-                strokePreview = ev.preview
+                strokePreview = preview
                 strokeOffsetDoc = ev.cloneOffsetDoc
                 val session = ensureRetouchSession(ev.layer)
                 prepareStrokeMapping(ev.layer, session.canvas, ev.docW, ev.docH)
@@ -4286,8 +4302,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 commitRetouch(session)
             }
             is RetouchEvent.Patch -> {
+                val preview = beginRetouchStep(ev.layer) ?: run { retouchPending = (retouchPending - 1).coerceAtLeast(0); return }
                 strokeLayer = ev.layer
-                strokePreview = ev.preview
+                strokePreview = preview
                 strokeOffsetDoc = null
                 val session = ensureRetouchSession(ev.layer)
                 prepareStrokeMapping(ev.layer, session.canvas, ev.docW, ev.docH)
@@ -4300,7 +4317,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     val (bytes, stride) = SelectionEngine.readAlphaBytes(local)
                     local.recycle()
                     c.patch(bytes, stride, kotlin.math.round(vec[0]).toInt(), kotlin.math.round(vec[1]).toInt())
-                        ?.also { area -> c.downsampleInto(ev.preview, area) }
+                        ?.also { area -> c.downsampleInto(preview, area) }
                 }
                 if (changed == null) {
                     onRetouchFailed(R.string.retouch_patch_needs_selection)
@@ -4342,7 +4359,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         layer.originalHeight = c.height
         layer.isBitmapDirty = true
         session.sourcePath = file.absolutePath
-        retouchStrokeActive = false
+        retouchStepOpen = false
+        retouchPending = (retouchPending - 1).coerceAtLeast(0)
         strokePreview = null
         commitProjectMutation()
     }
