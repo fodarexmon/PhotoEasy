@@ -302,6 +302,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     /** Publishes a new selection mask object and invalidates everything that depends on it. */
     private fun publishSelection(mask: Bitmap, keepEditableShape: Boolean = false) {
+        // A selection edit that was still running when the canvas changed size (crop, resize,
+        // rotate, perspective) finishes with a mask of the old size: it no longer applies.
+        val proj = _uiState.value.currentProject
+        if (proj != null && (mask.width != proj.width || mask.height != proj.height)) return
         _uiState.value = _uiState.value.copy(
             selectionMask = mask,
             selectionRevision = _uiState.value.selectionRevision + 1,

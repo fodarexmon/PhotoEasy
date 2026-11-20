@@ -1232,7 +1232,7 @@ class PhotoEasyRobolectricTest {
         project.layers.add(Layer(id = "bg", name = "Bg", type = LayerType.COLOR_FILL))
         viewModel.openProject(project)
         viewModel.selectAll()
-        waitUntil { viewModel.uiState.value.canUndoSelection }
+        waitUntil { viewModel.uiState.value.selectionMask?.let { SelectionEngine.hasSelection(it) } == true }
         viewModel.resizeCanvas(50, 40, scaleContent = true)
         assertFalse("a 100x100 selection step must not be offered on a 50x40 canvas", viewModel.uiState.value.canUndoSelection)
         viewModel.undoSelection()
@@ -1244,6 +1244,21 @@ class PhotoEasyRobolectricTest {
         viewModel.undo()
         waitUntil { viewModel.uiState.value.currentProject!!.width == 100 }
         assertTrue(viewModel.uiState.value.canUndoSelection)
+    }
+
+    @Test
+    fun `a selection edit finishing after a resize does not publish an old-size mask`() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "SelRace", width = 100, height = 100)
+        project.layers.add(Layer(id = "bg", name = "Bg", type = LayerType.COLOR_FILL))
+        viewModel.openProject(project)
+        viewModel.selectAll()            // runs on a background thread
+        viewModel.resizeCanvas(60, 30, scaleContent = true)
+        repeat(50) { org.robolectric.shadows.ShadowLooper.idleMainLooper(); Thread.sleep(10) }
+        val mask = viewModel.uiState.value.selectionMask!!
+        assertEquals(60, mask.width)
+        assertEquals(30, mask.height)
     }
 
     @Test
