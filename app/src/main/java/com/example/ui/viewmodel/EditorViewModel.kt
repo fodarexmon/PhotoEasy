@@ -1362,20 +1362,33 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun addAdjustmentLayer() {
+    /**
+     * Adds an adjustment layer of [kind] (Levels, Curves, Black & White...) above the selected
+     * layer, like Photoshop's Layer > New Adjustment Layer, and opens its settings.
+     */
+    fun addAdjustmentLayer(kind: com.example.data.model.AdjustmentKind = com.example.data.model.AdjustmentKind.GENERAL) {
         val proj = _uiState.value.currentProject ?: return
+        if (pendingTransactionSnapshot != null) saveHistoryState()
         saveHistoryState()
 
+        val name = if (kind == com.example.data.model.AdjustmentKind.GENERAL) {
+            tr(R.string.layer_name_adjustment, proj.layers.count { it.type == LayerType.ADJUSTMENT } + 1)
+        } else {
+            uniqueLayerName(tr(kind.labelRes), proj)
+        }
         val layer = Layer(
             id = java.util.UUID.randomUUID().toString(),
-            name = tr(R.string.layer_name_adjustment, proj.layers.count { it.type == LayerType.ADJUSTMENT } + 1),
+            name = name,
             type = LayerType.ADJUSTMENT,
-            adjustments = ColorAdjustments()
+            adjustments = ColorAdjustments(),
+            adjustmentKind = kind
         )
-        proj.layers.add(layer)
+        val insertAt = (_uiState.value.selectedLayerIndex + 1).coerceIn(0, proj.layers.size)
+        proj.layers.add(insertAt, layer)
         commitProjectMutation(
-            selectedLayerIndex = proj.layers.size - 1,
-            statusMessage = tr(R.string.status_adjustment_added)
+            selectedLayerIndex = insertAt,
+            statusMessage = tr(R.string.status_adjustment_added),
+            transformState = { it.copy(activeTool = ActiveTool.ADJUST) }
         )
     }
 

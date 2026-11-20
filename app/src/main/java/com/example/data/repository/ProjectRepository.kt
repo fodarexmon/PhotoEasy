@@ -224,6 +224,10 @@ class ProjectRepository(private val context: Context) {
                         put("filter", layer.filter.name)
                         put("filterIntensity", layer.filterIntensity.toDouble())
                         layer.lutId?.let { put("lutId", it) }
+                        if (layer.type == LayerType.ADJUSTMENT) {
+                            put("adjustmentKind", layer.adjustmentKind.name)
+                            put("adjustmentParams", com.example.engine.AdjustmentLayerEngine.toJson(layer.adjustmentParams))
+                        }
                         layer.exifTags?.takeIf { it.isNotEmpty() }?.let { tags ->
                             put("exifTags", JSONObject().apply { tags.forEach { (k, v) -> put(k, v) } })
                         }
@@ -917,6 +921,8 @@ class ProjectRepository(private val context: Context) {
                     filter = safeValueOf(layerObj.optString("filter", ""), FilterType.NONE),
                     filterIntensity = layerObj.optDouble("filterIntensity", 1.0).toFloat().coerceIn(0f, 1f),
                     lutId = layerObj.optString("lutId", "").ifBlank { null },
+                    adjustmentKind = safeValueOf(layerObj.optString("adjustmentKind", ""), com.example.data.model.AdjustmentKind.GENERAL),
+                    adjustmentParams = com.example.engine.AdjustmentLayerEngine.fromJson(layerObj.optJSONObject("adjustmentParams")),
                     exifTags = layerObj.optJSONObject("exifTags")?.let { o ->
                         o.keys().asSequence().associateWith { k -> o.optString(k) }.ifEmpty { null }
                     },

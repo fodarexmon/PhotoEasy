@@ -546,11 +546,11 @@ fun CanvasView(
                 if (showGeneralOriginal) {
                     snapshot.filter = com.example.data.model.FilterType.NONE
                     snapshot.lutId = null
-                    snapshot.adjustments = com.example.data.model.ColorAdjustments()
+                    snapshot.adjustments = com.example.data.model.ColorAdjustments(); snapshot.adjustmentKind = com.example.data.model.AdjustmentKind.GENERAL
                 } else if (showSelectedLayerOriginal && index == selectedLayerIndex) {
                     snapshot.filter = com.example.data.model.FilterType.NONE
                     snapshot.lutId = null
-                    snapshot.adjustments = com.example.data.model.ColorAdjustments()
+                    snapshot.adjustments = com.example.data.model.ColorAdjustments(); snapshot.adjustmentKind = com.example.data.model.AdjustmentKind.GENERAL
                 }
             }
         }
@@ -609,7 +609,7 @@ fun CanvasView(
                     layer.previewSnapshot().also { snapshot ->
                         snapshot.filter = com.example.data.model.FilterType.NONE
                         snapshot.lutId = null
-                        snapshot.adjustments = com.example.data.model.ColorAdjustments()
+                        snapshot.adjustments = com.example.data.model.ColorAdjustments(); snapshot.adjustmentKind = com.example.data.model.AdjustmentKind.GENERAL
                     }
                 }
                 val origRendered = withContext(Dispatchers.Default) {

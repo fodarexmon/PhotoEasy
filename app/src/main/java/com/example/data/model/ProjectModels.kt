@@ -80,6 +80,88 @@ enum class FilterType(val displayName: String, val resId: Int) {
     LIGHT_LEAK("Light Leak", R.string.filter_light_leak)
 }
 
+/**
+ * What an adjustment layer does, as in Photoshop's Layer > New Adjustment Layer menu. The first
+ * group edits the layer's [ColorAdjustments] (shown with only the matching controls); the rest use
+ * [AdjustmentLayerParams]. GENERAL is the older all-in-one adjustment layer.
+ */
+enum class AdjustmentKind(val labelRes: Int) {
+    GENERAL(R.string.adjk_general),
+    BRIGHTNESS_CONTRAST(R.string.adjk_brightness_contrast),
+    LEVELS(R.string.adjk_levels),
+    CURVES(R.string.adjk_curves),
+    EXPOSURE(R.string.adjk_exposure),
+    VIBRANCE(R.string.adjk_vibrance),
+    HUE_SATURATION(R.string.adjk_hue_saturation),
+    COLOR_BALANCE(R.string.adjk_color_balance),
+    BLACK_WHITE(R.string.adjk_black_white),
+    PHOTO_FILTER(R.string.adjk_photo_filter),
+    GRADIENT_MAP(R.string.adjk_gradient_map),
+    INVERT(R.string.adjk_invert),
+    POSTERIZE(R.string.adjk_posterize),
+    THRESHOLD(R.string.adjk_threshold);
+
+    companion object {
+        /** Kinds offered when adding a layer (GENERAL stays for older projects only). */
+        val addable: List<AdjustmentKind> get() = values().filter { it != GENERAL }
+    }
+}
+
+/** Settings of the adjustment kinds that are not plain [ColorAdjustments]. Immutable. */
+data class AdjustmentLayerParams(
+    // Levels (0..255 input / output, gamma 0.1..9.99)
+    val levelsInBlack: Float = 0f,
+    val levelsInWhite: Float = 255f,
+    val levelsGamma: Float = 1f,
+    val levelsOutBlack: Float = 0f,
+    val levelsOutWhite: Float = 255f,
+    // Exposure (stops), offset (-0.5..0.5), gamma correction (0.1..9.99)
+    val exposureEv: Float = 0f,
+    val exposureOffset: Float = 0f,
+    val exposureGamma: Float = 1f,
+    // Color balance: cyan-red, magenta-green, yellow-blue per tonal range, -100..100
+    val balanceShadows: FloatArray = floatArrayOf(0f, 0f, 0f),
+    val balanceMidtones: FloatArray = floatArrayOf(0f, 0f, 0f),
+    val balanceHighlights: FloatArray = floatArrayOf(0f, 0f, 0f),
+    val balancePreserveLuminosity: Boolean = true,
+    // Black & White: reds, yellows, greens, cyans, blues, magentas (-200..300 %), optional tint
+    val bwWeights: FloatArray = floatArrayOf(40f, 60f, 40f, 60f, 20f, 80f),
+    val bwTint: Boolean = false,
+    val bwTintHue: Float = 35f,
+    val bwTintSaturation: Float = 25f,
+    // Photo filter
+    val photoFilterColor: Int = 0xFFEC8A00.toInt(),
+    val photoFilterDensity: Float = 25f,
+    val photoFilterPreserveLuminosity: Boolean = true,
+    // Gradient map (shadows -> highlights)
+    val gradientStart: Int = 0xFF000000.toInt(),
+    val gradientEnd: Int = 0xFFFFFFFF.toInt(),
+    val gradientReverse: Boolean = false,
+    // Posterize levels 2..255, threshold level 1..255
+    val posterizeLevels: Int = 4,
+    val thresholdLevel: Int = 128
+) {
+    // FloatArray fields: compare by content (used to skip redundant renders and undo steps).
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is AdjustmentLayerParams) return false
+        return levelsInBlack == other.levelsInBlack && levelsInWhite == other.levelsInWhite && levelsGamma == other.levelsGamma &&
+            levelsOutBlack == other.levelsOutBlack && levelsOutWhite == other.levelsOutWhite &&
+            exposureEv == other.exposureEv && exposureOffset == other.exposureOffset && exposureGamma == other.exposureGamma &&
+            balanceShadows.contentEquals(other.balanceShadows) && balanceMidtones.contentEquals(other.balanceMidtones) &&
+            balanceHighlights.contentEquals(other.balanceHighlights) && balancePreserveLuminosity == other.balancePreserveLuminosity &&
+            bwWeights.contentEquals(other.bwWeights) && bwTint == other.bwTint && bwTintHue == other.bwTintHue &&
+            bwTintSaturation == other.bwTintSaturation && photoFilterColor == other.photoFilterColor &&
+            photoFilterDensity == other.photoFilterDensity && photoFilterPreserveLuminosity == other.photoFilterPreserveLuminosity &&
+            gradientStart == other.gradientStart && gradientEnd == other.gradientEnd && gradientReverse == other.gradientReverse &&
+            posterizeLevels == other.posterizeLevels && thresholdLevel == other.thresholdLevel
+    }
+
+    override fun hashCode(): Int =
+        listOf(levelsInBlack, levelsInWhite, levelsGamma, exposureEv, photoFilterColor, posterizeLevels, thresholdLevel).hashCode() * 31 +
+            balanceMidtones.contentHashCode() + bwWeights.contentHashCode()
+}
+
 enum class LayerType {
     IMAGE,
     TEXT,
@@ -391,7 +473,10 @@ data class Layer(
      * EXIF tags of the photo this layer was imported from (see ExportEngine.readMetadata). Kept
      * separately because destructive edits replace [sourceAssetPath] with a file without EXIF.
      */
-    var exifTags: Map<String, String>? = null
+    var exifTags: Map<String, String>? = null,
+    /** Adjustment layers: which Photoshop-style adjustment this is, and its own settings. */
+    var adjustmentKind: AdjustmentKind = AdjustmentKind.GENERAL,
+    var adjustmentParams: AdjustmentLayerParams = AdjustmentLayerParams()
 ) {
     fun currentMaskAnchor(): MaskAnchor = MaskAnchor(positionX, positionY, scaleX, scaleY, rotation)
 

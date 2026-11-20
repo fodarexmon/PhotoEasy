@@ -278,6 +278,11 @@ object LayerRenderer {
             coroutineContext.ensureActive()
             swap(ImageProcessor.applyLut(bmp, lut, layer.filterIntensity, isCancelled))
         }
+        // Photoshop-style adjustment kinds (Levels, Black & White, Gradient Map...).
+        if (layer.type == LayerType.ADJUSTMENT && !AdjustmentLayerEngine.usesColorAdjustments(layer.adjustmentKind)) {
+            coroutineContext.ensureActive()
+            swap(AdjustmentLayerEngine.apply(bmp, layer.adjustmentKind, layer.adjustmentParams, isCancelled))
+        }
         return bmp
     }
 

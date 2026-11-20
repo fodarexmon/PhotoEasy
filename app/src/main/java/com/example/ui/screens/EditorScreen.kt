@@ -192,7 +192,7 @@ fun EditorScreen(
     val onMergeDown: () -> Unit = { viewModel.mergeSelectedLayerDown() }
     val onAddImageUri: (Uri) -> Unit = { uri -> viewModel.addImageFromUri(uri) }
     val onAddText: (String) -> Unit = { text -> viewModel.addTextLayer(text) }
-    val onAddAdjustmentLayer: () -> Unit = { viewModel.addAdjustmentLayer() }
+    val onAddAdjustmentLayer: (com.example.data.model.AdjustmentKind) -> Unit = { kind -> viewModel.addAdjustmentLayer(kind) }
     val onSmartAutoClick: () -> Unit = { viewModel.applySmartAutoCorrection() }
     val onObjectRemovalClick: () -> Unit = { viewModel.applyObjectRemoval() }
     val onInpaintSelectionModeChange: (com.example.ui.viewmodel.InpaintSelectionMode) -> Unit = { viewModel.setInpaintSelectionMode(it) }
@@ -798,8 +798,33 @@ fun EditorScreen(
                 when (activeTool) {
                     ActiveTool.ADJUST -> {
                         val hasSel = hasActiveSelectionCached
-                        selectedLayer?.let { layer ->
+                        val adjKind = selectedLayer?.takeIf { it.type == com.example.data.model.LayerType.ADJUSTMENT }?.adjustmentKind
+                        if (selectedLayer != null && adjKind != null && adjKind != com.example.data.model.AdjustmentKind.GENERAL &&
+                            adjKind != com.example.data.model.AdjustmentKind.CURVES && adjKind != com.example.data.model.AdjustmentKind.HUE_SATURATION
+                        ) {
+                            // Photoshop-style adjustment layer: only this kind's own controls.
+                            com.example.ui.components.AdjustmentLayerPanel(
+                                kind = adjKind,
+                                adjustments = selectedLayer.adjustments,
+                                params = selectedLayer.adjustmentParams,
+                                onChange = { a, p -> onUpdateLayerTransient { l -> l.adjustments = a; l.adjustmentParams = p } },
+                                onCommit = onCommitHistoryState,
+                                onReset = {
+                                    onUpdateLayerTransient { l ->
+                                        l.adjustments = ColorAdjustments()
+                                        l.adjustmentParams = com.example.data.model.AdjustmentLayerParams()
+                                    }
+                                    onCommitHistoryState()
+                                },
+                                onCompareChange = { compareOriginal = it }
+                            )
+                        } else selectedLayer?.let { layer ->
                             AdjustmentsPanel(
+                                initialTab = when (adjKind) {
+                                    com.example.data.model.AdjustmentKind.CURVES -> com.example.ui.components.AdjustmentsTab.CURVES
+                                    com.example.data.model.AdjustmentKind.HUE_SATURATION -> com.example.ui.components.AdjustmentsTab.HSL
+                                    else -> com.example.ui.components.AdjustmentsTab.BASIC
+                                },
                                 adjustments = layer.adjustments,
                                 onAdjustmentsChange = { newAdj ->
                                     onUpdateLayerTransient { l -> l.adjustments = newAdj }
