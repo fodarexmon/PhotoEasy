@@ -164,6 +164,12 @@ data class AdjustmentLayerParams(
             balanceMidtones.contentHashCode() + bwWeights.contentHashCode()
 }
 
+/**
+ * A layer's pixels before its first retouch stroke in this editing session, shown by Before/After.
+ * Used only while the layer keeps the same content size (else the "before" would not line up).
+ */
+class LayerBefore(val bitmap: Bitmap, val contentWidth: Float, val contentHeight: Float)
+
 enum class LayerType {
     IMAGE,
     TEXT,
@@ -463,6 +469,8 @@ data class Layer(
     var maskAnchor: MaskAnchor? = null,
     /** Clipping mask: drawn only where the nearest non-clipped layer below is opaque. */
     var isClipped: Boolean = false,
+    /** Added from the Stickers tab: hidden in the Before view of Before/After. */
+    var isSticker: Boolean = false,
     /** Skew in degrees (horizontal / vertical), applied around the layer centre. */
     var skewX: Float = 0f,
     var skewY: Float = 0f,
