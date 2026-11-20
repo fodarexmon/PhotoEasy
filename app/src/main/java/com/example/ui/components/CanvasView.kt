@@ -508,12 +508,15 @@ fun CanvasView(
     val previewBuffers = remember { arrayOfNulls<Bitmap>(2) }
     var activeBufferIndex by remember { mutableIntStateOf(0) }
     val renderGeneration = remember { java.util.concurrent.atomic.AtomicLong(0L) }
+    // Buffers a render is still drawing into. A cancelled render keeps running on
+    // Dispatchers.Default until its next cancellation check, so its buffer must neither be reused
+    // by the next render nor recycled. Buffers are never recycled here: dropped references are
+    // freed by the GC once no render uses them.
+    val busyBuffers = remember { java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<Bitmap, Boolean>()) }
 
     DisposableEffect(Unit) {
         onDispose {
-            previewBuffers[0]?.let { if (!it.isRecycled) it.recycle() }
             previewBuffers[0] = null
-            previewBuffers[1]?.let { if (!it.isRecycled) it.recycle() }
             previewBuffers[1] = null
         }
     }
@@ -563,14 +566,15 @@ fun CanvasView(
         // Select the inactive buffer from our double-buffer pool
         val backBufferIndex = 1 - activeBufferIndex
         var backBuffer = previewBuffers[backBufferIndex]
-        if (backBuffer == null || backBuffer.isRecycled || backBuffer.width != targetW || backBuffer.height != targetH) {
-            backBuffer?.recycle()
+        if (backBuffer == null || backBuffer.isRecycled || backBuffer.width != targetW || backBuffer.height != targetH || backBuffer in busyBuffers) {
             backBuffer = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
             previewBuffers[backBufferIndex] = backBuffer
         }
+        val renderTarget: Bitmap = backBuffer
 
         try {
-            val rendered = withContext(Dispatchers.Default) {
+            busyBuffers.add(renderTarget)
+            val rendered = try { withContext(Dispatchers.Default) {
                 LayerRenderer.renderCompositeCanvas(
                     context = context,
                     layers = layersSnapshot,
@@ -578,7 +582,7 @@ fun CanvasView(
                     height = h,
                     includeBackground = false,
                     maxPreviewDimension = previewMaxDimension,
-                    targetBitmap = backBuffer,
+                    targetBitmap = renderTarget,
                     generationId = gen,
                     // Non-destructive adjustments/filters are stored per layer and always apply to the
                     // whole layer on save/export, so the preview must not scope them to the selection.
@@ -588,6 +592,9 @@ fun CanvasView(
                     proEffectPreview = if (showGeneralOriginal || showSelectedLayerOriginal) null else proEffectPreview,
                     proEffectMask = selectionMask
                 )
+            } } finally {
+                // withContext returns only once the render block has really stopped.
+                busyBuffers.remove(renderTarget)
             }
 
             // Swap buffers only if this generation is still the latest and the coroutine is active

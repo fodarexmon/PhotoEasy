@@ -890,6 +890,7 @@ fun EditorScreen(
                                 onToggleFavorite = onToggleFavoriteFilter,
                                 onImportLut = onImportLut,
                                 onDeleteLut = onDeleteLut,
+                                onCountLutUsage = { id -> viewModel.countProjectsUsingLut(id) },
                                 onSaveLook = onSaveLook,
                                 onDeleteCustomPreset = onDeleteCustomPreset,
                                 onIntensityChange = { intensity -> onUpdateLayerTransient { l -> l.filterIntensity = intensity } },

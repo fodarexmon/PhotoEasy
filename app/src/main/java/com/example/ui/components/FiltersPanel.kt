@@ -108,11 +108,14 @@ fun FiltersPanel(
     onToggleFavorite: (String) -> Unit = {},
     onImportLut: (android.net.Uri) -> Unit = {},
     onDeleteLut: (String) -> Unit = {},
+    /** Number of projects whose layers use the LUT (deleting it removes their look). */
+    onCountLutUsage: suspend (String) -> Int = { 0 },
     onSaveLook: (String) -> Unit = {},
     onDeleteCustomPreset: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var activeTab by remember { mutableStateOf(FilterPanelTab.PRESETS) }
+    var pendingLutDelete by remember { mutableStateOf<com.example.engine.LutInfo?>(null) }
     // Thumbnails keyed "f:<FilterType>", "lut:<id>" or "preset:<id>".
     var previews by remember { mutableStateOf<Map<String, Bitmap>>(emptyMap()) }
     var loading by remember { mutableStateOf(false) }
@@ -434,17 +437,56 @@ fun FiltersPanel(
                 if (selectedUserItem != null) {
                     TextButton(
                         onClick = {
-                            selectedUserItem.lut?.let { onDeleteLut(it.id) }
-                            selectedUserItem.preset?.let { onDeleteCustomPreset(it.id) }
-                            selectedKey = "f:${FilterType.NONE.name}"
-                            previewFilter = FilterType.NONE
-                            onPreviewFilter(FilterType.NONE)
+                            val lut = selectedUserItem.lut
+                            if (lut != null) {
+                                // Deleting a LUT also removes the look from every project using it: confirm first.
+                                pendingLutDelete = lut
+                            } else {
+                                selectedUserItem.preset?.let { onDeleteCustomPreset(it.id) }
+                                selectedKey = "f:${FilterType.NONE.name}"
+                                previewFilter = FilterType.NONE
+                                onPreviewFilter(FilterType.NONE)
+                            }
                         },
                         modifier = Modifier.heightIn(min = 40.dp)
                     ) {
                         Text(stringResource(R.string.action_delete), color = MaterialTheme.colorScheme.error, fontSize = 11.sp)
                     }
                 }
+            }
+
+            pendingLutDelete?.let { lut ->
+                var usage by remember(lut.id) { mutableStateOf<Int?>(null) }
+                LaunchedEffect(lut.id) { usage = try { onCountLutUsage(lut.id) } catch (e: Exception) { 0 } }
+                AlertDialog(
+                    onDismissRequest = { pendingLutDelete = null },
+                    title = { Text(stringResource(R.string.lut_delete_title, lut.name)) },
+                    text = {
+                        val n = usage
+                        Text(
+                            when {
+                                n == null -> stringResource(R.string.lut_delete_checking)
+                                n > 0 -> androidx.compose.ui.platform.LocalContext.current.resources.getQuantityString(R.plurals.lut_delete_used, n, n)
+                                else -> stringResource(R.string.lut_delete_unused)
+                            }
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                onDeleteLut(lut.id)
+                                pendingLutDelete = null
+                                selectedKey = "f:${FilterType.NONE.name}"
+                                previewFilter = FilterType.NONE
+                                onPreviewFilter(FilterType.NONE)
+                            },
+                            enabled = usage != null
+                        ) { Text(stringResource(R.string.action_delete), color = MaterialTheme.colorScheme.error) }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { pendingLutDelete = null }) { Text(stringResource(R.string.action_cancel)) }
+                    }
+                )
             }
 
             if (showSaveLookDialog) {

@@ -842,4 +842,15 @@
     <string name="status_subject_selected">تم تحديد العنصر الأساسي بنجاح</string>
     <string name="status_matting_complete">تم تطبيق تنقيح الحواف والشعر بنجاح</string>
     <string name="status_matting_failed">فشل تنقيح الحواف</string>
+    <string name="lut_delete_title">حذف «%1$s»؟</string>
+    <string name="lut_delete_checking">جارٍ التحقق من المشاريع التي تستخدم هذا الـ LUT…</string>
+    <string name="lut_delete_unused">لا يستخدم أي مشروع هذا الـ LUT. سيُحذف من مكتبتك.</string>
+    <plurals name="lut_delete_used">
+        <item quantity="zero">لا يستخدم أي مشروع هذا الـ LUT.</item>
+        <item quantity="one">مشروع واحد يستخدم هذا الـ LUT. ستفقد طبقاته هذا المظهر، ولا يمكن التراجع عن ذلك.</item>
+        <item quantity="two">مشروعان يستخدمان هذا الـ LUT. ستفقد طبقاتهما هذا المظهر، ولا يمكن التراجع عن ذلك.</item>
+        <item quantity="few">%d مشاريع تستخدم هذا الـ LUT. ستفقد طبقاتها هذا المظهر، ولا يمكن التراجع عن ذلك.</item>
+        <item quantity="many">%d مشروعًا يستخدم هذا الـ LUT. ستفقد طبقاته هذا المظهر، ولا يمكن التراجع عن ذلك.</item>
+        <item quantity="other">%d مشروع يستخدم هذا الـ LUT. ستفقد طبقاته هذا المظهر، ولا يمكن التراجع عن ذلك.</item>
+    </plurals>
 </resources>

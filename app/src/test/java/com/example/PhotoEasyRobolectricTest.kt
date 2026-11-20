@@ -1222,6 +1222,113 @@ class PhotoEasyRobolectricTest {
         assertTrue("restored pixels differ from the file on disk", restored.isBitmapDirty)
     }
 
+    // --- Review fixes, second group ------------------------------------------------------------
+
+    @Test
+    fun `selection undo is not offered for a mask of another canvas size`() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "SelSize", width = 100, height = 100)
+        project.layers.add(Layer(id = "bg", name = "Bg", type = LayerType.COLOR_FILL))
+        viewModel.openProject(project)
+        viewModel.selectAll()
+        waitUntil { viewModel.uiState.value.selectionMask?.let { SelectionEngine.hasSelection(it) } == true }
+        viewModel.resizeCanvas(50, 40, scaleContent = true)
+        assertFalse("a 100x100 selection step must not be offered on a 50x40 canvas", viewModel.uiState.value.canUndoSelection)
+        viewModel.undoSelection()
+        org.robolectric.shadows.ShadowLooper.idleMainLooper()
+        val mask = viewModel.uiState.value.selectionMask!!
+        assertEquals(50, mask.width)
+        assertEquals(40, mask.height)
+        // Undoing the resize restores the size, and with it the selection step.
+        viewModel.undo()
+        waitUntil { viewModel.uiState.value.currentProject!!.width == 100 }
+        assertTrue(viewModel.uiState.value.canUndoSelection)
+    }
+
+    @Test
+    fun `a selection edit finishing after a resize does not publish an old-size mask`() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "SelRace", width = 100, height = 100)
+        project.layers.add(Layer(id = "bg", name = "Bg", type = LayerType.COLOR_FILL))
+        viewModel.openProject(project)
+        viewModel.selectAll()            // runs on a background thread
+        viewModel.resizeCanvas(60, 30, scaleContent = true)
+        repeat(50) { org.robolectric.shadows.ShadowLooper.idleMainLooper(); Thread.sleep(10) }
+        val mask = viewModel.uiState.value.selectionMask!!
+        assertEquals(60, mask.width)
+        assertEquals(30, mask.height)
+    }
+
+    @Test
+    fun `undo of an edit still in progress can be redone`() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "PendingRedo", width = 50, height = 50)
+        project.layers.add(Layer(id = "l1", name = "L", type = LayerType.IMAGE))
+        viewModel.openProject(project)
+        viewModel.updateSelectedLayerTransient { it.adjustments = it.adjustments.copy(brightness = 30f) }
+        viewModel.undo()
+        assertEquals(0f, viewModel.uiState.value.currentProject!!.layers[0].adjustments.brightness, 0.001f)
+        assertTrue(viewModel.uiState.value.canRedo)
+        viewModel.redo()
+        assertEquals(30f, viewModel.uiState.value.currentProject!!.layers[0].adjustments.brightness, 0.001f)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun `background save writes an open edit and Cancel saves the restored state`() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(id = "bg_save_proj", name = "BgSave", width = 40, height = 40)
+        project.layers.add(Layer(id = "fill", name = "Fill", type = LayerType.COLOR_FILL))
+        runBlocking { assertTrue(repository.saveProject(project)) }
+        viewModel.openProject(project)
+        viewModel.updateSelectedLayerTransient { it.opacity = 0.4f }
+        viewModel.saveForBackground()
+        waitUntil { !viewModel.uiState.value.isProjectDirty }
+        val saved = runBlocking { repository.getProjectById("bg_save_proj") }!!
+        assertEquals(0.4f, saved.layers[0].opacity, 0.001f)
+        // The edit is still open: Cancel reverts it and must mark the project for saving again.
+        viewModel.cancelHistoryTransaction()
+        assertTrue(viewModel.uiState.value.isProjectDirty)
+        assertEquals(1f, viewModel.uiState.value.currentProject!!.layers[0].opacity, 0.001f)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun `photo metadata survives as tags and location can be dropped on export`() {
+        val dir = java.io.File(context.cacheDir, "exif_test").apply { mkdirs() }
+        val photo = java.io.File(dir, "photo.jpg")
+        photo.outputStream().use { Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888).compress(Bitmap.CompressFormat.JPEG, 90, it) }
+        androidx.exifinterface.media.ExifInterface(photo.absolutePath).apply {
+            setAttribute(androidx.exifinterface.media.ExifInterface.TAG_MAKE, "TestCam")
+            setLatLong(30.04, 31.23)
+            saveAttributes()
+        }
+        val tags = com.example.engine.ExportEngine.readMetadata(photo)!!
+        assertEquals("TestCam", tags[androidx.exifinterface.media.ExifInterface.TAG_MAKE])
+        assertNotNull(tags[androidx.exifinterface.media.ExifInterface.TAG_GPS_LATITUDE])
+
+        val out = java.io.File(dir, "out.jpg")
+        out.outputStream().use { Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888).compress(Bitmap.CompressFormat.JPEG, 90, it) }
+        com.example.engine.ExportEngine.writeMetadata(tags, out, com.example.engine.ExportMetadata.NO_LOCATION, 8, 8)
+        val written = androidx.exifinterface.media.ExifInterface(out.absolutePath)
+        assertEquals("TestCam", written.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_MAKE))
+        assertTrue(written.getAttribute(androidx.exifinterface.media.ExifInterface.TAG_GPS_LATITUDE) == null)
+
+        // The tags are saved with the project.
+        val project = Project(id = "exif_proj", name = "Exif", width = 20, height = 20)
+        project.layers.add(Layer(id = "fill", name = "Fill", type = LayerType.COLOR_FILL, exifTags = tags, lutId = "lut-used"))
+        runBlocking { assertTrue(repository.saveProject(project)) }
+        val loaded = runBlocking { repository.getProjectById("exif_proj") }!!
+        assertEquals(tags, loaded.layers[0].exifTags)
+        // ...and the LUT it uses is found when the LUT is about to be deleted.
+        assertTrue(runBlocking { repository.projectIdsUsingLut("lut-used") }.contains("exif_proj"))
+        assertFalse(runBlocking { repository.projectIdsUsingLut("other") }.contains("exif_proj"))
+    }
+
     // --- One Undo / Redo timeline for document and selection edits ---------------------------
 
     private fun waitUntil(condition: () -> Boolean) {
