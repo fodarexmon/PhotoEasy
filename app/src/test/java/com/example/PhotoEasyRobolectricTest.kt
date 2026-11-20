@@ -1329,6 +1329,41 @@ class PhotoEasyRobolectricTest {
         assertFalse(runBlocking { repository.projectIdsUsingLut("other") }.contains("exif_proj"))
     }
 
+    // --- Review fixes, polish ---------------------------------------------------------------------
+
+    @Test
+    fun `duplicated layers get localized unique names`() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "Dup", width = 40, height = 40)
+        project.layers.add(Layer(id = "fill", name = "Fill", type = LayerType.COLOR_FILL))
+        viewModel.openProject(project)
+        repeat(2) { i ->
+            viewModel.selectLayer(0)
+            viewModel.duplicateSelectedLayer()
+            waitUntil { viewModel.uiState.value.currentProject!!.layers.size == i + 2 && !viewModel.uiState.value.isProcessing }
+        }
+        val names = viewModel.uiState.value.currentProject!!.layers.map { it.name }
+        val copy = context.getString(R.string.layer_name_copy, "Fill")
+        assertTrue("names: $names", names.containsAll(listOf("Fill", copy, "$copy 2")))
+        assertFalse(names.any { it.contains("(Copy)") })
+    }
+
+    @Test
+    fun `deleting the base layer unclips the layer that becomes the bottom one`() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "Clip", width = 40, height = 40)
+        project.layers.add(Layer(id = "base", name = "Base", type = LayerType.COLOR_FILL))
+        project.layers.add(Layer(id = "clipped", name = "Clipped", type = LayerType.COLOR_FILL, isClipped = true))
+        viewModel.openProject(project)
+        viewModel.selectLayer(0)
+        viewModel.deleteSelectedLayer()
+        val remaining = viewModel.uiState.value.currentProject!!.layers.single()
+        assertEquals("clipped", remaining.id)
+        assertFalse(remaining.isClipped)
+    }
+
     // --- One Undo / Redo timeline for document and selection edits ---------------------------
 
     private fun waitUntil(condition: () -> Boolean) {

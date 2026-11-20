@@ -357,11 +357,13 @@ fun TextEditorPanel(
                 Text(stringResource(R.string.text_center_canvas), fontSize = 11.sp)
             }
         }
-        val halfW = (documentWidth / 2f).coerceAtLeast(50f)
-        val halfH = (documentHeight / 2f).coerceAtLeast(50f)
-        LabeledSlider(stringResource(R.string.transform_pos_x), "${positionX.roundToInt()} px", positionX.coerceIn(-halfW, halfW), -halfW..halfW,
+        // The range always contains the current position, so touching a slider never makes text that
+        // was dragged off the canvas jump back to the edge.
+        val halfW = maxOf((documentWidth / 2f).coerceAtLeast(50f), kotlin.math.abs(positionX))
+        val halfH = maxOf((documentHeight / 2f).coerceAtLeast(50f), kotlin.math.abs(positionY))
+        LabeledSlider(stringResource(R.string.transform_pos_x), "${positionX.roundToInt()} px", positionX, -halfW..halfW,
             { onPositionChange(it, positionY) }, onConfigCommit)
-        LabeledSlider(stringResource(R.string.transform_pos_y), "${positionY.roundToInt()} px", positionY.coerceIn(-halfH, halfH), -halfH..halfH,
+        LabeledSlider(stringResource(R.string.transform_pos_y), "${positionY.roundToInt()} px", positionY, -halfH..halfH,
             { onPositionChange(positionX, it) }, onConfigCommit)
 
         SectionDivider()

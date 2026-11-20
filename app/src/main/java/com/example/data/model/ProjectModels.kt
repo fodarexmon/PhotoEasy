@@ -429,14 +429,14 @@ data class Layer(
 
     /**
      * Explicit layer duplication by user action.
-     * Creates new layer ID, appends (Copy) to name, and duplicates bitmap pixels.
+     * Creates new layer ID, names it [newName] (localized by the caller), and duplicates bitmap pixels.
      */
-    fun duplicateLayer(): Layer {
+    fun duplicateLayer(newName: String = "$name copy"): Layer {
         val copiedBitmap = bitmap?.copy(bitmap?.config ?: Bitmap.Config.ARGB_8888, true)
         val copiedMask = maskBitmap?.copy(maskBitmap?.config ?: Bitmap.Config.ALPHA_8, true)
         return this.copy(
             id = java.util.UUID.randomUUID().toString(),
-            name = if (name.endsWith("(Copy)")) name else "$name (Copy)",
+            name = newName,
             bitmap = copiedBitmap,
             maskBitmap = copiedMask,
             isMaskEnabled = isMaskEnabled,

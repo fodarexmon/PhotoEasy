@@ -644,7 +644,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             )
             proj.layers.add(bgLayer)
 
-            repository.saveProject(proj)
+            // Opening a project that is not on disk would lose it as soon as the app closes.
+            if (!repository.saveProject(proj)) {
+                repository.deleteProject(proj.id)
+                _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_save_failed_storage))
+                return@launch
+            }
             openProject(proj)
         }
     }
@@ -1240,7 +1245,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     )
                     proj.layers.add(imageLayer)
 
-                    repository.saveProject(proj)
+                    if (!repository.saveProject(proj)) {
+                        // Usually a full storage: remove the partial project (copied source photo included).
+                        repository.deleteProject(projId)
+                        throw java.io.IOException("Saving the imported project failed")
+                    }
                     proj
                 }
 
@@ -1401,6 +1410,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
             saveHistoryState()
             proj.layers.removeAt(idx)
+            // A clipped layer that is now at the bottom has nothing to clip to.
+            proj.layers.firstOrNull()?.isClipped = false
             val nextIdx = (idx - 1).coerceAtLeast(0)
             commitProjectMutation(selectedLayerIndex = nextIdx)
         }
@@ -1416,13 +1427,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 return
             }
 
+            val copyName = uniqueLayerName(tr(R.string.layer_name_copy, layer.name), proj)
             viewModelScope.launch {
                 _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_duplicating_layer))
                 try {
                     val copied = if (layer.bitmap != null) {
-                        withContext(Dispatchers.Default) { layer.duplicateLayer() }
+                        withContext(Dispatchers.Default) { layer.duplicateLayer(copyName) }
                     } else {
-                        layer.duplicateLayer()
+                        layer.duplicateLayer(copyName)
                     }
                     saveHistoryState()
                     proj.layers.add(idx + 1, copied)
@@ -1445,6 +1457,15 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
         }
+    }
+
+    /** [base], or "[base] 2", "[base] 3"... when a layer already has that name. */
+    private fun uniqueLayerName(base: String, proj: Project): String {
+        val names = proj.layers.mapTo(HashSet()) { it.name }
+        if (base !in names) return base
+        var n = 2
+        while ("$base $n" in names) n++
+        return "$base $n"
     }
 
     /** Drag-and-drop reorder: moves the layer at [from] to [to] (bottom = 0). */
@@ -1562,6 +1583,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             viewModelScope.launch {
                 _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_merging_layers))
 
+                var historySaved = false
                 try {
                     val mergedBmp = withContext(Dispatchers.Default) {
                         LayerRenderer.renderCompositeCanvas(
@@ -1576,6 +1598,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     }
 
                     saveHistoryState()
+                    historySaved = true
 
                     if (!commitDestructiveBitmap(proj, bottomLayer, mergedBmp, proj.width.toFloat(), proj.height.toFloat(), "merge")) {
                         throw java.io.IOException("Failed to persist merged layer")
@@ -1614,12 +1637,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                         transformState = { it.copy(isProcessing = false) }
                     )
                 } catch (e: OutOfMemoryError) {
+                    // Failed after its undo step was recorded: drop that step (and any partial change).
+                    if (historySaved) rollbackToLastHistoryState()
                     System.gc()
                     _uiState.value = _uiState.value.copy(
                         isProcessing = false,
                         statusMessage = tr(R.string.status_merge_failed)
                     )
                 } catch (e: Exception) {
+                    // Failed after its undo step was recorded: drop that step (and any partial change).
+                    if (historySaved) rollbackToLastHistoryState()
                     _uiState.value = _uiState.value.copy(
                         isProcessing = false,
                         statusMessage = tr(R.string.status_merge_failed)
@@ -2531,6 +2558,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             var local: Bitmap? = null
             var localProtect: Bitmap? = null
             var out: Bitmap? = null
+            var historySaved = false
             try {
                 src = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Image unavailable")
                 // workLayerFor keeps the layer's document footprint, so the mask lands on exactly the
@@ -2558,6 +2586,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     )
                 }
                 saveHistoryState()
+                historySaved = true
                 if (!commitDestructiveBitmap(proj, layer, out!!, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "content_aware")) {
                     throw java.io.IOException("Save failed")
                 }
@@ -2569,9 +2598,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 clearSelectionHistory()
                 updateHistoryFlags()
             } catch (e: OutOfMemoryError) {
+                // Failed after its undo step was recorded: drop that step (and any partial change).
+                if (historySaved) rollbackToLastHistoryState()
                 System.gc()
                 _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_processing_failed_memory))
             } catch (e: Exception) {
+                // Failed after its undo step was recorded: drop that step (and any partial change).
+                if (historySaved) rollbackToLastHistoryState()
                 _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_object_remove_failed))
             } finally {
                 local?.let { if (!it.isRecycled) it.recycle() }
@@ -2750,7 +2783,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 endTransientSelectionSessions()
                 val base = _uiState.value.selectionMask ?: return@withLock
                 if (base.isRecycled) return@withLock
-                rememberSelectionState()
                 if (progressRes != null) {
                     _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(progressRes))
                 }
@@ -2758,6 +2790,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     val working = withContext(Dispatchers.Default) {
                         base.copy(Bitmap.Config.ALPHA_8, true).also { block(it) }
                     }
+                    // Recorded only once the edit succeeded (the current mask is still [base]), so a
+                    // failed edit leaves no empty undo step.
+                    rememberSelectionState()
                     publishSelection(working)
                     if (progressRes != null) {
                         _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = null)
@@ -3502,6 +3537,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             var effectiveDocMask: Bitmap? = null
             var localMask: Bitmap? = null
             var result: Bitmap? = null
+            var historySaved = false
             try {
                 // Bake from the full-quality source, not the preview proxy.
                 src = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Image unavailable")
@@ -3520,6 +3556,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     out
                 }
                 saveHistoryState()
+                historySaved = true
                 if (!commitDestructiveBitmap(proj, layer, result!!, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "apply_mask")) {
                     throw java.io.IOException("Failed to persist masked layer")
                 }
@@ -3533,9 +3570,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     transformState = { it.copy(isProcessing = false) }
                 )
             } catch (e: OutOfMemoryError) {
+                // Failed after its undo step was recorded: drop that step (and any partial change).
+                if (historySaved) rollbackToLastHistoryState()
                 System.gc()
                 _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_processing_failed_memory))
             } catch (e: Exception) {
+                // Failed after its undo step was recorded: drop that step (and any partial change).
+                if (historySaved) rollbackToLastHistoryState()
                 _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_layer_mask_apply_failed))
             } finally {
                 val p = layer.bitmap
@@ -3883,6 +3924,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 statusMessage = tr(R.string.status_processing)
             )
             val job = currentCoroutineContext()[Job]
+            var historySaved = false
             try {
                 val src = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Image unavailable")
                 val processed = withContext(Dispatchers.Default) {
@@ -3912,6 +3954,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 }
 
                 saveHistoryState()
+                historySaved = true
                 if (!commitDestructiveBitmap(proj, layer, finalProcessed, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), effect.name.lowercase())) {
                     throw java.io.IOException("Save failed")
                 }
@@ -3921,6 +3964,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     transformState = { it.copy(isProcessing = false, proEffectProgress = null) }
                 )
             } catch (e: kotlinx.coroutines.CancellationException) {
+                // Failed after its undo step was recorded: drop that step (and any partial change).
+                if (historySaved) rollbackToLastHistoryState()
                 _uiState.value = _uiState.value.copy(
                     isProcessing = false,
                     proEffectProgress = null,
@@ -3928,6 +3973,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 throw e
             } catch (e: OutOfMemoryError) {
+                // Failed after its undo step was recorded: drop that step (and any partial change).
+                if (historySaved) rollbackToLastHistoryState()
                 System.gc()
                 _uiState.value = _uiState.value.copy(
                     isProcessing = false,
@@ -3935,6 +3982,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     statusMessage = tr(R.string.status_processing_failed_memory)
                 )
             } catch (e: Exception) {
+                // Failed after its undo step was recorded: drop that step (and any partial change).
+                if (historySaved) rollbackToLastHistoryState()
                 _uiState.value = _uiState.value.copy(
                     isProcessing = false,
                     proEffectProgress = null,
@@ -4336,15 +4385,76 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         replaceSelectionAsync { SelectionEngine.createBlankMask(w, h) }
     }
 
+    /** Copies the selected pixels of the selected image layer into a new layer placed exactly over them. */
     fun copySelectionToNewLayer() {
-        val proj=_uiState.value.currentProject?:return;val idx=_uiState.value.selectedLayerIndex;if(idx !in proj.layers.indices)return;val layer=proj.layers[idx];val mask=_uiState.value.selectionMask?:return
-        if(layer.type!=LayerType.IMAGE||!SelectionEngine.hasSelection(mask)){_uiState.value=_uiState.value.copy(statusMessage=tr(R.string.status_nothing_selected));return}
-        viewModelScope.launch{_uiState.value=_uiState.value.copy(isProcessing=true,statusMessage=tr(R.string.status_copying_selection));var src:Bitmap?=null;var local:Bitmap?=null;var copy:Bitmap?=null
-            try{src=loadAuthoritativeLayerBitmap(layer)?:throw IllegalStateException("Image unavailable");val work=workLayerFor(layer,src!!);local=withContext(Dispatchers.Default){SelectionEngine.mapDocumentMaskToLayerLocal(mask,work,proj.width,proj.height)};copy=withContext(Dispatchers.Default){SelectionEngine.copySelectedToNewBitmap(src!!,local!!)}?:throw IllegalStateException("No pixels selected")
-                val n=Layer(id=java.util.UUID.randomUUID().toString(),name=tr(R.string.layer_name_selection),type=LayerType.IMAGE,exifTags=layer.exifTags,positionX=layer.positionX,positionY=layer.positionY,scaleX=layer.scaleX,scaleY=layer.scaleY,rotation=layer.rotation,opacity=layer.opacity,blendMode=layer.blendMode,filter=layer.filter,adjustments=layer.adjustments.copy(),contentWidth=layer.intrinsicDocumentWidth(),contentHeight=layer.intrinsicDocumentHeight())
-                if(!commitDestructiveBitmap(proj,n,copy!!,n.contentWidth,n.contentHeight,"selection"))throw java.io.IOException("Save failed");saveHistoryState();proj.layers.add(idx+1,n);commitProjectMutation(selectedLayerIndex=idx+1,statusMessage=tr(R.string.status_copied_new_layer),transformState={it.copy(selectionMask=SelectionEngine.createBlankMask(proj.width,proj.height),isProcessing=false)}); clearSelectionHistory()}
-            catch(e:Exception){_uiState.value=_uiState.value.copy(isProcessing=false,statusMessage=tr(R.string.status_copy_failed))}
-            finally{local?.let{if(!it.isRecycled)it.recycle()};src?.let{if(!it.isRecycled)it.recycle()};copy?.let{if(!it.isRecycled)it.recycle()}}
+        val proj = _uiState.value.currentProject ?: return
+        val idx = _uiState.value.selectedLayerIndex
+        if (idx !in proj.layers.indices) return
+        val layer = proj.layers[idx]
+        val mask = _uiState.value.selectionMask ?: return
+        if (layer.type != LayerType.IMAGE || !SelectionEngine.hasSelection(mask)) {
+            _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_nothing_selected))
+            return
+        }
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_copying_selection))
+            var src: Bitmap? = null
+            var local: Bitmap? = null
+            var copy: Bitmap? = null
+            try {
+                src = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Image unavailable")
+                val work = workLayerFor(layer, src!!)
+                local = withContext(Dispatchers.Default) {
+                    SelectionEngine.mapDocumentMaskToLayerLocal(mask, work, proj.width, proj.height)
+                }
+                copy = withContext(Dispatchers.Default) { SelectionEngine.copySelectedToNewBitmap(src!!, local!!) }
+                    ?: throw IllegalStateException("No pixels selected")
+                // Same placement and look as the source layer (skew / distort included), so the
+                // copy sits exactly over the pixels it came from.
+                val n = Layer(
+                    id = java.util.UUID.randomUUID().toString(),
+                    name = tr(R.string.layer_name_selection),
+                    type = LayerType.IMAGE,
+                    exifTags = layer.exifTags,
+                    positionX = layer.positionX,
+                    positionY = layer.positionY,
+                    scaleX = layer.scaleX,
+                    scaleY = layer.scaleY,
+                    rotation = layer.rotation,
+                    skewX = layer.skewX,
+                    skewY = layer.skewY,
+                    distort = layer.distort?.copyOf(),
+                    opacity = layer.opacity,
+                    blendMode = layer.blendMode,
+                    filter = layer.filter,
+                    filterIntensity = layer.filterIntensity,
+                    lutId = layer.lutId,
+                    adjustments = layer.adjustments.copy(),
+                    contentWidth = layer.intrinsicDocumentWidth(),
+                    contentHeight = layer.intrinsicDocumentHeight()
+                )
+                if (!commitDestructiveBitmap(proj, n, copy!!, n.contentWidth, n.contentHeight, "selection")) {
+                    throw java.io.IOException("Save failed")
+                }
+                saveHistoryState()
+                proj.layers.add(idx + 1, n)
+                commitProjectMutation(
+                    selectedLayerIndex = idx + 1,
+                    statusMessage = tr(R.string.status_copied_new_layer),
+                    transformState = { it.copy(selectionMask = SelectionEngine.createBlankMask(proj.width, proj.height), isProcessing = false) }
+                )
+                clearSelectionHistory()
+            } catch (e: OutOfMemoryError) {
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_processing_failed_memory))
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_copy_failed))
+            } finally {
+                // The new layer keeps its own scaled copy, so these temporaries can all go.
+                local?.let { if (!it.isRecycled) it.recycle() }
+                src?.let { if (!it.isRecycled) it.recycle() }
+                copy?.let { if (!it.isRecycled) it.recycle() }
+            }
         }
     }
 
