@@ -49,6 +49,14 @@ object SelectionEngine {
         val bmp = layer.bitmap
         val bw = bmp?.width?.toFloat() ?: layer.intrinsicDocumentWidth()
         val bh = bmp?.height?.toFloat() ?: layer.intrinsicDocumentHeight()
+        return getLayerMatrixForSize(layer, bw, bh, canvasWidth, canvasHeight)
+    }
+
+    /**
+     * Layer pixels -> document matrix for pixels of size [bw] x [bh] (e.g. the full-resolution
+     * source instead of the preview bitmap), same placement as [getLayerMatrix].
+     */
+    fun getLayerMatrixForSize(layer: Layer, bw: Float, bh: Float, canvasWidth: Int, canvasHeight: Int): Matrix {
         val matrix = Matrix()
         layerShapeMatrix(layer, bw, bh)?.let { matrix.set(it) }
         matrix.postTranslate(-bw / 2f, -bh / 2f)

@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.PointF
 import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.EmojiEmotions
+import androidx.compose.material.icons.filled.Healing
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarResult
@@ -144,7 +145,7 @@ fun EditorScreen(
     val activeSelectionTool = uiState.activeSelectionTool
     val inpaintSelectionMode = uiState.inpaintSelectionMode
     val selectionMask = uiState.selectionMask
-    val brushSizeDp = uiState.brushSizeDp
+    val brushSizeDp = if (uiState.activeTool == ActiveTool.RETOUCH) uiState.retouchSizeDp else uiState.brushSizeDp
     val magicWandTolerance = uiState.magicWandTolerance
     val isMagicWandContiguous = uiState.isMagicWandContiguous
     val wandOptions = uiState.wandOptions
@@ -253,6 +254,7 @@ fun EditorScreen(
     val onStrokeSegment: ((List<PointF>, Float, com.example.ui.viewmodel.StrokePhase) -> Unit) = { points, radius, phase ->
         val activeLayer = project.layers.getOrNull(uiState.selectedLayerIndex)
         when {
+            uiState.activeTool == ActiveTool.RETOUCH -> viewModel.retouchSegment(points, radius, phase)
             uiState.activeTool == ActiveTool.OBJECT_REMOVAL && uiState.isInpaintProtectMode ->
                 viewModel.paintProtectSegment(points, radius, phase)
             uiState.activeTool == ActiveTool.LAYERS && activeLayer?.isEditingMask == true ->
@@ -471,6 +473,7 @@ fun EditorScreen(
                 }
             }
         }
+        activeTool == ActiveTool.RETOUCH && uiState.isCloneSourcePicking -> { x, y -> viewModel.setCloneSource(x, y) }
         activeTool == ActiveTool.ADJUST && replacePick != null -> { x, y ->
             val target = replacePick
             val color = onSampleReplaceColor?.invoke(x, y)
@@ -950,6 +953,25 @@ fun EditorScreen(
                         }
                     }
 
+                    ActiveTool.RETOUCH -> {
+                        com.example.ui.components.RetouchPanel(
+                            tool = uiState.retouchTool,
+                            sizeDp = uiState.retouchSizeDp,
+                            brush = uiState.retouchBrush,
+                            hasCloneSource = uiState.cloneSourceDoc != null,
+                            isPickingSource = uiState.isCloneSourcePicking,
+                            hasSelection = hasActiveSelectionCached,
+                            onToolChange = { viewModel.setRetouchTool(it) },
+                            onSizeChange = { viewModel.setRetouchSize(it) },
+                            onBrushChange = { viewModel.setRetouchBrush(it) },
+                            onPickSourceChange = { viewModel.setCloneSourcePicking(it) },
+                            onSelectArea = {
+                                viewModel.setSelectionTool(SelectionToolType.LASSO)
+                                onToolSelect(ActiveTool.SELECTION)
+                            }
+                        )
+                    }
+
                     ActiveTool.STICKERS -> {
                         com.example.ui.components.StickersPanel(
                             onAddSticker = { def, style -> viewModel.addStickerLayer(def, style) }
@@ -1255,7 +1277,8 @@ fun EditorScreen(
                     Triple(stringResource(R.string.tool_layers), Icons.Default.Layers, ActiveTool.LAYERS to "tool_btn_layers"),
                     Triple(stringResource(R.string.tool_text), Icons.Default.TextFields, ActiveTool.TEXT to "tool_btn_text"),
                     Triple(stringResource(R.string.tool_stickers), Icons.Default.EmojiEmotions, ActiveTool.STICKERS to "tool_btn_stickers"),
-                    Triple(stringResource(R.string.tool_inpaint), Icons.Default.CleaningServices, ActiveTool.OBJECT_REMOVAL to "tool_btn_inpaint")
+                    Triple(stringResource(R.string.tool_inpaint), Icons.Default.CleaningServices, ActiveTool.OBJECT_REMOVAL to "tool_btn_inpaint"),
+                    Triple(stringResource(R.string.tool_retouch), Icons.Default.Healing, ActiveTool.RETOUCH to "tool_btn_retouch")
                 )
 
                 if (isVertical) {
@@ -1368,6 +1391,8 @@ fun EditorScreen(
                             showMaskRubyOverlay = showMaskRubyOverlay,
                             maskBrushSizeDp = maskBrushSizeDp,
                             onStrokeSegment = onStrokeSegment,
+                            retouchTool = if (activeTool == ActiveTool.RETOUCH) uiState.retouchTool else null,
+                            retouchMarkerDoc = uiState.retouchMarkerDoc,
                             selectionRevision = selectionRevision,
                             isMagneticSnap = isMagneticSnap,
                             magicWandTolerance = magicWandTolerance,
@@ -1489,6 +1514,8 @@ fun EditorScreen(
                             showMaskRubyOverlay = showMaskRubyOverlay,
                             maskBrushSizeDp = maskBrushSizeDp,
                             onStrokeSegment = onStrokeSegment,
+                            retouchTool = if (activeTool == ActiveTool.RETOUCH) uiState.retouchTool else null,
+                            retouchMarkerDoc = uiState.retouchMarkerDoc,
                             selectionRevision = selectionRevision,
                             isMagneticSnap = isMagneticSnap,
                             magicWandTolerance = magicWandTolerance,

@@ -210,6 +210,10 @@ fun CanvasView(
     maskBrushSizeDp: Float = 24f,
     /** Live brush strokes (selection brush, quick selection, mask painting). Null = apply on finger up. */
     onStrokeSegment: ((List<PointF>, Float, com.example.ui.viewmodel.StrokePhase) -> Unit)? = null,
+    /** Active retouch brush (non-null while the Retouch tool is open): one finger paints with it. */
+    retouchTool: com.example.engine.RetouchTool? = null,
+    /** Clone Stamp sampling point (document coordinates), drawn as a cross-hair. */
+    retouchMarkerDoc: PointF? = null,
     selectionRevision: Long = 0L,
     isMagneticSnap: Boolean = false,
     magicWandTolerance: Int = 30,
@@ -1136,7 +1140,7 @@ fun CanvasView(
                                 latestOnApplyCropRect?.invoke(cropRectState)
                             }
                         )
-                    } else if (activeTool == ActiveTool.SELECTION || activeTool == ActiveTool.OBJECT_REMOVAL || (activeTool == ActiveTool.LAYERS && selectedLayerIndex in latestProject.layers.indices && latestProject.layers[selectedLayerIndex].isEditingMask)) {
+                    } else if (activeTool == ActiveTool.SELECTION || activeTool == ActiveTool.OBJECT_REMOVAL || activeTool == ActiveTool.RETOUCH || (activeTool == ActiveTool.LAYERS && selectedLayerIndex in latestProject.layers.indices && latestProject.layers[selectedLayerIndex].isEditingMask)) {
                         if (activeSelectionTool == SelectionToolType.MAGIC_WAND && activeTool == ActiveTool.SELECTION) {
                             // Tap = select at the current tolerance. Press and drag sideways = change the
                             // tolerance live (right = more, left = less), like Procreate's selection tools.
@@ -1988,7 +1992,19 @@ fun CanvasView(
                     (activeTool == ActiveTool.OBJECT_REMOVAL && inpaintSelectionMode == com.example.ui.viewmodel.InpaintSelectionMode.LASSO)
                 val accent = if (activeTool == ActiveTool.OBJECT_REMOVAL) Color(0xFFFF2A6D) else CyanAccent
 
-                if (isLassoPreview) {
+                if (activeTool == ActiveTool.RETOUCH) {
+                    // Retouch brushes show their result live on the image: only a thin guide line
+                    // (Patch: where the selection is dragged) and the brush outline at the finger.
+                    drawPath(path = path, color = Color.Black.copy(alpha = 0.5f), style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+                    drawPath(path = path, color = Color.White.copy(alpha = if (retouchTool == com.example.engine.RetouchTool.PATCH) 0.95f else 0.35f), style = Stroke(width = 1.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+                    val lastP = currentPoints.last()
+                    if (retouchTool != com.example.engine.RetouchTool.PATCH) {
+                        val c = Offset(startX + lastP.x / project.width * targetDrawW, startY + lastP.y / project.height * targetDrawH)
+                        val rr = with(density) { effectiveBrushSizeDp.dp.toPx() } / 2f
+                        drawCircle(Color.Black.copy(alpha = 0.6f), rr + 1.dp.toPx(), c, style = Stroke(1.dp.toPx()))
+                        drawCircle(Color.White, rr, c, style = Stroke(1.5.dp.toPx()))
+                    }
+                } else if (isLassoPreview) {
                     // A lasso is an outline, not a brush: draw a thin, high-contrast line (fixed on
                     // screen, so it stays precise at any zoom) instead of a brush-wide band.
                     path.close()
@@ -2128,11 +2144,23 @@ fun CanvasView(
                 }
             }
 
+            // 5b2. Clone Stamp source cross-hair.
+            val cloneMark = retouchMarkerDoc
+            if (activeTool == ActiveTool.RETOUCH && retouchTool == com.example.engine.RetouchTool.CLONE && cloneMark != null) {
+                val c = Offset(startX + cloneMark.x / project.width * targetDrawW, startY + cloneMark.y / project.height * targetDrawH)
+                val arm = 10.dp.toPx()
+                for ((col, w) in listOf(Color.Black.copy(alpha = 0.7f) to 3.dp.toPx(), Color.White to 1.5.dp.toPx())) {
+                    drawLine(col, Offset(c.x - arm, c.y), Offset(c.x + arm, c.y), w)
+                    drawLine(col, Offset(c.x, c.y - arm), Offset(c.x, c.y + arm), w)
+                    drawCircle(col, arm * 0.6f, c, style = Stroke(w))
+                }
+            }
+
             // 5c. Magnifier loupe: shows the area under the finger enlarged in a corner, so the finger
             // never hides what is being selected.
             val loupeTouch = liveTouchCursor
             val loupeBmp = compositeBitmap
-            val loupeTool = activeTool == ActiveTool.SELECTION || activeTool == ActiveTool.OBJECT_REMOVAL || isEditingSelectedMask ||
+            val loupeTool = activeTool == ActiveTool.SELECTION || activeTool == ActiveTool.OBJECT_REMOVAL || activeTool == ActiveTool.RETOUCH || isEditingSelectedMask ||
                 (activeTool == ActiveTool.CROP_PERSPECTIVE && isPerspectiveActive)
             if (loupeTouch != null && loupeTool && loupeBmp != null && !loupeBmp.isRecycled) {
                 val loupeR = 58.dp.toPx()

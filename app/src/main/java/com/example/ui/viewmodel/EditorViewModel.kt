@@ -48,6 +48,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -73,6 +74,8 @@ enum class ActiveTool {
     EFFECTS,
     /** Sticker library: emoji and vector stickers added as layers. */
     STICKERS,
+    /** Retouch brushes: Blur, Sharpen, Smudge, Dodge, Burn, Clone Stamp, Patch. */
+    RETOUCH,
     TRANSFORM,
     CROP_PERSPECTIVE,
     SELECTION,
@@ -185,7 +188,16 @@ data class EditorUiState(
     /** User filter library: imported LUTs, saved looks and favourite filter keys. */
     val luts: List<com.example.engine.LutInfo> = emptyList(),
     val customPresets: List<com.example.engine.CustomPreset> = emptyList(),
-    val favoriteFilters: Set<String> = emptySet()
+    val favoriteFilters: Set<String> = emptySet(),
+    // Retouch brushes
+    val retouchTool: com.example.engine.RetouchTool = com.example.engine.RetouchTool.BLUR,
+    val retouchSizeDp: Float = 60f,
+    val retouchBrush: com.example.engine.RetouchBrush = com.example.engine.RetouchBrush(),
+    /** Clone Stamp source point (document coordinates), set by tapping in "set source" mode. */
+    val cloneSourceDoc: PointF? = null,
+    val isCloneSourcePicking: Boolean = false,
+    /** Where the Clone Stamp is currently sampling (shown as a cross-hair on the canvas). */
+    val retouchMarkerDoc: PointF? = null
 )
 
 data class EditableShape(
@@ -454,7 +466,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             // Do not autosave while an asynchronous long-running operation is in flight
             // A mask stroke paints its private mask copy in place: wait until the finger lifts
             // (endMaskStroke reschedules) so a half-painted mask is never written.
-            if (_uiState.value.isProcessing || pendingTransactionSnapshot != null || maskStroke != null) {
+            if (_uiState.value.isProcessing || pendingTransactionSnapshot != null || maskStroke != null || retouchStrokeActive) {
                 return@launch
             }
             val proj = _uiState.value.currentProject
@@ -571,6 +583,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         lastRemoval = null
         protectLastPoint = null
         maskStroke = null
+        retouchSession = null
+        retouchStrokeActive = false
+        cloneOffsetDoc = null
         pendingTransactionSnapshot = null
         pendingTransactionWasDirty = false
         clearSelectionHistory()
@@ -687,6 +702,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun openProject(project: Project) {
         pendingTransactionSnapshot = null
         maskStroke = null
+        retouchSession = null
+        retouchStrokeActive = false
+        cloneOffsetDoc = null
         undoStack.clear()
         redoStack.clear()
         historyOrder.clear()
@@ -750,8 +768,15 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    override fun onCleared() {
+        retouchExecutor?.shutdown()
+        super.onCleared()
+    }
+
     fun selectTool(tool: ActiveTool) {
         val previous = _uiState.value.activeTool
+        // Leaving the retouch brushes frees the full-resolution pixels they keep.
+        if (previous == ActiveTool.RETOUCH && tool != ActiveTool.RETOUCH && !retouchStrokeActive) retouchSession = null
         // Leaving a transient editor (filters/adjustments/text/transform) should never
         // leave a half-open history transaction. Commit what the user can currently see.
         if (previous != tool && pendingTransactionSnapshot != null) {
@@ -1119,7 +1144,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
-    private suspend fun loadAuthoritativeLayerBitmap(layer: Layer): Bitmap? = withContext(Dispatchers.IO) {
+    private suspend fun loadAuthoritativeLayerBitmap(layer: Layer): Bitmap? {
+        // A retouch stroke may still be writing this layer's newest source file.
+        awaitRetouchWrites()
+        return loadAuthoritativeLayerBitmapNow(layer)
+    }
+
+    private suspend fun loadAuthoritativeLayerBitmapNow(layer: Layer): Bitmap? = withContext(Dispatchers.IO) {
         val maxDim = kotlin.math.max(layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight()).toInt().coerceIn(64, 4096)
         layer.sourceAssetPath?.let { path -> File(path).takeIf { it.exists() }?.let { ImageProcessor.decodeFileWithExifSampled(it, maxDim) }?.let { return@withContext it } }
         layer.bitmap?.copy(Bitmap.Config.ARGB_8888, true)
@@ -4005,6 +4036,317 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         proEffectJob?.cancel()
     }
 
+    // --- Retouch brushes (Blur, Sharpen, Smudge, Dodge, Burn, Clone Stamp, Patch) ------------
+
+    /** Full-resolution pixels of the layer being retouched, kept between strokes. */
+    private class RetouchSession(val layerId: String, var sourcePath: String?, val canvas: com.example.engine.RetouchCanvas)
+
+    private sealed class RetouchEvent {
+        class Start(
+            val layer: Layer, val docW: Int, val docH: Int, val tool: com.example.engine.RetouchTool,
+            val brush: com.example.engine.RetouchBrush, val cloneOffsetDoc: PointF?, val preview: Bitmap,
+            val points: List<PointF>, val docRadius: Float
+        ) : RetouchEvent()
+        class Move(val points: List<PointF>, val docRadius: Float) : RetouchEvent()
+        class End(val points: List<PointF>, val docRadius: Float) : RetouchEvent()
+        class Patch(
+            val layer: Layer, val docW: Int, val docH: Int, val selection: Bitmap,
+            val dxDoc: Float, val dyDoc: Float, val preview: Bitmap
+        ) : RetouchEvent()
+    }
+
+    private var retouchSession: RetouchSession? = null
+    private var retouchExecutor: java.util.concurrent.ExecutorService? = null
+    private var retouchDispatcherOrNull: kotlinx.coroutines.CoroutineDispatcher? = null
+    private val retouchDispatcher: kotlinx.coroutines.CoroutineDispatcher
+        get() = retouchDispatcherOrNull ?: java.util.concurrent.Executors.newSingleThreadExecutor().let { ex ->
+            retouchExecutor = ex
+            ex.asCoroutineDispatcher().also { retouchDispatcherOrNull = it }
+        }
+    private val retouchEvents = kotlinx.coroutines.channels.Channel<RetouchEvent>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+    private var retouchConsumer: Job? = null
+    private val retouchWrites = java.util.Collections.synchronizedList(mutableListOf<Job>())
+    /** A retouch stroke is being painted: autosave waits until it is committed. */
+    private var retouchStrokeActive = false
+    private var retouchStrokeRejected = false
+    private var retouchStrokeFailed = false
+    private var patchStartDoc: PointF? = null
+    /** Clone Stamp (aligned): source minus the first stroke point, kept until a new source is set. */
+    private var cloneOffsetDoc: PointF? = null
+    // State of the stroke being processed (worker side).
+    private var strokeLayer: Layer? = null
+    private var strokePreview: Bitmap? = null
+    private var strokeToLocal: Matrix? = null
+    private var strokeLocalScale = 1f
+    private var strokeOffsetDoc: PointF? = null
+
+    fun setRetouchTool(tool: com.example.engine.RetouchTool) {
+        _uiState.value = _uiState.value.copy(retouchTool = tool, isCloneSourcePicking = tool == com.example.engine.RetouchTool.CLONE && _uiState.value.cloneSourceDoc == null)
+    }
+
+    fun setRetouchSize(sizeDp: Float) { _uiState.value = _uiState.value.copy(retouchSizeDp = sizeDp.coerceIn(4f, 400f)) }
+
+    fun setRetouchBrush(brush: com.example.engine.RetouchBrush) { _uiState.value = _uiState.value.copy(retouchBrush = brush) }
+
+    fun setCloneSourcePicking(picking: Boolean) { _uiState.value = _uiState.value.copy(isCloneSourcePicking = picking) }
+
+    /** Sets the Clone Stamp source (a tap in "set source" mode). */
+    fun setCloneSource(docX: Float, docY: Float) {
+        cloneOffsetDoc = null
+        _uiState.value = _uiState.value.copy(
+            cloneSourceDoc = PointF(docX, docY), isCloneSourcePicking = false, retouchMarkerDoc = PointF(docX, docY),
+            statusMessage = tr(R.string.retouch_source_set)
+        )
+    }
+
+    private suspend fun awaitRetouchWrites() {
+        retouchWrites.toList().forEach { it.join() }
+    }
+
+    /** Stroke segments of the retouch brushes, in document coordinates (from the canvas). */
+    fun retouchSegment(points: List<PointF>, docRadius: Float, phase: StrokePhase) {
+        val st = _uiState.value
+        val proj = st.currentProject ?: return
+        val tool = st.retouchTool
+        if (phase == StrokePhase.START) {
+            retouchStrokeRejected = false
+            if (tool == com.example.engine.RetouchTool.CLONE && st.isCloneSourcePicking) {
+                // "Set source" mode: the touch picks the source instead of painting.
+                retouchStrokeRejected = true
+                points.firstOrNull()?.let { setCloneSource(it.x, it.y) }
+                return
+            }
+            val layer = proj.layers.getOrNull(st.selectedLayerIndex)
+            val hasSelection = st.selectionMask?.let { !it.isRecycled && SelectionEngine.hasSelection(it) } == true
+            val reason = when {
+                layer == null || layer.type != LayerType.IMAGE || layer.bitmap == null -> R.string.retouch_needs_image_layer
+                layer.isLocked -> R.string.status_layer_locked
+                !layer.isVisible -> R.string.retouch_layer_hidden
+                tool == com.example.engine.RetouchTool.CLONE && st.cloneSourceDoc == null -> R.string.retouch_set_source_first
+                tool == com.example.engine.RetouchTool.PATCH && !hasSelection -> R.string.retouch_patch_needs_selection
+                else -> null
+            }
+            if (reason != null) {
+                retouchStrokeRejected = true
+                _uiState.value = st.copy(statusMessage = tr(reason))
+                return
+            }
+            if (tool == com.example.engine.RetouchTool.PATCH) { patchStartDoc = points.firstOrNull(); return }
+            val first = points.firstOrNull() ?: return
+            if (tool == com.example.engine.RetouchTool.CLONE) {
+                val src = st.cloneSourceDoc!!
+                if (cloneOffsetDoc == null) cloneOffsetDoc = PointF(src.x - first.x, src.y - first.y)
+            }
+            val preview = beginRetouchStep(layer!!) ?: return
+            retouchEvents.trySend(RetouchEvent.Start(
+                layer, proj.width, proj.height, tool, st.retouchBrush,
+                if (tool == com.example.engine.RetouchTool.CLONE) cloneOffsetDoc else null, preview, points.toList(), docRadius
+            ))
+            return
+        }
+        if (retouchStrokeRejected) return
+        if (tool == com.example.engine.RetouchTool.PATCH) {
+            if (phase != StrokePhase.END) return
+            val start = patchStartDoc ?: return
+            patchStartDoc = null
+            val end = points.lastOrNull() ?: return
+            val layer = proj.layers.getOrNull(st.selectedLayerIndex) ?: return
+            val sel = st.selectionMask?.takeIf { !it.isRecycled } ?: return
+            if (kotlin.math.hypot(end.x - start.x, end.y - start.y) < 2f) {
+                _uiState.value = st.copy(statusMessage = tr(R.string.retouch_patch_hint))
+                return
+            }
+            val preview = beginRetouchStep(layer) ?: return
+            retouchEvents.trySend(RetouchEvent.Patch(layer, proj.width, proj.height, sel, end.x - start.x, end.y - start.y, preview))
+            return
+        }
+        if (phase == StrokePhase.MOVE) retouchEvents.trySend(RetouchEvent.Move(points.toList(), docRadius))
+        else retouchEvents.trySend(RetouchEvent.End(points.toList(), docRadius))
+    }
+
+    /**
+     * One undo step for a retouch stroke: history first, then the layer gets its own preview copy
+     * that the stroke updates live (history keeps the old one). Returns that copy.
+     */
+    private fun beginRetouchStep(layer: Layer): Bitmap? {
+        val old = layer.bitmap?.takeIf { !it.isRecycled } ?: return null
+        if (pendingTransactionSnapshot != null) saveHistoryState()
+        saveHistoryState()
+        val preview = try { old.copy(Bitmap.Config.ARGB_8888, true) } catch (e: OutOfMemoryError) { null } ?: run {
+            rollbackToLastHistoryState(); return null
+        }
+        layer.bitmap = preview
+        retouchStrokeActive = true
+        retouchStrokeFailed = false
+        if (retouchConsumer?.isActive != true) {
+            retouchConsumer = viewModelScope.launch {
+                for (ev in retouchEvents) {
+                    try {
+                        handleRetouchEvent(ev)
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        throw e
+                    } catch (e: OutOfMemoryError) {
+                        System.gc(); onRetouchFailed(R.string.status_processing_failed_memory)
+                    } catch (e: Exception) {
+                        onRetouchFailed(R.string.retouch_failed)
+                    }
+                }
+            }
+        }
+        return preview
+    }
+
+    private fun onRetouchFailed(@StringRes msg: Int) {
+        if (retouchStrokeActive) rollbackToLastHistoryState()
+        retouchStrokeActive = false
+        retouchStrokeFailed = true
+        retouchSession = null
+        _uiState.value = _uiState.value.copy(statusMessage = tr(msg))
+    }
+
+    private suspend fun ensureRetouchSession(layer: Layer): RetouchSession {
+        retouchSession?.let { s -> if (s.layerId == layer.id && s.sourcePath == layer.sourceAssetPath) return s }
+        retouchSession = null
+        awaitRetouchWrites()
+        val full = loadAuthoritativeLayerBitmapNow(layer) ?: throw IllegalStateException("Image unavailable")
+        val canvas = withContext(retouchDispatcher) {
+            val px = IntArray(full.width * full.height)
+            full.getPixels(px, 0, full.width, 0, 0, full.width, full.height)
+            com.example.engine.RetouchCanvas(full.width, full.height, px)
+        }
+        if (full !== layer.bitmap && !full.isRecycled) full.recycle()
+        return RetouchSession(layer.id, layer.sourceAssetPath, canvas).also { retouchSession = it }
+    }
+
+    private fun prepareStrokeMapping(layer: Layer, canvas: com.example.engine.RetouchCanvas, docW: Int, docH: Int) {
+        val toDoc = SelectionEngine.getLayerMatrixForSize(layer, canvas.width.toFloat(), canvas.height.toFloat(), docW, docH)
+        val inv = Matrix()
+        if (!toDoc.invert(inv)) throw IllegalStateException("Layer cannot be mapped")
+        val v = FloatArray(9).also { inv.getValues(it) }
+        strokeToLocal = inv
+        strokeLocalScale = kotlin.math.sqrt(kotlin.math.abs(v[Matrix.MSCALE_X] * v[Matrix.MSCALE_Y] - v[Matrix.MSKEW_X] * v[Matrix.MSKEW_Y])).coerceAtLeast(0.01f)
+    }
+
+    private fun toLocalPoints(points: List<PointF>): FloatArray {
+        val arr = FloatArray(points.size * 2)
+        points.forEachIndexed { i, p -> arr[i * 2] = p.x; arr[i * 2 + 1] = p.y }
+        strokeToLocal?.mapPoints(arr)
+        return arr
+    }
+
+    private suspend fun paintRetouch(canvas: com.example.engine.RetouchCanvas, points: List<PointF>, docRadius: Float) {
+        val preview = strokePreview ?: return
+        val local = toLocalPoints(points)
+        val r = docRadius * strokeLocalScale
+        val changed = withContext(retouchDispatcher) {
+            canvas.stroke(local, r)?.also { area -> canvas.downsampleInto(preview, area) }
+        }
+        val last = points.lastOrNull()
+        val off = strokeOffsetDoc
+        val marker = if (last != null && off != null) PointF(last.x + off.x, last.y + off.y) else null
+        if (changed != null || marker != null) bumpRetouchRender(marker)
+    }
+
+    /** Shows the live preview changes without recording history. */
+    private fun bumpRetouchRender(marker: PointF?) {
+        val proj = _uiState.value.currentProject ?: return
+        proj.markDirty()
+        _uiState.value = _uiState.value.copy(
+            currentProject = proj.copy(layers = ArrayList(proj.layers)),
+            renderRevision = proj.renderRevision,
+            isProjectDirty = true,
+            retouchMarkerDoc = marker ?: _uiState.value.retouchMarkerDoc
+        )
+    }
+
+    private suspend fun handleRetouchEvent(ev: RetouchEvent) {
+        when (ev) {
+            is RetouchEvent.Start -> {
+                strokeLayer = ev.layer
+                strokePreview = ev.preview
+                strokeOffsetDoc = ev.cloneOffsetDoc
+                val session = ensureRetouchSession(ev.layer)
+                prepareStrokeMapping(ev.layer, session.canvas, ev.docW, ev.docH)
+                val off = ev.cloneOffsetDoc?.let { o ->
+                    val v = floatArrayOf(o.x, o.y); strokeToLocal!!.mapVectors(v); v
+                } ?: floatArrayOf(0f, 0f)
+                withContext(retouchDispatcher) { session.canvas.beginStroke(ev.tool, ev.brush, off[0], off[1]) }
+                paintRetouch(session.canvas, ev.points, ev.docRadius)
+            }
+            is RetouchEvent.Move -> {
+                if (retouchStrokeFailed) return
+                val session = retouchSession ?: return
+                paintRetouch(session.canvas, ev.points, ev.docRadius)
+            }
+            is RetouchEvent.End -> {
+                if (retouchStrokeFailed) { retouchStrokeFailed = false; return }
+                val session = retouchSession ?: return
+                paintRetouch(session.canvas, ev.points, ev.docRadius)
+                withContext(retouchDispatcher) { session.canvas.endStroke() }
+                commitRetouch(session)
+            }
+            is RetouchEvent.Patch -> {
+                strokeLayer = ev.layer
+                strokePreview = ev.preview
+                strokeOffsetDoc = null
+                val session = ensureRetouchSession(ev.layer)
+                prepareStrokeMapping(ev.layer, session.canvas, ev.docW, ev.docH)
+                val c = session.canvas
+                val vec = floatArrayOf(ev.dxDoc, ev.dyDoc).also { strokeToLocal!!.mapVectors(it) }
+                val changed = withContext(retouchDispatcher) {
+                    // The selection on the layer's own pixels (full resolution).
+                    val local = Bitmap.createBitmap(c.width, c.height, Bitmap.Config.ALPHA_8)
+                    android.graphics.Canvas(local).drawBitmap(ev.selection, strokeToLocal!!, Paint(Paint.FILTER_BITMAP_FLAG))
+                    val (bytes, stride) = SelectionEngine.readAlphaBytes(local)
+                    local.recycle()
+                    c.patch(bytes, stride, kotlin.math.round(vec[0]).toInt(), kotlin.math.round(vec[1]).toInt())
+                        ?.also { area -> c.downsampleInto(ev.preview, area) }
+                }
+                if (changed == null) {
+                    onRetouchFailed(R.string.retouch_patch_needs_selection)
+                    return
+                }
+                commitRetouch(session)
+            }
+        }
+    }
+
+    /**
+     * Ends a retouch step: the layer points at a new full-resolution source file, written in the
+     * background from a copy of the pixels (strokes do not wait for the encoder). Readers of that
+     * file wait for pending writes ([awaitRetouchWrites]).
+     */
+    private suspend fun commitRetouch(session: RetouchSession) {
+        val layer = strokeLayer ?: return
+        val proj = _uiState.value.currentProject ?: return
+        val c = session.canvas
+        val snapshot = withContext(retouchDispatcher) { c.pix.copyOf() }
+        val ext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) "webp" else "png"
+        val file = File(repository.getProjectDir(proj.id), "source_retouch_${layer.id}_${System.currentTimeMillis()}.$ext")
+        val job = viewModelScope.launch(Dispatchers.IO) {
+            val bmp = Bitmap.createBitmap(c.width, c.height, Bitmap.Config.ARGB_8888)
+            try {
+                bmp.setPixels(snapshot, 0, c.width, 0, 0, c.width, c.height)
+                val tmp = File(file.path + ".tmp")
+                if (ImageProcessor.saveLosslessBitmap(bmp, tmp)) {
+                    if (!tmp.renameTo(file)) { file.delete(); tmp.renameTo(file) }
+                }
+            } finally {
+                bmp.recycle()
+            }
+        }
+        retouchWrites.add(job)
+        job.invokeOnCompletion { retouchWrites.remove(job) }
+        layer.sourceAssetPath = file.absolutePath
+        layer.originalWidth = c.width
+        layer.originalHeight = c.height
+        layer.isBitmapDirty = true
+        session.sourcePath = file.absolutePath
+        retouchStrokeActive = false
+        strokePreview = null
+        commitProjectMutation()
+    }
+
     /** True when Liquify can work on the selected layer; otherwise explains why in the status. */
     fun canLiquifySelectedLayer(): Boolean {
         val layer = _uiState.value.currentProject?.layers?.getOrNull(_uiState.value.selectedLayerIndex) ?: return false
@@ -4754,6 +5096,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 isProcessing = true, exportProgress = 0f, statusMessage = tr(R.string.status_exporting),
                 exportSuccessUri = null, exportSuccessUris = emptyList()
             )
+            // Full-resolution sources of the latest retouch strokes must be on disk first.
+            awaitRetouchWrites()
             val job = currentCoroutineContext()[Job]
             val cancelled = { job?.isCancelled == true }
             fun progress(f: Float) {
