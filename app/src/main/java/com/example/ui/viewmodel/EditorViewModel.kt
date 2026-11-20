@@ -239,6 +239,17 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun updateSelectionHistoryFlags() = updateHistoryFlags()
 
+    /** Selection undo / redo steps usable on the CURRENT canvas size (see SelectionHistory.canUndo). */
+    private fun selectionCanUndo(): Boolean {
+        val p = _uiState.value.currentProject ?: return false
+        return selectionHistory.canUndo(p.width, p.height)
+    }
+
+    private fun selectionCanRedo(): Boolean {
+        val p = _uiState.value.currentProject ?: return false
+        return selectionHistory.canRedo(p.width, p.height)
+    }
+
     private fun clearSelectionHistory() {
         selectionHistory.clear()
         historyOrder.removeAll { it == HistoryKind.SELECTION }
@@ -259,12 +270,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun undoSelection() {
-        if (!selectionHistory.canUndo) return
+        if (!selectionCanUndo()) return
         moveLastKind(historyOrder, redoOrder, HistoryKind.SELECTION)
         viewModelScope.launch {
             selectionMutex.withLock {
                 endTransientSelectionSessions()
                 val current = _uiState.value.selectionMask ?: return@withLock
+                // The canvas may have changed size while this was queued: never publish a mask of another size.
+                if (!selectionCanUndo()) { updateSelectionHistoryFlags(); return@withLock }
                 val restored = withContext(Dispatchers.Default) { selectionHistory.undo(current) } ?: return@withLock
                 publishSelection(restored)
                 updateSelectionHistoryFlags()
@@ -273,12 +286,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun redoSelection() {
-        if (!selectionHistory.canRedo) return
+        if (!selectionCanRedo()) return
         moveLastKind(redoOrder, historyOrder, HistoryKind.SELECTION)
         viewModelScope.launch {
             selectionMutex.withLock {
                 endTransientSelectionSessions()
                 val current = _uiState.value.selectionMask ?: return@withLock
+                if (!selectionCanRedo()) { updateSelectionHistoryFlags(); return@withLock }
                 val restored = withContext(Dispatchers.Default) { selectionHistory.redo(current) } ?: return@withLock
                 publishSelection(restored)
                 updateSelectionHistoryFlags()
@@ -349,6 +363,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /** Projects (saved ones and the open one) whose layers use the LUT [id]. */
+    suspend fun countProjectsUsingLut(id: String): Int {
+        val ids = repository.projectIdsUsingLut(id).toMutableSet()
+        _uiState.value.currentProject?.let { p -> if (p.layers.any { it.lutId == id }) ids.add(p.id) }
+        return ids.size
+    }
+
     fun deleteLut(id: String) {
         viewModelScope.launch {
             val app = getApplication<Application>()
@@ -413,6 +434,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             )
         )
         _uiState.value = newState
+        // The canvas size may have changed (crop, resize, rotate): selection steps of another
+        // size stop being offered.
+        updateHistoryFlags()
     }
 
     private fun scheduleAutosave() {
@@ -431,6 +455,34 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 if (success) {
                     _uiState.value = _uiState.value.copy(isProjectDirty = false)
                 }
+            }
+        }
+    }
+
+    /**
+     * The app went to the background (Activity.onStop): save now instead of waiting for the
+     * debounced autosave, because the system may kill the process at any time from here on.
+     * An edit that is still open (e.g. a panel with a live preview) is saved as it looks but stays
+     * open, so its Cancel still works; Cancel then saves the restored state again.
+     */
+    fun saveForBackground() {
+        val state = _uiState.value
+        if (state.currentScreen != Screen.EDITOR) return
+        val proj = state.currentProject ?: return
+        // A running operation commits (and schedules a save) when it finishes.
+        if (state.isProcessing) return
+        // The finger left the screen with the app: the stroke is over.
+        maskStroke = null
+        if (pendingTransactionSnapshot != null) pendingTransactionWasDirty = true
+        if (!state.isProjectDirty && pendingTransactionSnapshot == null) {
+            // Nothing to write but the selection (selection edits do not mark the project dirty).
+            viewModelScope.launch { repository.saveSelection(proj.id, _uiState.value.selectionMask) }
+            return
+        }
+        autosaveJob?.cancel()
+        autosaveJob = viewModelScope.launch {
+            if (persistProject(proj) && _uiState.value.currentProject?.id == proj.id) {
+                _uiState.value = _uiState.value.copy(isProjectDirty = false)
             }
         }
     }
@@ -556,6 +608,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             "en" -> LocaleListCompat.forLanguageTags("en")
             else -> LocaleListCompat.getEmptyLocaleList()
         }
+        // Already in effect (the normal case on start, since AppCompat / Android 13+ keep the choice):
+        // setting it again would recreate the Activity and flash the screen.
+        if (AppCompatDelegate.getApplicationLocales().toLanguageTags() == localeList.toLanguageTags()) return
         AppCompatDelegate.setApplicationLocales(localeList)
     }
 
@@ -851,6 +906,17 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
         if (pendingTransactionSnapshot != null) {
             val snapshot = pendingTransactionSnapshot!!
+            // The live edit is a new step: it ends the old redo branch and becomes redoable itself.
+            redoStack.clear()
+            redoOrder.clear()
+            selectionHistory.clearRedo()
+            redoStack.push(ProjectSnapshot(
+                width = proj.width,
+                height = proj.height,
+                layers = proj.layers.map { it.snapshotLayer() },
+                renderRevision = proj.renderRevision
+            ))
+            redoOrder.addLast(HistoryKind.PROJECT)
             pendingTransactionSnapshot = null
             pendingTransactionWasDirty = false
             proj.width = snapshot.width
@@ -870,7 +936,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
-        when (nextKind(historyOrder, undoStack.isNotEmpty(), selectionHistory.canUndo)) {
+        when (nextKind(historyOrder, undoStack.isNotEmpty(), selectionCanUndo())) {
             HistoryKind.SELECTION -> { undoSelection(); return }
             HistoryKind.PROJECT -> moveLastKind(historyOrder, redoOrder, HistoryKind.PROJECT)
             null -> return
@@ -903,7 +969,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun redo() {
         val proj = _uiState.value.currentProject ?: return
-        when (nextKind(redoOrder, redoStack.isNotEmpty(), selectionHistory.canRedo)) {
+        when (nextKind(redoOrder, redoStack.isNotEmpty(), selectionCanRedo())) {
             HistoryKind.SELECTION -> { redoSelection(); return }
             HistoryKind.PROJECT -> moveLastKind(redoOrder, historyOrder, HistoryKind.PROJECT)
             null -> return
@@ -1033,10 +1099,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val removal = lastRemoval
         _uiState.value = _uiState.value.copy(
             canRetryRemoval = removal != null && undoStack.size == removal.undoDepth && redoStack.isEmpty() && pendingTransactionSnapshot == null,
-            canUndo = undoStack.isNotEmpty() || pendingTransactionSnapshot != null || selectionHistory.canUndo,
-            canRedo = redoStack.isNotEmpty() || selectionHistory.canRedo,
-            canUndoSelection = selectionHistory.canUndo,
-            canRedoSelection = selectionHistory.canRedo
+            canUndo = undoStack.isNotEmpty() || pendingTransactionSnapshot != null || selectionCanUndo(),
+            canRedo = redoStack.isNotEmpty() || selectionCanRedo(),
+            canUndoSelection = selectionCanUndo(),
+            canRedoSelection = selectionCanRedo()
         )
     }
 
@@ -1047,6 +1113,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private suspend fun commitDestructiveBitmap(project: Project, layer: Layer, full: Bitmap, contentW: Float = layer.intrinsicDocumentWidth(), contentH: Float = layer.intrinsicDocumentHeight(), prefix: String = "edit"): Boolean {
+        // The re-encoded source has no EXIF: keep the photo's metadata first (older projects).
+        if (layer.exifTags == null) {
+            layer.sourceAssetPath?.let { path ->
+                layer.exifTags = withContext(Dispatchers.IO) { com.example.engine.ExportEngine.readMetadata(File(path)) }
+            }
+        }
         val ext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) "webp" else "png"
         val file = File(repository.getProjectDir(project.id), "source_${prefix}_${layer.id}_${System.currentTimeMillis()}.$ext")
         if (!withContext(Dispatchers.IO) { ImageProcessor.saveLosslessBitmap(full, file) }) return false
@@ -1087,11 +1159,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     val ow = origW.coerceAtLeast(bmp.width).toFloat()
                     val oh = origH.coerceAtLeast(bmp.height).toFloat()
                     val fit = kotlin.math.min(1f, kotlin.math.min(proj.width / ow, proj.height / oh))
+                    val exif = sourcePath?.let { withContext(Dispatchers.IO) { com.example.engine.ExportEngine.readMetadata(File(it)) } }
                     val layer = Layer(
                         id = layerId,
                         name = tr(R.string.layer_name_imported),
                         type = LayerType.IMAGE,
                         bitmap = bmp,
+                        exifTags = exif,
                         sourceAssetPath = sourcePath,
                         originalWidth = origW,
                         originalHeight = origH,
@@ -1154,6 +1228,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                         type = LayerType.IMAGE,
                         bitmap = decodedBitmap,
                         sourceAssetPath = if (sourceSaved) sourceFile.absolutePath else null,
+                        exifTags = if (sourceSaved) com.example.engine.ExportEngine.readMetadata(sourceFile) else null,
                         originalWidth = origW,
                         originalHeight = origH,
                         contentWidth = safeW.toFloat(),
@@ -4262,7 +4337,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if(layer.type!=LayerType.IMAGE||!SelectionEngine.hasSelection(mask)){_uiState.value=_uiState.value.copy(statusMessage=tr(R.string.status_nothing_selected));return}
         viewModelScope.launch{_uiState.value=_uiState.value.copy(isProcessing=true,statusMessage=tr(R.string.status_copying_selection));var src:Bitmap?=null;var local:Bitmap?=null;var copy:Bitmap?=null
             try{src=loadAuthoritativeLayerBitmap(layer)?:throw IllegalStateException("Image unavailable");val work=workLayerFor(layer,src!!);local=withContext(Dispatchers.Default){SelectionEngine.mapDocumentMaskToLayerLocal(mask,work,proj.width,proj.height)};copy=withContext(Dispatchers.Default){SelectionEngine.copySelectedToNewBitmap(src!!,local!!)}?:throw IllegalStateException("No pixels selected")
-                val n=Layer(id=java.util.UUID.randomUUID().toString(),name=tr(R.string.layer_name_selection),type=LayerType.IMAGE,positionX=layer.positionX,positionY=layer.positionY,scaleX=layer.scaleX,scaleY=layer.scaleY,rotation=layer.rotation,opacity=layer.opacity,blendMode=layer.blendMode,filter=layer.filter,adjustments=layer.adjustments.copy(),contentWidth=layer.intrinsicDocumentWidth(),contentHeight=layer.intrinsicDocumentHeight())
+                val n=Layer(id=java.util.UUID.randomUUID().toString(),name=tr(R.string.layer_name_selection),type=LayerType.IMAGE,exifTags=layer.exifTags,positionX=layer.positionX,positionY=layer.positionY,scaleX=layer.scaleX,scaleY=layer.scaleY,rotation=layer.rotation,opacity=layer.opacity,blendMode=layer.blendMode,filter=layer.filter,adjustments=layer.adjustments.copy(),contentWidth=layer.intrinsicDocumentWidth(),contentHeight=layer.intrinsicDocumentHeight())
                 if(!commitDestructiveBitmap(proj,n,copy!!,n.contentWidth,n.contentHeight,"selection"))throw java.io.IOException("Save failed");saveHistoryState();proj.layers.add(idx+1,n);commitProjectMutation(selectedLayerIndex=idx+1,statusMessage=tr(R.string.status_copied_new_layer),transformState={it.copy(selectionMask=SelectionEngine.createBlankMask(proj.width,proj.height),isProcessing=false)}); clearSelectionHistory()}
             catch(e:Exception){_uiState.value=_uiState.value.copy(isProcessing=false,statusMessage=tr(R.string.status_copy_failed))}
             finally{local?.let{if(!it.isRecycled)it.recycle()};src?.let{if(!it.isRecycled)it.recycle()};copy?.let{if(!it.isRecycled)it.recycle()}}
@@ -4404,8 +4479,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
             val alpha = settings.format.supportsAlpha
             val baseName = E.safeFileName(settings.fileName.ifBlank { proj.name })
-            val metaSource = proj.layers.firstOrNull { it.type == LayerType.IMAGE && it.sourceAssetPath != null }
-                ?.sourceAssetPath?.let { File(it) }
+            // The photo's metadata: kept on the layer since import (older projects: read from the
+            // layer's source file, which is still the original photo until a destructive edit).
+            val metaLayer = proj.layers.firstOrNull { it.type == LayerType.IMAGE && (it.exifTags != null || it.sourceAssetPath != null) }
+            val metaTags = metaLayer?.exifTags
+                ?: metaLayer?.sourceAssetPath?.let { path -> withContext(Dispatchers.IO) { E.readMetadata(File(path)) } }
             val saved = ArrayList<Uri>()
             var reducedTo: String? = null
             try {
@@ -4468,7 +4546,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                         val ok = withContext(Dispatchers.IO) { tmp.outputStream().use { E.encode(final, settings.format, settings.quality, it) } }
                         if (!ok) throw java.io.IOException("Encoding failed")
                         if (settings.scope != com.example.engine.ExportScope.LAYERS) {
-                            withContext(Dispatchers.IO) { E.writeMetadata(metaSource, tmp, settings.metadata, final.width, final.height) }
+                            withContext(Dispatchers.IO) { E.writeMetadata(metaTags, tmp, settings.metadata, final.width, final.height) }
                         }
                         progress(p0 + span * 0.9f)
                         val uri = repository.saveExportFile(

@@ -1,13 +1,10 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   Auto Backup for Android 11 and older (Android 12+ uses data_extraction_rules.xml).
+   Projects (layer images, masks, source photos) are excluded: they easily exceed the 25 MB
+   Auto Backup quota, and going over it makes Android skip the WHOLE backup, settings included.
+   Settings, the filter library and imported LUTs stay backed up.
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <exclude domain="file" path="projects/" />
 </full-backup-content>

@@ -842,4 +842,11 @@
     <string name="status_subject_selected">Subject selected successfully</string>
     <string name="status_matting_complete">Edge &amp; hair matting applied</string>
     <string name="status_matting_failed">Edge refinement failed</string>
+    <string name="lut_delete_title">Delete “%1$s”?</string>
+    <string name="lut_delete_checking">Checking which projects use this LUT…</string>
+    <string name="lut_delete_unused">No project uses this LUT. It will be removed from your library.</string>
+    <plurals name="lut_delete_used">
+        <item quantity="one">%d project uses this LUT. Its layers will lose this look; this cannot be undone.</item>
+        <item quantity="other">%d projects use this LUT. Their layers will lose this look; this cannot be undone.</item>
+    </plurals>
 </resources>

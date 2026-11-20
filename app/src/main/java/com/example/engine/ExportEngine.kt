@@ -244,18 +244,32 @@ object ExportEngine {
     )
 
     /**
-     * Writes metadata into the encoded file [target]: the original photo's tags from [source]
-     * (camera, date, copyright, and location only with [ExportMetadata.KEEP_ALL]), orientation reset
-     * to normal (the pixels are already upright) and the software name. NONE writes nothing.
+     * The photo's own metadata (camera, date, copyright, location) read from [source], or null when
+     * it has none. Captured when a photo is imported and kept with its layer, because destructive
+     * edits replace the layer's source file with a re-encoded one that carries no EXIF.
      */
-    fun writeMetadata(source: File?, target: File, mode: ExportMetadata, width: Int, height: Int) {
+    fun readMetadata(source: File?): Map<String, String>? {
+        val f = source?.takeIf { it.exists() } ?: return null
+        return try {
+            val src = ExifInterface(f.absolutePath)
+            (BASIC_TAGS + GPS_TAGS).mapNotNull { t -> src.getAttribute(t)?.let { t to it } }.toMap().ifEmpty { null }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Writes metadata into the encoded file [target]: the original photo's [tags] (camera, date,
+     * copyright, and location only with [ExportMetadata.KEEP_ALL]), orientation reset to normal
+     * (the pixels are already upright) and the software name. NONE writes nothing.
+     */
+    fun writeMetadata(tags: Map<String, String>?, target: File, mode: ExportMetadata, width: Int, height: Int) {
         if (mode == ExportMetadata.NONE) return
         try {
             val out = ExifInterface(target.absolutePath)
-            val src = source?.takeIf { it.exists() }?.let { f -> try { ExifInterface(f.absolutePath) } catch (e: Exception) { null } }
-            if (src != null) {
-                val tags = if (mode == ExportMetadata.KEEP_ALL) BASIC_TAGS + GPS_TAGS else BASIC_TAGS
-                for (t in tags) src.getAttribute(t)?.let { out.setAttribute(t, it) }
+            if (tags != null) {
+                val allowed = if (mode == ExportMetadata.KEEP_ALL) BASIC_TAGS + GPS_TAGS else BASIC_TAGS
+                for (t in allowed) tags[t]?.let { out.setAttribute(t, it) }
             }
             out.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
             out.setAttribute(ExifInterface.TAG_SOFTWARE, "PhotoEasy")

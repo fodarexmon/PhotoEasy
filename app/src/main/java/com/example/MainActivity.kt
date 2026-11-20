@@ -50,6 +50,12 @@ class MainActivity : AppCompatActivity() {
         } else viewModel.exportImage(settings)
     }
 
+    override fun onStop() {
+        super.onStop()
+        // Leaving the app (home, app switch, screen off): write the open project right away.
+        viewModel.saveForBackground()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()

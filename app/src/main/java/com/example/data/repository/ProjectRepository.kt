@@ -224,6 +224,9 @@ class ProjectRepository(private val context: Context) {
                         put("filter", layer.filter.name)
                         put("filterIntensity", layer.filterIntensity.toDouble())
                         layer.lutId?.let { put("lutId", it) }
+                        layer.exifTags?.takeIf { it.isNotEmpty() }?.let { tags ->
+                            put("exifTags", JSONObject().apply { tags.forEach { (k, v) -> put(k, v) } })
+                        }
 
                         // Save adjustments config
                         val adj = layer.adjustments
@@ -478,6 +481,23 @@ class ProjectRepository(private val context: Context) {
             e.printStackTrace()
             false
         }
+    }
+
+    /** Ids of saved projects with a layer that uses the LUT [lutId]. */
+    suspend fun projectIdsUsingLut(lutId: String): Set<String> = withContext(Dispatchers.IO) {
+        val out = HashSet<String>()
+        projectsDir.listFiles { f -> f.isDirectory }?.forEach { dir ->
+            val manifest = File(dir, "project.json")
+            if (!manifest.exists()) return@forEach
+            try {
+                val layers = JSONObject(manifest.readText()).optJSONArray("layers") ?: return@forEach
+                for (i in 0 until layers.length()) {
+                    if (layers.optJSONObject(i)?.optString("lutId", "") == lutId) { out.add(dir.name); break }
+                }
+            } catch (_: Exception) {
+            }
+        }
+        out
     }
 
     suspend fun deleteProject(projectId: String): Boolean = withContext(Dispatchers.IO) {
@@ -889,6 +909,9 @@ class ProjectRepository(private val context: Context) {
                     filter = safeValueOf(layerObj.optString("filter", ""), FilterType.NONE),
                     filterIntensity = layerObj.optDouble("filterIntensity", 1.0).toFloat().coerceIn(0f, 1f),
                     lutId = layerObj.optString("lutId", "").ifBlank { null },
+                    exifTags = layerObj.optJSONObject("exifTags")?.let { o ->
+                        o.keys().asSequence().associateWith { k -> o.optString(k) }.ifEmpty { null }
+                    },
                     textConfig = textCfg,
                     adjustments = colorAdjustments,
                     isBitmapDirty = false,

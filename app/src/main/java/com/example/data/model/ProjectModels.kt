@@ -376,7 +376,12 @@ data class Layer(
      * Free distort: where the layer's four corners (TL, TR, BR, BL) go, in units of its own width
      * and height (identity = 0,0, 1,0, 1,1, 0,1). Null = no distortion. Non-destructive.
      */
-    var distort: FloatArray? = null
+    var distort: FloatArray? = null,
+    /**
+     * EXIF tags of the photo this layer was imported from (see ExportEngine.readMetadata). Kept
+     * separately because destructive edits replace [sourceAssetPath] with a file without EXIF.
+     */
+    var exifTags: Map<String, String>? = null
 ) {
     fun currentMaskAnchor(): MaskAnchor = MaskAnchor(positionX, positionY, scaleX, scaleY, rotation)
 

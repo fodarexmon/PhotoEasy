@@ -25,6 +25,18 @@ class SelectionHistory(
     val canUndo: Boolean get() = synchronized(this) { undoStack.isNotEmpty() }
     val canRedo: Boolean get() = synchronized(this) { redoStack.isNotEmpty() }
 
+    /**
+     * True when the next undo step exists AND was recorded on a [width] x [height] canvas. After a
+     * crop / resize / rotate the older steps belong to the previous canvas size and only become
+     * usable again once the document undo restores that size.
+     */
+    fun canUndo(width: Int, height: Int): Boolean =
+        synchronized(this) { undoStack.lastOrNull()?.let { it.width == width && it.height == height } == true }
+
+    /** Same as [canUndo] for the redo branch. */
+    fun canRedo(width: Int, height: Int): Boolean =
+        synchronized(this) { redoStack.lastOrNull()?.let { it.width == width && it.height == height } == true }
+
     @Synchronized
     fun clear() {
         undoStack.clear()
