@@ -17,8 +17,17 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v5
+
+      - name: Read app version
+        id: version
+        run: |
+          VERSION=$(sed -n 's/.*versionName *= *"\([^"]*\)".*/\1/p' app/build.gradle.kts | head -1)
+          echo "App version: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK 21 (Robolectric SDK 36 needs Java 21)
         uses: actions/setup-java@v5
@@ -62,7 +71,7 @@ jobs:
       - name: Rename APK
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/debug/*.apk "dist/PhotoEasy-${GITHUB_REF_NAME//\//-}.apk"
+          cp app/build/outputs/apk/debug/*.apk "dist/PhotoEasy-v${{ steps.version.outputs.version }}.apk"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -79,20 +88,50 @@ jobs:
           if-no-files-found: ignore
 
   release:
-    # A pushed v* tag, or a Release published on GitHub (its APK is attached to that Release).
-    if: github.event_name == 'release' || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+    # Runs for: a push to main (creates Release v<versionName> once, when that version has no
+    # Release yet: bump versionName in app/build.gradle.kts to publish a new one), a pushed v* tag,
+    # or a Release published on GitHub (the APK is attached to it).
+    if: github.event_name == 'release' || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')))
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - name: Decide the release tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            TAG="v$VERSION"
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+              echo "Release $TAG already exists; nothing to publish."
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          else
+            TAG="$GITHUB_REF_NAME"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
       - uses: actions/download-artifact@v4
+        if: steps.tag.outputs.publish == 'true'
         with:
           name: PhotoEasy-apk
           path: dist
 
       - name: Publish GitHub Release
+        if: steps.tag.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: PhotoEasy ${{ steps.tag.outputs.tag }}
           files: dist/*.apk
           generate_release_notes: true
+          body: |
+            ### Install
+            Download the APK below and open it on an Android 7.0+ device (allow installing from this source when asked).
+            The APK is debug-signed. Unless a fixed key is set in the `DEBUG_KEYSTORE_BASE64` repository secret, each release is signed with a new key, so uninstall the previous version before installing a newer one.
