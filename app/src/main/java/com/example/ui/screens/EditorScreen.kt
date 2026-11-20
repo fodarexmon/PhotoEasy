@@ -972,7 +972,11 @@ fun EditorScreen(
                             onSelectArea = {
                                 viewModel.setSelectionTool(SelectionToolType.LASSO)
                                 onToolSelect(ActiveTool.SELECTION)
-                            }
+                            },
+                            patchSelecting = uiState.patchSelecting,
+                            onPatchSelectingChange = { viewModel.setPatchSelecting(it) },
+                            isFillPicking = uiState.isFillColorPicking,
+                            onFillPickingChange = { viewModel.setFillColorPicking(it) }
                         )
                     }
 
@@ -1397,6 +1401,7 @@ fun EditorScreen(
                             maskBrushSizeDp = maskBrushSizeDp,
                             onStrokeSegment = onStrokeSegment,
                             retouchTool = if (activeTool == ActiveTool.RETOUCH) uiState.retouchTool else null,
+                            patchSelecting = uiState.patchSelecting,
                             retouchMarkerDoc = uiState.retouchMarkerDoc,
                             selectionRevision = selectionRevision,
                             isMagneticSnap = isMagneticSnap,
@@ -1521,6 +1526,7 @@ fun EditorScreen(
                             maskBrushSizeDp = maskBrushSizeDp,
                             onStrokeSegment = onStrokeSegment,
                             retouchTool = if (activeTool == ActiveTool.RETOUCH) uiState.retouchTool else null,
+                            patchSelecting = uiState.patchSelecting,
                             retouchMarkerDoc = uiState.retouchMarkerDoc,
                             selectionRevision = selectionRevision,
                             isMagneticSnap = isMagneticSnap,

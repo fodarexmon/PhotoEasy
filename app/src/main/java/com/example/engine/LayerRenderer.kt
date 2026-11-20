@@ -482,10 +482,17 @@ object LayerRenderer {
                 LayerType.IMAGE -> {
                     coroutineContext.ensureActive()
                     // Full render uses the authoritative source, but never decodes more pixels than the document can use.
+                    // The pixels needed are set by the layer's size on the canvas, not by the canvas:
+                    // after cropping to a small part of a photo the canvas is small but that part
+                    // still needs the photo's full detail.
                     var fullResSourceBmp: Bitmap? = null
                     if (scaleRatio >= 1.0f && layer.sourceAssetPath != null) {
-                        val srcFile = File(layer.sourceAssetPath!!)
-                        if (srcFile.exists()) fullResSourceBmp = ImageProcessor.decodeFileWithExifSampled(srcFile, max(canvasWidth, canvasHeight))
+                        val needed = sourcePixelsNeeded(layer, scaleRatio)
+                        val preview = layer.bitmap?.takeIf { !it.isRecycled }
+                        if (preview == null || max(preview.width, preview.height) < needed) {
+                            val srcFile = File(layer.sourceAssetPath!!)
+                            if (srcFile.exists()) fullResSourceBmp = ImageProcessor.decodeFileWithExifSampled(srcFile, needed)
+                        }
                     }
 
                     val baseBmp = fullResSourceBmp ?: layer.bitmap ?: run {
@@ -886,6 +893,16 @@ object LayerRenderer {
     }
 
     /** Applies [layer]'s adjustments, filter and LUT (its "look") to [input]; returns [input] or a new bitmap. */
+    /**
+     * Longest side, in source pixels, at which [layer] must be decoded to be drawn sharp: its size
+     * on the document (with its scale) times the render scale. At least 64, at most 4096.
+     */
+    fun sourcePixelsNeeded(layer: Layer, scaleRatio: Float): Int {
+        val w = layer.intrinsicDocumentWidth() * kotlin.math.abs(layer.scaleX)
+        val h = layer.intrinsicDocumentHeight() * kotlin.math.abs(layer.scaleY)
+        return kotlin.math.ceil(max(w, h) * scaleRatio).toInt().coerceIn(64, 4096)
+    }
+
     suspend fun applyLayerLook(input: Bitmap, layer: Layer): Bitmap = applyLook(input, layer, coroutineContext[Job])
 
     private fun applyBlendMode(paint: Paint, mode: BlendModeType) {

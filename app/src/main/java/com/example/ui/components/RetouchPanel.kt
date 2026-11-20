@@ -39,6 +39,7 @@ private fun retouchIcon(t: RetouchTool): ImageVector = when (t) {
     RetouchTool.BURN -> Icons.Default.Brightness4
     RetouchTool.CLONE -> Icons.Default.ContentCopy
     RetouchTool.PATCH -> Icons.Default.Healing
+    RetouchTool.FILL -> Icons.Default.FormatColorFill
 }
 
 private fun retouchLabel(t: RetouchTool): Int = when (t) {
@@ -49,9 +50,10 @@ private fun retouchLabel(t: RetouchTool): Int = when (t) {
     RetouchTool.BURN -> R.string.retouch_burn
     RetouchTool.CLONE -> R.string.retouch_clone
     RetouchTool.PATCH -> R.string.retouch_patch
+    RetouchTool.FILL -> R.string.retouch_fill
 }
 
-/** Options of the retouch brushes (Photoshop's Blur, Sharpen, Smudge, Dodge, Burn, Clone Stamp, Patch). */
+/** Options of the Tools tab (Photoshop's Blur, Sharpen, Smudge, Dodge, Burn, Clone Stamp, Patch, Paint Bucket). */
 @Composable
 fun RetouchPanel(
     tool: RetouchTool,
@@ -65,8 +67,20 @@ fun RetouchPanel(
     onBrushChange: (RetouchBrush) -> Unit,
     onPickSourceChange: (Boolean) -> Unit,
     onSelectArea: () -> Unit,
+    patchSelecting: Boolean = true,
+    onPatchSelectingChange: (Boolean) -> Unit = {},
+    isFillPicking: Boolean = false,
+    onFillPickingChange: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    var customColor by remember { mutableStateOf(false) }
+    if (customColor) {
+        CustomColorPickerDialog(
+            initialColorHex = brush.fillColor,
+            onDismiss = { customColor = false },
+            onColorConfirmed = { onBrushChange(brush.copy(fillColor = it or 0xFF000000.toInt())); customColor = false }
+        )
+    }
     Column(
         modifier
             .fillMaxWidth()
@@ -98,14 +112,69 @@ fun RetouchPanel(
         if (tool == RetouchTool.PATCH) {
             Text(stringResource(R.string.retouch_patch_info), color = Color.LightGray, fontSize = 12.sp)
             Spacer(Modifier.height(8.dp))
-            if (!hasSelection) {
-                Button(onClick = onSelectArea, colors = ButtonDefaults.buttonColors(containerColor = IndigoPrimary)) {
-                    Icon(Icons.Default.Gesture, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text(stringResource(R.string.retouch_select_area))
-                }
-            } else {
-                Text(stringResource(R.string.retouch_patch_ready), color = AmberAccent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            // Step 1: draw the area (built-in Lasso); step 2: drag it onto a clean area.
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FilterChip(
+                    selected = patchSelecting,
+                    onClick = { onPatchSelectingChange(true) },
+                    label = { Text(stringResource(R.string.retouch_patch_mode_lasso), fontSize = 12.sp) },
+                    leadingIcon = { Icon(Icons.Default.Gesture, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                    modifier = Modifier.weight(1f).testTag("patch_mode_lasso")
+                )
+                FilterChip(
+                    selected = !patchSelecting,
+                    enabled = hasSelection,
+                    onClick = { onPatchSelectingChange(false) },
+                    label = { Text(stringResource(R.string.retouch_patch_mode_drag), fontSize = 12.sp) },
+                    leadingIcon = { Icon(Icons.Default.OpenWith, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                    modifier = Modifier.weight(1f).testTag("patch_mode_drag")
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                stringResource(
+                    when {
+                        patchSelecting -> R.string.retouch_patch_lasso_hint
+                        hasSelection -> R.string.retouch_patch_ready
+                        else -> R.string.retouch_patch_needs_selection
+                    }
+                ),
+                color = AmberAccent, fontSize = 12.sp, fontWeight = FontWeight.SemiBold
+            )
+            TextButton(onClick = onSelectArea) {
+                Icon(Icons.Default.SelectAll, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(stringResource(R.string.retouch_select_area), fontSize = 12.sp)
+            }
+        } else if (tool == RetouchTool.FILL) {
+            Text(stringResource(R.string.retouch_fill_info), color = Color.LightGray, fontSize = 12.sp)
+            Spacer(Modifier.height(6.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)).background(Color(brush.fillColor))
+                )
+                Spacer(Modifier.width(8.dp))
+                FilterChip(
+                    selected = isFillPicking,
+                    onClick = { onFillPickingChange(!isFillPicking) },
+                    label = { Text(stringResource(R.string.fill_eyedropper), fontSize = 12.sp) },
+                    leadingIcon = { Icon(Icons.Default.Colorize, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                    modifier = Modifier.testTag("fill_eyedropper")
+                )
+                Spacer(Modifier.width(6.dp))
+                TextButton(onClick = { customColor = true }) { Text(stringResource(R.string.text_custom_color), fontSize = 12.sp) }
+            }
+            if (isFillPicking) Text(stringResource(R.string.fill_pick_hint), color = AmberAccent, fontSize = 11.sp)
+            ColorSwatchesRow(selectedColorHex = brush.fillColor, onColorSelect = { onBrushChange(brush.copy(fillColor = it or 0xFF000000.toInt())) })
+            RSlider(R.string.retouch_opacity, brush.fillOpacity * 100f, 1f..100f, "${(brush.fillOpacity * 100).roundToInt()}%") { onBrushChange(brush.copy(fillOpacity = it / 100f)) }
+            RSlider(R.string.fill_tolerance, brush.fillTolerance.toFloat(), 0f..255f, "${brush.fillTolerance}") { onBrushChange(brush.copy(fillTolerance = it.roundToInt())) }
+            Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(R.string.fill_contiguous), color = Color.White, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                Switch(checked = brush.fillContiguous, onCheckedChange = { onBrushChange(brush.copy(fillContiguous = it)) })
+            }
+            Row(Modifier.fillMaxWidth().heightIn(min = 44.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(stringResource(R.string.fill_anti_alias), color = Color.White, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                Switch(checked = brush.fillAntiAlias, onCheckedChange = { onBrushChange(brush.copy(fillAntiAlias = it)) })
             }
         } else {
             RSlider(R.string.retouch_size, sizeDp, 4f..400f, "${sizeDp.roundToInt()} dp", onSizeChange)
@@ -162,7 +231,7 @@ fun RetouchPanel(
             }
         }
         Spacer(Modifier.height(8.dp))
-        Text(stringResource(R.string.retouch_hint), color = Color.Gray, fontSize = 11.sp)
+        if (tool != RetouchTool.FILL) Text(stringResource(R.string.retouch_hint), color = Color.Gray, fontSize = 11.sp)
     }
 }
 

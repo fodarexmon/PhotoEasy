@@ -214,6 +214,8 @@ fun CanvasView(
     onStrokeSegment: ((List<PointF>, Float, com.example.ui.viewmodel.StrokePhase) -> Unit)? = null,
     /** Active retouch brush (non-null while the Retouch tool is open): one finger paints with it. */
     retouchTool: com.example.engine.RetouchTool? = null,
+    /** Patch is drawing its lasso (outline preview instead of the drag guide). */
+    patchSelecting: Boolean = false,
     /** Clone Stamp sampling point (document coordinates), drawn as a cross-hair. */
     retouchMarkerDoc: PointF? = null,
     selectionRevision: Long = 0L,
@@ -1997,13 +1999,17 @@ fun CanvasView(
                     (activeTool == ActiveTool.OBJECT_REMOVAL && inpaintSelectionMode == com.example.ui.viewmodel.InpaintSelectionMode.LASSO)
                 val accent = if (activeTool == ActiveTool.OBJECT_REMOVAL) Color(0xFFFF2A6D) else CyanAccent
 
-                if (activeTool == ActiveTool.RETOUCH) {
+                if (activeTool == ActiveTool.RETOUCH && retouchTool == com.example.engine.RetouchTool.PATCH && patchSelecting) {
+                    path.close()
+                    drawPath(path = path, color = Color.Black.copy(alpha = 0.6f), style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+                    drawPath(path = path, color = CyanAccent, style = Stroke(width = 1.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+                } else if (activeTool == ActiveTool.RETOUCH) {
                     // Retouch brushes show their result live on the image: only a thin guide line
                     // (Patch: where the selection is dragged) and the brush outline at the finger.
                     drawPath(path = path, color = Color.Black.copy(alpha = 0.5f), style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
                     drawPath(path = path, color = Color.White.copy(alpha = if (retouchTool == com.example.engine.RetouchTool.PATCH) 0.95f else 0.35f), style = Stroke(width = 1.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
                     val lastP = currentPoints.last()
-                    if (retouchTool != com.example.engine.RetouchTool.PATCH) {
+                    if (retouchTool != com.example.engine.RetouchTool.PATCH && retouchTool != com.example.engine.RetouchTool.FILL) {
                         val c = Offset(startX + lastP.x / project.width * targetDrawW, startY + lastP.y / project.height * targetDrawH)
                         val rr = with(density) { effectiveBrushSizeDp.dp.toPx() } / 2f
                         drawCircle(Color.Black.copy(alpha = 0.6f), rr + 1.dp.toPx(), c, style = Stroke(1.dp.toPx()))

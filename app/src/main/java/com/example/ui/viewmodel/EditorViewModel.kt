@@ -196,6 +196,10 @@ data class EditorUiState(
     /** Clone Stamp source point (document coordinates), set by tapping in "set source" mode. */
     val cloneSourceDoc: PointF? = null,
     val isCloneSourcePicking: Boolean = false,
+    /** Patch: one finger draws a lasso (true) or drags the selection onto a clean area (false). */
+    val patchSelecting: Boolean = true,
+    /** Fill: the next tap picks the fill colour from the layer (eyedropper). */
+    val isFillColorPicking: Boolean = false,
     /** Where the Clone Stamp is currently sampling (shown as a cross-hair on the canvas). */
     val retouchMarkerDoc: PointF? = null,
     /** Pre-retouch pixels per layer id, for the Before view of Before/After. */
@@ -1162,7 +1166,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         layer.bitmap?.copy(Bitmap.Config.ARGB_8888, true)
     }
 
-    private suspend fun commitDestructiveBitmap(project: Project, layer: Layer, full: Bitmap, contentW: Float = layer.intrinsicDocumentWidth(), contentH: Float = layer.intrinsicDocumentHeight(), prefix: String = "edit"): Boolean {
+    private suspend fun commitDestructiveBitmap(project: Project, layer: Layer, full: Bitmap, contentW: Float = layer.intrinsicDocumentWidth(), contentH: Float = layer.intrinsicDocumentHeight(), prefix: String = "edit", keepBefore: Boolean = false): Boolean {
+        // Pixel edits that Before/After should undo: keep the layer's pixels from before the first one.
+        if (keepBefore) layer.bitmap?.takeIf { !it.isRecycled }?.let { rememberBeforeEdit(layer, it) }
         // The re-encoded source has no EXIF: keep the photo's metadata first (older projects).
         if (layer.exifTags == null) {
             layer.sourceAssetPath?.let { path ->
@@ -2727,7 +2733,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 saveHistoryState()
                 historySaved = true
-                if (!commitDestructiveBitmap(proj, layer, out!!, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "content_aware")) {
+                if (!commitDestructiveBitmap(proj, layer, out!!, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "content_aware", keepBefore = true)) {
                     throw java.io.IOException("Save failed")
                 }
                 lastRemoval = RemovalSession(layer.id, mask, protectDoc, seed, undoStack.size)
@@ -4055,6 +4061,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val points: List<PointF>, val docRadius: Float
         ) : RetouchEvent()
         class Move(val points: List<PointF>, val docRadius: Float) : RetouchEvent()
+        class Fill(
+            val layer: Layer, val docW: Int, val docH: Int, val pointDoc: PointF,
+            val brush: com.example.engine.RetouchBrush, val selection: Bitmap?
+        ) : RetouchEvent()
         class End(val points: List<PointF>, val docRadius: Float) : RetouchEvent()
         class Patch(
             val layer: Layer, val docW: Int, val docH: Int, val selection: Bitmap,
@@ -4078,6 +4088,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private val retouchStrokeActive: Boolean get() = retouchPending > 0
     /** The stroke being processed has recorded its undo step (roll it back if it fails). */
     private var retouchStepOpen = false
+    /** Patch's lasso points while it is being drawn (document coordinates). */
+    private var patchLasso: MutableList<PointF>? = null
     private var retouchStrokeRejected = false
     private var retouchStrokeFailed = false
     private var patchStartDoc: PointF? = null
@@ -4091,7 +4103,15 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private var strokeOffsetDoc: PointF? = null
 
     fun setRetouchTool(tool: com.example.engine.RetouchTool) {
-        _uiState.value = _uiState.value.copy(retouchTool = tool, isCloneSourcePicking = tool == com.example.engine.RetouchTool.CLONE && _uiState.value.cloneSourceDoc == null)
+        val st = _uiState.value
+        val hasSelection = st.selectionMask?.let { !it.isRecycled && SelectionEngine.hasSelection(it) } == true
+        _uiState.value = st.copy(
+            retouchTool = tool,
+            isCloneSourcePicking = tool == com.example.engine.RetouchTool.CLONE && st.cloneSourceDoc == null,
+            // Patch starts by drawing the area to fix unless something is already selected.
+            patchSelecting = if (tool == com.example.engine.RetouchTool.PATCH && tool != st.retouchTool) !hasSelection else st.patchSelecting,
+            isFillColorPicking = false
+        )
     }
 
     fun setRetouchSize(sizeDp: Float) { _uiState.value = _uiState.value.copy(retouchSizeDp = sizeDp.coerceIn(4f, 400f)) }
@@ -4099,6 +4119,36 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun setRetouchBrush(brush: com.example.engine.RetouchBrush) { _uiState.value = _uiState.value.copy(retouchBrush = brush) }
 
     fun setCloneSourcePicking(picking: Boolean) { _uiState.value = _uiState.value.copy(isCloneSourcePicking = picking) }
+
+    fun setPatchSelecting(selecting: Boolean) { _uiState.value = _uiState.value.copy(patchSelecting = selecting) }
+
+    fun setFillColorPicking(picking: Boolean) { _uiState.value = _uiState.value.copy(isFillColorPicking = picking) }
+
+    /** Eyedropper for Fill: the layer's colour at a document point (from its preview pixels). */
+    private fun pickFillColor(layer: Layer, docX: Float, docY: Float, docW: Int, docH: Int) {
+        val bmp = layer.bitmap?.takeIf { !it.isRecycled } ?: return
+        val inv = Matrix()
+        if (!SelectionEngine.getLayerMatrixForSize(layer, bmp.width.toFloat(), bmp.height.toFloat(), docW, docH).invert(inv)) return
+        val pt = floatArrayOf(docX, docY).also { inv.mapPoints(it) }
+        val x = pt[0].toInt(); val y = pt[1].toInt()
+        val st = _uiState.value
+        if (x !in 0 until bmp.width || y !in 0 until bmp.height) {
+            _uiState.value = st.copy(statusMessage = tr(R.string.fill_pick_outside))
+            return
+        }
+        val c = bmp.getPixel(x, y) or 0xFF000000.toInt()
+        _uiState.value = st.copy(retouchBrush = st.retouchBrush.copy(fillColor = c), isFillColorPicking = false, statusMessage = tr(R.string.fill_color_picked))
+    }
+
+    /** Patch's own lasso: replaces the selection with the drawn area, then switches to dragging. */
+    private fun applyPatchLasso(points: List<PointF>) {
+        if (_uiState.value.selectionMask == null || points.size < 3) {
+            _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.retouch_patch_lasso_hint))
+            return
+        }
+        mutateSelectionAsync { mask -> SelectionEngine.fillLassoPath(mask, points, com.example.data.model.SelectionMode.REPLACE) }
+        _uiState.value = _uiState.value.copy(patchSelecting = false, statusMessage = tr(R.string.retouch_patch_ready))
+    }
 
     /** Sets the Clone Stamp source (a tap in "set source" mode). */
     fun setCloneSource(docX: Float, docY: Float) {
@@ -4126,6 +4176,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 points.firstOrNull()?.let { setCloneSource(it.x, it.y) }
                 return
             }
+            if (tool == com.example.engine.RetouchTool.PATCH && st.patchSelecting) {
+                patchLasso = points.toMutableList()
+                return
+            }
             val layer = proj.layers.getOrNull(st.selectedLayerIndex)
             val hasSelection = st.selectionMask?.let { !it.isRecycled && SelectionEngine.hasSelection(it) } == true
             val reason = when {
@@ -4143,6 +4197,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
             if (tool == com.example.engine.RetouchTool.PATCH) { patchStartDoc = points.firstOrNull(); return }
             val first = points.firstOrNull() ?: return
+            if (tool == com.example.engine.RetouchTool.FILL) {
+                // A tap: fills (or picks the colour) once; the rest of the touch is ignored.
+                retouchStrokeRejected = true
+                if (st.isFillColorPicking) { pickFillColor(layer!!, first.x, first.y, proj.width, proj.height); return }
+                val sel = st.selectionMask?.takeIf { hasSelection }
+                queueRetouch(RetouchEvent.Fill(layer!!, proj.width, proj.height, PointF(first.x, first.y), st.retouchBrush, sel))
+                return
+            }
             if (tool == com.example.engine.RetouchTool.CLONE) {
                 val src = st.cloneSourceDoc!!
                 if (cloneOffsetDoc == null) cloneOffsetDoc = PointF(src.x - first.x, src.y - first.y)
@@ -4154,6 +4216,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         if (retouchStrokeRejected) return
+        val lasso = patchLasso
+        if (tool == com.example.engine.RetouchTool.PATCH && lasso != null) {
+            lasso.addAll(points)
+            if (phase == StrokePhase.END) { patchLasso = null; applyPatchLasso(lasso) }
+            return
+        }
         if (tool == com.example.engine.RetouchTool.PATCH) {
             if (phase != StrokePhase.END) return
             val start = patchStartDoc ?: return
@@ -4203,7 +4271,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private fun beginRetouchStep(layer: Layer): Bitmap? {
         val old = layer.bitmap?.takeIf { !it.isRecycled } ?: return null
         if (pendingTransactionSnapshot != null) saveHistoryState()
-        rememberBeforeRetouch(layer, old)
+        rememberBeforeEdit(layer, old)
         saveHistoryState()
         val preview = try { old.copy(Bitmap.Config.ARGB_8888, true) } catch (e: OutOfMemoryError) { null } ?: run {
             rollbackToLastHistoryState(); return null
@@ -4214,8 +4282,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         return preview
     }
 
-    /** Keeps the layer's pixels from before its first retouch, for Before/After. */
-    private fun rememberBeforeRetouch(layer: Layer, current: Bitmap) {
+    /** Keeps the layer's pixels from before its first pixel edit (retouch, Liquify…), for Before/After. */
+    private fun rememberBeforeEdit(layer: Layer, current: Bitmap) {
         val known = _uiState.value.compareBefore[layer.id]
         if (known != null && !known.bitmap.isRecycled &&
             known.contentWidth == layer.contentWidth && known.contentHeight == layer.contentHeight) return
@@ -4316,6 +4384,35 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 val session = retouchSession ?: return
                 paintRetouch(session.canvas, ev.points, ev.docRadius)
                 withContext(retouchDispatcher) { session.canvas.endStroke() }
+                commitRetouch(session)
+            }
+            is RetouchEvent.Fill -> {
+                val preview = beginRetouchStep(ev.layer) ?: run { retouchPending = (retouchPending - 1).coerceAtLeast(0); return }
+                strokeLayer = ev.layer
+                strokePreview = preview
+                strokeOffsetDoc = null
+                val session = ensureRetouchSession(ev.layer)
+                prepareStrokeMapping(ev.layer, session.canvas, ev.docW, ev.docH)
+                val c = session.canvas
+                val local = toLocalPoints(listOf(ev.pointDoc))
+                val b = ev.brush
+                val changed = withContext(retouchDispatcher) {
+                    var bytes: ByteArray? = null; var stride = c.width
+                    ev.selection?.takeIf { !it.isRecycled }?.let { sel ->
+                        val m = Bitmap.createBitmap(c.width, c.height, Bitmap.Config.ALPHA_8)
+                        android.graphics.Canvas(m).drawBitmap(sel, strokeToLocal!!, Paint(Paint.FILTER_BITMAP_FLAG))
+                        val r = SelectionEngine.readAlphaBytes(m); m.recycle()
+                        bytes = r.first; stride = r.second
+                    }
+                    c.fill(
+                        kotlin.math.floor(local[0]).toInt(), kotlin.math.floor(local[1]).toInt(), b.fillColor, b.fillOpacity,
+                        b.fillTolerance, b.fillContiguous, b.fillAntiAlias, bytes, stride
+                    )?.also { area -> c.downsampleInto(preview, area) }
+                }
+                if (changed == null) {
+                    onRetouchFailed(R.string.fill_nothing)
+                    return
+                }
                 commitRetouch(session)
             }
             is RetouchEvent.Patch -> {
@@ -4504,7 +4601,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 saveHistoryState()
                 historySaved = true
-                if (!commitDestructiveBitmap(proj, layer, out!!, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "liquify")) {
+                if (!commitDestructiveBitmap(proj, layer, out!!, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "liquify", keepBefore = true)) {
                     throw java.io.IOException("Save failed")
                 }
                 commitProjectMutation(
@@ -4582,7 +4679,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
                 saveHistoryState()
                 historySaved = true
-                if (!commitDestructiveBitmap(proj, layer, finalProcessed, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), effect.name.lowercase())) {
+                if (!commitDestructiveBitmap(proj, layer, finalProcessed, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), effect.name.lowercase(), keepBefore = true)) {
                     throw java.io.IOException("Save failed")
                 }
                 if (finalProcessed !== layer.bitmap && !finalProcessed.isRecycled) finalProcessed.recycle()
@@ -4963,7 +5060,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                         decontaminated,
                         layer.intrinsicDocumentWidth(),
                         layer.intrinsicDocumentHeight(),
-                        "refine_decontaminate"
+                        "refine_decontaminate",
+                        keepBefore = true
                     )
                     if (decontaminated !== layer.bitmap && !decontaminated.isRecycled) decontaminated.recycle()
                     if (!committed) throw java.io.IOException("Failed to persist decontaminated layer")

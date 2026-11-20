@@ -201,6 +201,45 @@ class ProToolsTest {
         assertEquals(120.0, Color.green(p).toDouble(), 6.0)
     }
 
+    // --- Fill (paint bucket) ------------------------------------------------------------------
+
+    @Test
+    fun `fill paints the connected area only and respects tolerance and selection`() {
+        val w = 40; val h = 20
+        // Left half white, a black wall at x = 20, right half white.
+        val px = IntArray(w * h) { i -> if (i % w == 20) Color.BLACK else Color.WHITE }
+        val c = com.example.engine.RetouchCanvas(w, h, px)
+        val red = Color.RED
+        assertNotNull(c.fill(5, 5, red, 1f, 32, contiguous = true, antiAlias = false))
+        assertEquals(red, px[5 * w + 0]); assertEquals(red, px[19 * w + 19])
+        assertEquals(Color.BLACK, px[3 * w + 20]); assertEquals(Color.WHITE, px[3 * w + 30])
+        // Not contiguous: every white pixel.
+        val px2 = IntArray(w * h) { i -> if (i % w == 20) Color.BLACK else Color.WHITE }
+        com.example.engine.RetouchCanvas(w, h, px2).fill(5, 5, red, 1f, 32, contiguous = false, antiAlias = false)
+        assertEquals(red, px2[3 * w + 30])
+        // Selection: only selected pixels change, a tap outside it fills nothing.
+        val px3 = IntArray(w * h) { Color.WHITE }
+        val mask = ByteArray(w * h) { i -> if (i % w < 10) 255.toByte() else 0 }
+        val c3 = com.example.engine.RetouchCanvas(w, h, px3)
+        assertNull(c3.fill(30, 5, red, 1f, 32, true, false, mask, w))
+        assertNotNull(c3.fill(2, 5, red, 1f, 32, true, false, mask, w))
+        assertEquals(red, px3[5 * w + 9]); assertEquals(Color.WHITE, px3[5 * w + 10])
+        // Half opacity over transparent pixels gives the colour at half alpha.
+        val px4 = IntArray(w * h)
+        com.example.engine.RetouchCanvas(w, h, px4).fill(1, 1, Color.BLUE, 0.5f, 0, true, false)
+        assertTrue(kotlin.math.abs((px4[0] ushr 24) - 128) <= 1)
+        assertEquals(255, px4[0] and 255)
+    }
+
+    @Test
+    fun `cropped layers are decoded at the layer size not the canvas size`() {
+        val layer = Layer(id = "p", name = "Photo", type = LayerType.IMAGE, contentWidth = 1440f, contentHeight = 3200f)
+        assertEquals(3200, com.example.engine.LayerRenderer.sourcePixelsNeeded(layer, 1f))
+        assertEquals(1600, com.example.engine.LayerRenderer.sourcePixelsNeeded(layer, 0.5f))
+        layer.scaleX = 3f; layer.scaleY = 3f
+        assertEquals(4096, com.example.engine.LayerRenderer.sourcePixelsNeeded(layer, 1f))
+    }
+
     // --- Frequency separation ---------------------------------------------------------------
 
     @Test
