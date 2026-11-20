@@ -37,7 +37,9 @@ enum class BlendModeType(val displayName: String, val resId: Int, val minApiLeve
     HUE("Hue", R.string.blend_hue, 29),
     SATURATION("Saturation", R.string.blend_saturation, 29),
     COLOR("Color", R.string.blend_color, 29),
-    LUMINOSITY("Luminosity", R.string.blend_luminosity, 29);
+    LUMINOSITY("Luminosity", R.string.blend_luminosity, 29),
+    /** base + 2 * layer - 1; computed by PhotoEasy itself (used by frequency separation). */
+    LINEAR_LIGHT("Linear Light", R.string.blend_linear_light, 24);
 
     companion object {
         fun getAvailableModes(): List<BlendModeType> {

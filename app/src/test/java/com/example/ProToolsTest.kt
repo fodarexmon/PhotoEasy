@@ -25,6 +25,7 @@ import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -198,6 +199,88 @@ class ProToolsTest {
         // The blob is gone and the colour follows the local gradient (red ~125 there), not the source (~165).
         assertTrue("red ${Color.red(p)}", Color.red(p) in 110..140)
         assertEquals(120.0, Color.green(p).toDouble(), 6.0)
+    }
+
+    // --- Frequency separation ---------------------------------------------------------------
+
+    @Test
+    fun `low plus high in linear light rebuilds the image`() {
+        val rnd = java.util.Random(3)
+        val img = Bitmap.createBitmap(48, 32, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 32) for (x in 0 until 48) img.setPixel(x, y, Color.rgb(60 + x * 3 + rnd.nextInt(30), 90 + rnd.nextInt(60), 200 - y * 2))
+        val (low, high) = com.example.engine.FrequencySeparation.split(img, 3f)
+        // Texture sits around mid grey; low is smoother than the image.
+        val rebuilt = low.copy(Bitmap.Config.ARGB_8888, true)
+        com.example.engine.FrequencySeparation.linearLight(rebuilt, high, 1f)
+        for (y in 0 until 32) for (x in 0 until 48) {
+            val a = img.getPixel(x, y); val b = rebuilt.getPixel(x, y)
+            assertTrue("($x,$y)", kotlin.math.abs(Color.red(a) - Color.red(b)) <= 1 && kotlin.math.abs(Color.green(a) - Color.green(b)) <= 1 && kotlin.math.abs(Color.blue(a) - Color.blue(b)) <= 1)
+        }
+    }
+
+    @Test
+    fun `renderer composes a clipped linear light layer like the original`() {
+        val img = Bitmap.createBitmap(40, 30, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 30) for (x in 0 until 40) img.setPixel(x, y, Color.rgb((x * 6) % 256, (y * 8) % 256, ((x + y) * 5) % 256))
+        val (low, high) = com.example.engine.FrequencySeparation.split(img, 2f)
+        val layers = listOf(
+            Layer(id = "low", name = "Low", type = LayerType.IMAGE, bitmap = low, contentWidth = 40f, contentHeight = 30f),
+            Layer(id = "high", name = "High", type = LayerType.IMAGE, bitmap = high, contentWidth = 40f, contentHeight = 30f,
+                isClipped = true, blendMode = com.example.data.model.BlendModeType.LINEAR_LIGHT)
+        )
+        val out = runBlocking { com.example.engine.LayerRenderer.renderCompositeCanvas(context, layers, 40, 30, includeBackground = false) }
+        var maxDiff = 0
+        for (y in 2 until 28) for (x in 2 until 38) {
+            val a = img.getPixel(x, y); val b = out.getPixel(x, y)
+            maxDiff = maxOf(maxDiff, kotlin.math.abs(Color.red(a) - Color.red(b)), kotlin.math.abs(Color.green(a) - Color.green(b)), kotlin.math.abs(Color.blue(a) - Color.blue(b)))
+        }
+        assertTrue("max difference $maxDiff", maxDiff <= 3)
+    }
+
+    // --- Face-Aware Liquify ------------------------------------------------------------------
+
+    private fun face(): com.example.engine.FaceGeometry {
+        fun p(x: Float, y: Float) = android.graphics.PointF(x, y)
+        return com.example.engine.FaceGeometry(
+            box = android.graphics.RectF(60f, 40f, 140f, 150f), center = p(100f, 95f), width = 80f, height = 110f,
+            ax = p(1f, 0f), ay = p(0f, 1f), eye1 = p(82f, 80f), eye2 = p(118f, 80f), eyeW = 16f, eyeH = 7f,
+            noseBase = p(100f, 105f), noseW = 18f, noseLen = 25f, mouthLeft = p(88f, 122f), mouthRight = p(112f, 122f),
+            mouthCenter = p(100f, 123f), mouthH = 9f, chin = p(100f, 148f), forehead = p(100f, 52f)
+        )
+    }
+
+    @Test
+    fun `face warps enlarge eyes and narrow the nose in the right direction`() {
+        val g = face()
+        assertNull(com.example.engine.FaceWarp.field(listOf(g to com.example.engine.FaceAdjust()), 200, 200))
+        val (dx, _) = com.example.engine.FaceWarp.field(listOf(g to com.example.engine.FaceAdjust(eyeSize = 100f)), 200, 200)!!
+        // Right of the right eye's centre the output samples closer to the centre (bigger eye).
+        assertTrue(dx[80 * 200 + 124] < 0f)
+        assertTrue(dx[80 * 200 + 112] > 0f)
+        val (nx, _) = com.example.engine.FaceWarp.field(listOf(g to com.example.engine.FaceAdjust(noseWidth = -100f)), 200, 200)!!
+        // Narrower nose: right of the nose samples further out.
+        assertTrue(nx[102 * 200 + 108] > 0f)
+        // Far from the face nothing moves.
+        assertEquals(0f, nx[5 * 200 + 5], 0f)
+    }
+
+    @Test
+    fun `eye brightness lifts the eyes only and liquify applies the face field`() {
+        val g = face()
+        val bright = com.example.engine.FaceWarp.eyeBrightener(listOf(g to com.example.engine.FaceAdjust(eyeBrightness = 100f)))!!
+        val grey = Color.rgb(90, 90, 90)
+        assertTrue(Color.red(bright(118f, 80f, grey)) > 90)
+        assertEquals(grey, bright(100f, 140f, grey))
+        val src = solid(200, 200, Color.WHITE)
+        for (y in 76..84) for (x in 112..124) src.setPixel(x, y, Color.BLACK)
+        val e = LiquifyEngine(src)
+        val adj = listOf(g to com.example.engine.FaceAdjust(eyeSize = 100f))
+        val f = com.example.engine.FaceWarp.field(adj, 200, 200)!!
+        e.setFaceField(f.first, f.second, null)
+        assertTrue(e.hasChanges)
+        // The enlarged dark eye now reaches pixels that were white.
+        assertTrue(lum(e.output[80 * 200 + 126]) < 200)
+        assertEquals(400, e.applyFull(Bitmap.createScaledBitmap(src, 400, 400, false)).width)
     }
 
     // --- Stickers ---------------------------------------------------------------------------

@@ -97,6 +97,7 @@ dependencies {
   // On-device "Select Subject" (model delivered by Google Play services; the app falls back to
   // its built-in saliency method when it is unavailable).
   implementation(libs.mlkit.subject.segmentation)
+  implementation(libs.mlkit.face.detection)
   // implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)
   // Uncomment to use Firestore:

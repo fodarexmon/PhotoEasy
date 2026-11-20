@@ -113,6 +113,10 @@ fun FiltersPanel(
     initialTab: FilterPanelTab = FilterPanelTab.PRESETS,
     /** Opens the Liquify workspace (shown in the Pro effects tab). */
     onOpenLiquify: (() -> Unit)? = null,
+    /** Opens Liquify on its Face-Aware tab. */
+    onOpenFaceLiquify: (() -> Unit)? = null,
+    /** Opens the frequency separation setup. */
+    onOpenFrequencySeparation: (() -> Unit)? = null,
     /** Number of projects whose layers use the LUT (deleting it removes their look). */
     onCountLutUsage: suspend (String) -> Int = { 0 },
     onSaveLook: (String) -> Unit = {},
@@ -587,6 +591,19 @@ fun FiltersPanel(
                     Icon(Icons.Default.Gesture, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
                     Text(stringResource(R.string.liq_open), fontWeight = FontWeight.SemiBold)
+                }
+                Spacer(Modifier.height(6.dp))
+            }
+            if (onOpenFaceLiquify != null || onOpenFrequencySeparation != null) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (onOpenFaceLiquify != null) OutlinedButton(
+                        onClick = onOpenFaceLiquify,
+                        modifier = Modifier.weight(1f).heightIn(min = 44.dp).testTag("btn_open_face_liquify")
+                    ) { Text(stringResource(R.string.face_open), fontSize = 12.sp, maxLines = 2) }
+                    if (onOpenFrequencySeparation != null) OutlinedButton(
+                        onClick = onOpenFrequencySeparation,
+                        modifier = Modifier.weight(1f).heightIn(min = 44.dp).testTag("btn_open_fs")
+                    ) { Text(stringResource(R.string.fs_open), fontSize = 12.sp, maxLines = 2) }
                 }
                 Spacer(Modifier.height(8.dp))
             }

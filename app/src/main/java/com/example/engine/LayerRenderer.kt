@@ -187,9 +187,7 @@ object LayerRenderer {
                             // A masked adjustment layer only affects the revealed area; the hidden
                             // area becomes transparent and the composite below shows through unchanged.
                             applyLayerMask(Canvas(adjustedComposite), layer, adjustedComposite.width, adjustedComposite.height, docW, docH)
-                            paint.alpha = (layer.opacity * 255).toInt().coerceIn(0, 255)
-                            applyBlendMode(paint, layer.blendMode)
-                            canvas.drawBitmap(adjustedComposite, 0f, 0f, paint)
+                            drawBlended(canvas, composite, adjustedComposite, layer.blendMode, layer.opacity, paint)
                         } finally {
                             if (!copy.isRecycled) copy.recycle()
                             if (!adjustedComposite.isRecycled) adjustedComposite.recycle()
@@ -213,9 +211,7 @@ object LayerRenderer {
                             if (c.id == selectedLayerId) activeSelectionMask else null)
                     }
                     coroutineContext.ensureActive()
-                    paint.alpha = (layer.opacity * 255).toInt().coerceIn(0, 255)
-                    applyBlendMode(paint, layer.blendMode)
-                    canvas.drawBitmap(layerBitmap, 0f, 0f, paint)
+                    drawBlended(canvas, composite, layerBitmap, layer.blendMode, layer.opacity, paint)
                 } finally {
                     if (!layerBitmap.isRecycled) {
                         layerBitmap.recycle()
@@ -313,7 +309,7 @@ object LayerRenderer {
                 adjusted = applyLook(copy, c, currentJob)
                 applyLayerMask(Canvas(adjusted), c, adjusted.width, adjusted.height, docW, docH)
                 Canvas(adjusted).drawBitmap(base, 0f, 0f, keepBaseAlpha)
-                Canvas(base).drawBitmap(adjusted, 0f, 0f, paint)
+                drawBlended(Canvas(base), base, adjusted, c.blendMode, c.opacity, paint)
             } finally {
                 if (!copy.isRecycled) copy.recycle()
                 if (!adjusted.isRecycled) adjusted.recycle()
@@ -323,7 +319,7 @@ object LayerRenderer {
         val cb = renderSingleLayerToBitmap(context, c, targetW, targetH, scaleRatio, selectionForLayer) ?: return
         try {
             Canvas(cb).drawBitmap(base, 0f, 0f, keepBaseAlpha)
-            Canvas(base).drawBitmap(cb, 0f, 0f, paint)
+            drawBlended(Canvas(base), base, cb, c.blendMode, c.opacity, paint)
         } finally {
             if (!cb.isRecycled) cb.recycle()
         }
@@ -875,6 +871,23 @@ object LayerRenderer {
         if (!useCache && !eff.isRecycled) eff.recycle()
     }
 
+    /**
+     * Draws canvas-sized [layerBitmap] onto [target] (drawn through [canvas]) with [mode] and
+     * [opacity]. Blend modes Android lacks (Linear Light) are computed per pixel.
+     */
+    private fun drawBlended(canvas: Canvas, target: Bitmap, layerBitmap: Bitmap, mode: BlendModeType, opacity: Float, paint: Paint) {
+        if (mode == BlendModeType.LINEAR_LIGHT) {
+            FrequencySeparation.linearLight(target, layerBitmap, opacity)
+            return
+        }
+        paint.alpha = (opacity * 255).toInt().coerceIn(0, 255)
+        applyBlendMode(paint, mode)
+        canvas.drawBitmap(layerBitmap, 0f, 0f, paint)
+    }
+
+    /** Applies [layer]'s adjustments, filter and LUT (its "look") to [input]; returns [input] or a new bitmap. */
+    suspend fun applyLayerLook(input: Bitmap, layer: Layer): Bitmap = applyLook(input, layer, coroutineContext[Job])
+
     private fun applyBlendMode(paint: Paint, mode: BlendModeType) {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
             paint.blendMode = when (mode) {
@@ -895,6 +908,7 @@ object LayerRenderer {
                 BlendModeType.SATURATION -> android.graphics.BlendMode.SATURATION
                 BlendModeType.COLOR -> android.graphics.BlendMode.COLOR
                 BlendModeType.LUMINOSITY -> android.graphics.BlendMode.LUMINOSITY
+                BlendModeType.LINEAR_LIGHT -> android.graphics.BlendMode.SRC_OVER // computed in drawBlended
             }
         } else {
             paint.xfermode = when (mode) {
@@ -909,7 +923,7 @@ object LayerRenderer {
                 BlendModeType.SOFT_LIGHT, BlendModeType.HARD_LIGHT, BlendModeType.DIFFERENCE,
                 BlendModeType.COLOR_DODGE, BlendModeType.COLOR_BURN, BlendModeType.EXCLUSION,
                 BlendModeType.HUE, BlendModeType.SATURATION, BlendModeType.COLOR,
-                BlendModeType.LUMINOSITY -> PorterDuffXfermode(PorterDuff.Mode.SRC_OVER)
+                BlendModeType.LUMINOSITY, BlendModeType.LINEAR_LIGHT -> PorterDuffXfermode(PorterDuff.Mode.SRC_OVER)
             }
         }
     }

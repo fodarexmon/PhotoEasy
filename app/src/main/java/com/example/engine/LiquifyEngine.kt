@@ -44,8 +44,38 @@ class LiquifyEngine(private val source: Bitmap) {
     private val undo = ArrayDeque<Pair<FloatArray, FloatArray>>()
     private val maxUndo = 6
 
+    /**
+     * Face-Aware Liquify field, applied after the brush warp: output pixel p samples the source at
+     * q + f(q) with q = p + d(p). Null when no face slider is used.
+     */
+    private var fx: FloatArray? = null
+    private var fy: FloatArray? = null
+    /** Colour change applied at the source position (x, y in working pixels), e.g. brighter eyes. */
+    var postProcess: ((Float, Float, Int) -> Int)? = null
+
     val canUndo: Boolean get() = undo.isNotEmpty()
-    val hasChanges: Boolean get() = dx.any { it != 0f } || dy.any { it != 0f }
+    val hasChanges: Boolean
+        get() = dx.any { it != 0f } || dy.any { it != 0f } ||
+            (fx?.any { it != 0f } == true) || (fy?.any { it != 0f } == true) || postProcess != null
+
+    /** Sets (or clears, with nulls) the face field; arrays are width x height. Re-renders everything. */
+    fun setFaceField(faceDx: FloatArray?, faceDy: FloatArray?, post: ((Float, Float, Int) -> Int)?): Rect {
+        fx = faceDx?.takeIf { it.size == n }
+        fy = faceDy?.takeIf { it.size == n }
+        postProcess = post
+        return render(Rect(0, 0, width, height))
+    }
+
+    /** Source position (working pixels) shown at output (x, y): brush warp, then face warp. */
+    private fun sourcePos(x: Float, y: Float, bx: Float, by: Float, out: FloatArray, t: FloatArray) {
+        var qx = x + bx; var qy = y + by
+        val ffx = fx; val ffy = fy
+        if (ffx != null && ffy != null) {
+            fieldAt(qx, qy, t, ffx, ffy)
+            qx += t[0]; qy += t[1]
+        }
+        out[0] = qx; out[1] = qy
+    }
 
     /** Call when a stroke starts: the field before it becomes an undo step. */
     fun beginStroke() {
@@ -180,10 +210,20 @@ class LiquifyEngine(private val source: Bitmap) {
 
     /** Re-renders [area] of [output] from the source and the field; returns [area]. */
     fun render(area: Rect): Rect {
+        val q = FloatArray(2)
+        val t = FloatArray(2)
+        val post = postProcess
+        val plain = fx == null && post == null
         for (py in area.top until area.bottom) {
             for (px in area.left until area.right) {
                 val i = py * width + px
-                output[i] = sample(src, width, height, px + dx[i], py + dy[i])
+                if (plain) {
+                    output[i] = sample(src, width, height, px + dx[i], py + dy[i])
+                } else {
+                    sourcePos(px.toFloat(), py.toFloat(), dx[i], dy[i], q, t)
+                    val c = sample(src, width, height, q[0], q[1])
+                    output[i] = if (post != null && (c ushr 24) != 0) post(q[0], q[1], c) else c
+                }
             }
         }
         return area
@@ -202,6 +242,9 @@ class LiquifyEngine(private val source: Bitmap) {
         val out = Bitmap.createBitmap(fw, fh, Bitmap.Config.ARGB_8888)
         val row = IntArray(fw)
         val tmp = FloatArray(2)
+        val q = FloatArray(2)
+        val t2 = FloatArray(2)
+        val post = postProcess
         for (y in 0 until fh) {
             if ((y and 31) == 0) {
                 if (isCancelled()) { out.recycle(); throw CancellationException("Liquify cancelled") }
@@ -211,7 +254,10 @@ class LiquifyEngine(private val source: Bitmap) {
             for (x in 0 until fw) {
                 val wx = (x + 0.5f) * sx - 0.5f
                 fieldAt(wx, wy, tmp)
-                row[x] = sample(fullPx, fw, fh, x + tmp[0] / sx, y + tmp[1] / sy)
+                // Working-space source position (brush + face warp), then back to full resolution.
+                sourcePos(wx, wy, tmp[0], tmp[1], q, t2)
+                val c = sample(fullPx, fw, fh, (q[0] + 0.5f) / sx - 0.5f, (q[1] + 0.5f) / sy - 0.5f)
+                row[x] = if (post != null && (c ushr 24) != 0) post(q[0], q[1], c) else c
             }
             out.setPixels(row, 0, fw, 0, y, fw, 1)
         }

@@ -61,6 +61,8 @@ private sealed class LiquifyEvent {
     class Dab(val x: Float, val y: Float, val vx: Float, val vy: Float) : LiquifyEvent()
     object Undo : LiquifyEvent()
     object RestoreAll : LiquifyEvent()
+    /** Face sliders changed; only the newest one ([seq]) is rendered. */
+    class FaceChanged(val seq: Int, val faces: List<Pair<com.example.engine.FaceGeometry, com.example.engine.FaceAdjust>>) : LiquifyEvent()
 }
 
 private fun liquifyToolIcon(t: LiquifyTool): ImageVector = when (t) {
@@ -102,7 +104,9 @@ private fun LiquifyTool.continuous() = this == LiquifyTool.TWIRL_CW || this == L
 fun LiquifyDialog(
     source: Bitmap,
     onDismiss: () -> Unit,
-    onApply: (LiquifyEngine) -> Unit
+    onApply: (LiquifyEngine) -> Unit,
+    /** Open on the Face-Aware Liquify tab. */
+    startOnFaceTab: Boolean = false
 ) {
     // Working copy small enough for live editing; Apply re-samples the field at full resolution.
     val engine by produceState<LiquifyEngine?>(null, source) {
@@ -131,6 +135,17 @@ fun LiquifyDialog(
     DisposableEffect(Unit) { onDispose { worker.close() } }
     val latestTool by rememberUpdatedState(tool)
     val latestBrush by rememberUpdatedState(brush)
+    // Face-Aware Liquify
+    var faceTab by remember { mutableStateOf(startOnFaceTab) }
+    var faces by remember { mutableStateOf<List<com.example.engine.FaceGeometry>?>(null) }
+    val faceAdjust = remember { mutableStateListOf<com.example.engine.FaceAdjust>() }
+    var selectedFace by remember { mutableIntStateOf(0) }
+    val faceSeq = remember { java.util.concurrent.atomic.AtomicInteger(0) }
+    fun pushFaces() {
+        val list = faces ?: return
+        val seq = faceSeq.incrementAndGet()
+        events.trySend(LiquifyEvent.FaceChanged(seq, list.indices.map { list[it] to faceAdjust.getOrElse(it) { com.example.engine.FaceAdjust() } }))
+    }
 
     // Display bitmaps once the engine is ready.
     LaunchedEffect(engine) {
@@ -138,6 +153,13 @@ fun LiquifyDialog(
         display = Bitmap.createBitmap(e.width, e.height, Bitmap.Config.ARGB_8888).apply { setPixels(e.output, 0, e.width, 0, 0, e.width, e.height) }
         maskOverlay = Bitmap.createBitmap(e.width, e.height, Bitmap.Config.ARGB_8888)
         version++
+        // Find the faces on the untouched image (on-device, may take a moment).
+        val probe = Bitmap.createBitmap(e.width, e.height, Bitmap.Config.ARGB_8888).apply { setPixels(e.output, 0, e.width, 0, 0, e.width, e.height) }
+        val found = try { com.example.engine.FaceWarp.detect(probe) } finally { probe.recycle() }
+        faceAdjust.clear()
+        repeat(found.size) { faceAdjust.add(com.example.engine.FaceAdjust()) }
+        selectedFace = 0
+        faces = found
     }
 
     // Edits run one after another on a worker thread; changed areas are copied to the display.
@@ -150,6 +172,14 @@ fun LiquifyDialog(
                     is LiquifyEvent.Undo -> e.undoStroke()
                     is LiquifyEvent.RestoreAll -> e.restoreAll()
                     is LiquifyEvent.Dab -> e.dab(latestTool, ev.x, ev.y, ev.vx, ev.vy, latestBrush)
+                    is LiquifyEvent.FaceChanged -> {
+                        if (ev.seq != faceSeq.get()) null // a newer slider value is queued
+                        else {
+                            val field = com.example.engine.FaceWarp.field(ev.faces, e.width, e.height) { ev.seq != faceSeq.get() }
+                            if (ev.seq != faceSeq.get()) null
+                            else e.setFaceField(field?.first, field?.second, com.example.engine.FaceWarp.eyeBrightener(ev.faces))
+                        }
+                    }
                 }
             }
             val d = display ?: continue
@@ -235,11 +265,15 @@ fun LiquifyDialog(
                                 val down = awaitFirstDown()
                                 var viewMode = false
                                 var last = down.position
-                                cursor = last
-                                events.trySend(LiquifyEvent.Begin)
-                                val p0 = toImage(last)
-                                events.trySend(LiquifyEvent.Dab(p0.x, p0.y, 0f, 0f))
-                                holding = true
+                                // On the Face tab one finger does nothing (sliders only); two fingers still zoom.
+                                var viewOnly = faceTab
+                                if (!viewOnly) {
+                                    cursor = last
+                                    events.trySend(LiquifyEvent.Begin)
+                                    val p0 = toImage(last)
+                                    events.trySend(LiquifyEvent.Dab(p0.x, p0.y, 0f, 0f))
+                                    holding = true
+                                }
                                 while (true) {
                                     val ev = awaitPointerEvent()
                                     val pressed = ev.changes.filter { it.pressed }
@@ -252,7 +286,7 @@ fun LiquifyDialog(
                                         viewScale = (viewScale * zoom).coerceIn(1f, 12f)
                                         viewOffset += pan
                                         ev.changes.forEach { it.consume() }
-                                    } else if (!viewMode) {
+                                    } else if (!viewMode && !viewOnly) {
                                         val pos = pressed[0].position
                                         val a = toImage(last); val b = toImage(pos)
                                         val dist = (b - a).getDistance()
@@ -304,6 +338,18 @@ fun LiquifyDialog(
                                 }
                             }
                         }
+                        if (faceTab) {
+                            faces?.forEachIndexed { idx, g ->
+                                val sel = idx == selectedFace
+                                val col = if (sel) AmberAccent else Color.White.copy(alpha = 0.5f)
+                                fun sp(p: android.graphics.PointF) = Offset(o.x + p.x * s, o.y + p.y * s)
+                                drawRect(col, Offset(o.x + g.box.left * s, o.y + g.box.top * s),
+                                    androidx.compose.ui.geometry.Size(g.box.width() * s, g.box.height() * s), style = Stroke(if (sel) 2f else 1f))
+                                if (sel) listOf(g.eye1, g.eye2, g.noseBase, g.mouthLeft, g.mouthRight, g.chin, g.forehead).forEach {
+                                    drawCircle(Color.Black.copy(alpha = 0.6f), 5f, sp(it)); drawCircle(col, 3.5f, sp(it))
+                                }
+                            }
+                        }
                         cursor?.let { c ->
                             val r = brush.size / 2f * s
                             drawCircle(Color.White, r, c, style = Stroke(2f))
@@ -315,7 +361,23 @@ fun LiquifyDialog(
                     if (engine == null) CircularProgressIndicator(Modifier.align(Alignment.Center), color = IndigoPrimary)
                 }
 
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(6.dp))
+                TabRow(selectedTabIndex = if (faceTab) 1 else 0, containerColor = StudioSurfaceVariant, contentColor = Color.White) {
+                    Tab(selected = !faceTab, onClick = { faceTab = false }, text = { Text(stringResource(R.string.liq_tab_brush), fontSize = 12.sp) })
+                    Tab(selected = faceTab, onClick = { faceTab = true }, text = { Text(stringResource(R.string.liq_tab_face), fontSize = 12.sp) },
+                        modifier = Modifier.testTag("liq_tab_face"))
+                }
+                Spacer(Modifier.height(6.dp))
+                if (faceTab) {
+                    FaceAwarePanel(
+                        faces = faces,
+                        adjust = faceAdjust,
+                        selected = selectedFace,
+                        onSelect = { selectedFace = it },
+                        onChange = { i, a -> if (i in faceAdjust.indices) { faceAdjust[i] = a; pushFaces() } },
+                        onResetAll = { for (i in faceAdjust.indices) faceAdjust[i] = com.example.engine.FaceAdjust(); pushFaces() }
+                    )
+                } else {
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     LiquifyTool.values().forEach { t ->
                         val sel = t == tool
@@ -349,6 +411,7 @@ fun LiquifyDialog(
                     }
                     Text(stringResource(R.string.liq_hint), color = Color.Gray, fontSize = 11.sp)
                 }
+                }
             }
         }
     }
@@ -359,6 +422,77 @@ private fun LiqSlider(label: Int, value: Float, range: ClosedFloatingPointRange<
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(stringResource(label), color = Color.LightGray, fontSize = 12.sp, modifier = Modifier.width(78.dp))
         Slider(value = value.coerceIn(range.start, range.endInclusive), onValueChange = onValue, valueRange = range, modifier = Modifier.weight(1f))
+        Text("${value.roundToInt()}", color = IndigoPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(36.dp))
+    }
+}
+
+/** Face-Aware Liquify sliders for the selected face (Photoshop's groups: eyes, nose, mouth, face shape). */
+@Composable
+private fun FaceAwarePanel(
+    faces: List<com.example.engine.FaceGeometry>?,
+    adjust: List<com.example.engine.FaceAdjust>,
+    selected: Int,
+    onSelect: (Int) -> Unit,
+    onChange: (Int, com.example.engine.FaceAdjust) -> Unit,
+    onResetAll: () -> Unit
+) {
+    when {
+        faces == null -> Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(8.dp)) {
+            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = IndigoPrimary)
+            Spacer(Modifier.width(10.dp))
+            Text(stringResource(R.string.face_detecting), color = Color.LightGray, fontSize = 12.sp)
+        }
+        faces.isEmpty() -> Text(stringResource(R.string.face_none_found), color = AmberAccent, fontSize = 12.sp, modifier = Modifier.padding(8.dp))
+        else -> {
+            val idx = selected.coerceIn(0, faces.size - 1)
+            val a = adjust.getOrElse(idx) { com.example.engine.FaceAdjust() }
+            fun set(f: com.example.engine.FaceAdjust) = onChange(idx, f)
+            Column(Modifier.heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                    if (faces.size > 1) faces.indices.forEach { i ->
+                        FilterChip(selected = i == idx, onClick = { onSelect(i) }, label = { Text(stringResource(R.string.face_n, i + 1), fontSize = 12.sp) })
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    TextButton(onClick = { set(com.example.engine.FaceAdjust()) }) { Text(stringResource(R.string.face_reset), color = AmberAccent, fontSize = 12.sp) }
+                    if (faces.size > 1) TextButton(onClick = onResetAll) { Text(stringResource(R.string.face_reset_all), color = AmberAccent, fontSize = 12.sp) }
+                }
+                FaceSection(R.string.face_sec_eyes)
+                FaceSlider(R.string.face_eye_size, a.eyeSize) { set(a.copy(eyeSize = it)) }
+                FaceSlider(R.string.face_eye_height, a.eyeHeight) { set(a.copy(eyeHeight = it)) }
+                FaceSlider(R.string.face_eye_width, a.eyeWidth) { set(a.copy(eyeWidth = it)) }
+                FaceSlider(R.string.face_eye_tilt, a.eyeTilt) { set(a.copy(eyeTilt = it)) }
+                FaceSlider(R.string.face_eye_distance, a.eyeDistance) { set(a.copy(eyeDistance = it)) }
+                FaceSlider(R.string.face_eye_brightness, a.eyeBrightness, 0f..100f) { set(a.copy(eyeBrightness = it)) }
+                FaceSection(R.string.face_sec_nose)
+                FaceSlider(R.string.face_nose_height, a.noseHeight) { set(a.copy(noseHeight = it)) }
+                FaceSlider(R.string.face_nose_width, a.noseWidth) { set(a.copy(noseWidth = it)) }
+                FaceSection(R.string.face_sec_mouth)
+                FaceSlider(R.string.face_smile, a.smile) { set(a.copy(smile = it)) }
+                FaceSlider(R.string.face_upper_lip, a.upperLip) { set(a.copy(upperLip = it)) }
+                FaceSlider(R.string.face_lower_lip, a.lowerLip) { set(a.copy(lowerLip = it)) }
+                FaceSlider(R.string.face_mouth_width, a.mouthWidth) { set(a.copy(mouthWidth = it)) }
+                FaceSlider(R.string.face_mouth_height, a.mouthHeight) { set(a.copy(mouthHeight = it)) }
+                FaceSection(R.string.face_sec_shape)
+                FaceSlider(R.string.face_forehead, a.forehead) { set(a.copy(forehead = it)) }
+                FaceSlider(R.string.face_chin_height, a.chinHeight) { set(a.copy(chinHeight = it)) }
+                FaceSlider(R.string.face_jawline, a.jawline) { set(a.copy(jawline = it)) }
+                FaceSlider(R.string.face_face_width, a.faceWidth) { set(a.copy(faceWidth = it)) }
+                FaceSlider(R.string.face_head_size, a.headSize) { set(a.copy(headSize = it)) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FaceSection(label: Int) {
+    Text(stringResource(label), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+}
+
+@Composable
+private fun FaceSlider(label: Int, value: Float, range: ClosedFloatingPointRange<Float> = -100f..100f, onValue: (Float) -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(stringResource(label), color = Color.LightGray, fontSize = 12.sp, modifier = Modifier.width(96.dp))
+        Slider(value = value.coerceIn(range.start, range.endInclusive), onValueChange = { onValue(kotlin.math.round(it)) }, valueRange = range, modifier = Modifier.weight(1f))
         Text("${value.roundToInt()}", color = IndigoPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(36.dp))
     }
 }

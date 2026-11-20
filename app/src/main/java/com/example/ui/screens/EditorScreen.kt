@@ -389,6 +389,8 @@ fun EditorScreen(
     var showTopMenu by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
     var showLiquify by remember { mutableStateOf(false) }
+    var liquifyFaceTab by remember { mutableStateOf(false) }
+    var showFrequencySeparation by remember { mutableStateOf(false) }
     var compareOriginal by remember { mutableStateOf(false) }
     var showGeneralOriginal by remember { mutableStateOf(false) }
     var isSplitCompareActive by remember { mutableStateOf(false) }
@@ -899,7 +901,9 @@ fun EditorScreen(
                                 }
                             }
                             FiltersPanel(
-                                onOpenLiquify = { if (viewModel.canLiquifySelectedLayer()) showLiquify = true },
+                                onOpenLiquify = { if (viewModel.canLiquifySelectedLayer()) { liquifyFaceTab = false; showLiquify = true } },
+                                onOpenFaceLiquify = { if (viewModel.canLiquifySelectedLayer()) { liquifyFaceTab = true; showLiquify = true } },
+                                onOpenFrequencySeparation = { if (viewModel.canLiquifySelectedLayer()) showFrequencySeparation = true },
                                 initialTab = if (activeTool == ActiveTool.EFFECTS) com.example.ui.components.FilterPanelTab.PRO_EFFECTS else com.example.ui.components.FilterPanelTab.PRESETS,
                                 selectedFilter = layer.filter,
                                 filterIntensity = layer.filterIntensity,
@@ -1706,7 +1710,23 @@ fun EditorScreen(
             com.example.ui.components.LiquifyDialog(
                 source = liqSource,
                 onDismiss = { showLiquify = false },
-                onApply = { engine -> showLiquify = false; viewModel.applyLiquify(engine) }
+                onApply = { engine -> showLiquify = false; viewModel.applyLiquify(engine) },
+                startOnFaceTab = liquifyFaceTab
+            )
+        }
+    }
+
+    if (showFrequencySeparation) {
+        val fsLayer = project.layers.getOrNull(selectedLayerIndex)
+        val fsPreview = fsLayer?.bitmap?.takeIf { !it.isRecycled && fsLayer.type == com.example.data.model.LayerType.IMAGE }
+        if (fsPreview == null) {
+            showFrequencySeparation = false
+        } else {
+            com.example.ui.components.FrequencySeparationDialog(
+                preview = fsPreview,
+                docPerPreview = fsLayer.intrinsicDocumentWidth() / fsPreview.width.coerceAtLeast(1),
+                onDismiss = { showFrequencySeparation = false },
+                onCreate = { r -> showFrequencySeparation = false; viewModel.createFrequencySeparation(r) }
             )
         }
     }
