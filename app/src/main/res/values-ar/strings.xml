@@ -930,4 +930,26 @@
     <string name="layer_name_sticker">ملصق</string>
     <string name="status_adding_sticker">جارٍ إضافة الملصق…</string>
     <string name="status_sticker_added">أُضيف الملصق</string>
+    <string name="liq_title">تسييل (Liquify)</string>
+    <string name="liq_open">تسييل (Liquify)…</string>
+    <string name="liq_forward_warp">دفع</string>
+    <string name="liq_reconstruct">استعادة</string>
+    <string name="liq_smooth">تنعيم</string>
+    <string name="liq_twirl_cw">لفّ يمين</string>
+    <string name="liq_twirl_ccw">لفّ يسار</string>
+    <string name="liq_pucker">تقليص</string>
+    <string name="liq_bloat">تضخيم</string>
+    <string name="liq_push_left">دفع جانبي</string>
+    <string name="liq_freeze">تجميد</string>
+    <string name="liq_thaw">إذابة التجميد</string>
+    <string name="liq_size">الحجم</string>
+    <string name="liq_pressure">الضغط</string>
+    <string name="liq_density">الكثافة</string>
+    <string name="liq_rate">السرعة</string>
+    <string name="liq_show_mesh">الشبكة</string>
+    <string name="liq_show_mask">المنطقة المجمدة</string>
+    <string name="liq_restore_all">استعادة الكل</string>
+    <string name="liq_hint">إصبع واحد للأداة وإصبعان للتكبير والتحريك. اترك الإصبع ثابتاً مع اللف أو التقليص أو التضخيم ليستمر التأثير. التجميد يحمي منطقة من التغيير.</string>
+    <string name="status_applying_liquify">جارٍ تطبيق التسييل…</string>
+    <string name="status_liquify_applied">طُبّق التسييل</string>
 </resources>

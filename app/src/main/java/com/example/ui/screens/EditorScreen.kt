@@ -386,6 +386,7 @@ fun EditorScreen(
     var showExportDialog by remember { mutableStateOf(false) }
     var showTopMenu by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
+    var showLiquify by remember { mutableStateOf(false) }
     var compareOriginal by remember { mutableStateOf(false) }
     var showGeneralOriginal by remember { mutableStateOf(false) }
     var isSplitCompareActive by remember { mutableStateOf(false) }
@@ -895,6 +896,7 @@ fun EditorScreen(
                                 }
                             }
                             FiltersPanel(
+                                onOpenLiquify = { if (viewModel.canLiquifySelectedLayer()) showLiquify = true },
                                 initialTab = if (activeTool == ActiveTool.EFFECTS) com.example.ui.components.FilterPanelTab.PRO_EFFECTS else com.example.ui.components.FilterPanelTab.PRESETS,
                                 selectedFilter = layer.filter,
                                 filterIntensity = layer.filterIntensity,
@@ -1666,6 +1668,20 @@ fun EditorScreen(
             onRequestPreview = onRequestRefinePreview,
             documentMaxDim = maxOf(project.width, project.height)
         )
+    }
+
+    if (showLiquify) {
+        val liqLayer = project.layers.getOrNull(selectedLayerIndex)
+        val liqSource = liqLayer?.bitmap?.takeIf { !it.isRecycled && liqLayer.type == com.example.data.model.LayerType.IMAGE }
+        if (liqSource == null) {
+            showLiquify = false
+        } else {
+            com.example.ui.components.LiquifyDialog(
+                source = liqSource,
+                onDismiss = { showLiquify = false },
+                onApply = { engine -> showLiquify = false; viewModel.applyLiquify(engine) }
+            )
+        }
     }
 }
 

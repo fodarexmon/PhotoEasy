@@ -17,6 +17,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.BlurOn
+import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.SelectAll
@@ -110,6 +111,8 @@ fun FiltersPanel(
     onDeleteLut: (String) -> Unit = {},
     /** Tab shown when the panel opens (the Effects tool opens Pro effects directly). */
     initialTab: FilterPanelTab = FilterPanelTab.PRESETS,
+    /** Opens the Liquify workspace (shown in the Pro effects tab). */
+    onOpenLiquify: (() -> Unit)? = null,
     /** Number of projects whose layers use the LUT (deleting it removes their look). */
     onCountLutUsage: suspend (String) -> Int = { 0 },
     onSaveLook: (String) -> Unit = {},
@@ -576,6 +579,17 @@ fun FiltersPanel(
             }
         } else {
             // PRO BLUR & EFFECTS
+            if (onOpenLiquify != null) {
+                OutlinedButton(
+                    onClick = onOpenLiquify,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp).testTag("btn_open_liquify")
+                ) {
+                    Icon(Icons.Default.Gesture, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.liq_open), fontWeight = FontWeight.SemiBold)
+                }
+                Spacer(Modifier.height(8.dp))
+            }
             LazyRow(
                 contentPadding = PaddingValues(horizontal = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)

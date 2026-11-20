@@ -926,4 +926,26 @@
     <string name="layer_name_sticker">Sticker</string>
     <string name="status_adding_sticker">Adding sticker…</string>
     <string name="status_sticker_added">Sticker added</string>
+    <string name="liq_title">Liquify</string>
+    <string name="liq_open">Liquify…</string>
+    <string name="liq_forward_warp">Forward Warp</string>
+    <string name="liq_reconstruct">Reconstruct</string>
+    <string name="liq_smooth">Smooth</string>
+    <string name="liq_twirl_cw">Twirl right</string>
+    <string name="liq_twirl_ccw">Twirl left</string>
+    <string name="liq_pucker">Pucker</string>
+    <string name="liq_bloat">Bloat</string>
+    <string name="liq_push_left">Push Left</string>
+    <string name="liq_freeze">Freeze Mask</string>
+    <string name="liq_thaw">Thaw Mask</string>
+    <string name="liq_size">Size</string>
+    <string name="liq_pressure">Pressure</string>
+    <string name="liq_density">Density</string>
+    <string name="liq_rate">Rate</string>
+    <string name="liq_show_mesh">Mesh</string>
+    <string name="liq_show_mask">Frozen area</string>
+    <string name="liq_restore_all">Restore All</string>
+    <string name="liq_hint">One finger uses the tool, two fingers zoom and move. Hold still with Twirl, Pucker or Bloat to keep going. Freeze protects an area.</string>
+    <string name="status_applying_liquify">Applying Liquify…</string>
+    <string name="status_liquify_applied">Liquify applied</string>
 </resources>

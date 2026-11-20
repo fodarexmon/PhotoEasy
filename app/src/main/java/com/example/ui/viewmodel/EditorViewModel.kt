@@ -4005,6 +4005,72 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         proEffectJob?.cancel()
     }
 
+    /** True when Liquify can work on the selected layer; otherwise explains why in the status. */
+    fun canLiquifySelectedLayer(): Boolean {
+        val layer = _uiState.value.currentProject?.layers?.getOrNull(_uiState.value.selectedLayerIndex) ?: return false
+        val msg = when {
+            layer.isLocked -> R.string.status_layer_locked
+            layer.type != LayerType.IMAGE || layer.bitmap == null -> R.string.effect_needs_image_layer
+            else -> null
+        }
+        if (msg != null) _uiState.value = _uiState.value.copy(statusMessage = tr(msg))
+        return msg == null
+    }
+
+    /**
+     * Applies a Liquify warp to the selected image layer at full resolution (one undo step).
+     * Progress and Cancel use the Pro effect progress bar.
+     */
+    fun applyLiquify(engine: com.example.engine.LiquifyEngine) {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.getOrNull(_uiState.value.selectedLayerIndex) ?: return
+        if (layer.isLocked || layer.type != LayerType.IMAGE) return
+        if (!engine.hasChanges) return
+        if (proEffectJob?.isActive == true) return
+        if (pendingTransactionSnapshot != null) saveHistoryState()
+        proEffectJob = viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isProcessing = true, proEffectProgress = 0f, statusMessage = tr(R.string.status_applying_liquify))
+            val job = currentCoroutineContext()[Job]
+            var src: Bitmap? = null
+            var out: Bitmap? = null
+            var historySaved = false
+            try {
+                src = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Image unavailable")
+                out = withContext(Dispatchers.Default) {
+                    engine.applyFull(src!!, isCancelled = { job?.isCancelled == true }) { f ->
+                        viewModelScope.launch(Dispatchers.Main) {
+                            if (_uiState.value.proEffectProgress != null) _uiState.value = _uiState.value.copy(proEffectProgress = f * 0.95f)
+                        }
+                    }
+                }
+                saveHistoryState()
+                historySaved = true
+                if (!commitDestructiveBitmap(proj, layer, out!!, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "liquify")) {
+                    throw java.io.IOException("Save failed")
+                }
+                commitProjectMutation(
+                    statusMessage = tr(R.string.status_liquify_applied),
+                    transformState = { it.copy(isProcessing = false, proEffectProgress = null) }
+                )
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                if (historySaved) rollbackToLastHistoryState()
+                _uiState.value = _uiState.value.copy(isProcessing = false, proEffectProgress = null, statusMessage = tr(R.string.effect_cancelled))
+                throw e
+            } catch (e: OutOfMemoryError) {
+                if (historySaved) rollbackToLastHistoryState()
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, proEffectProgress = null, statusMessage = tr(R.string.status_processing_failed_memory))
+            } catch (e: Exception) {
+                if (historySaved) rollbackToLastHistoryState()
+                _uiState.value = _uiState.value.copy(isProcessing = false, proEffectProgress = null, statusMessage = tr(R.string.status_effect_failed))
+            } finally {
+                val p = layer.bitmap
+                out?.let { if (it !== p && !it.isRecycled) it.recycle() }
+                src?.let { if (it !== p && !it.isRecycled) it.recycle() }
+            }
+        }
+    }
+
     fun applyProFilter(effect: ProFilterType, params: com.example.engine.ProEffectParams) {
         val proj = _uiState.value.currentProject ?: return
         val idx = _uiState.value.selectedLayerIndex
