@@ -400,14 +400,18 @@ data class Layer(
     }
     /**
      * Snapshot for Undo/Redo history.
-     * Preserves exact layer ID and name, and reuses bitmap reference without extra RAM allocation.
+     * Preserves exact layer ID and name, and shares the bitmap AND mask references without extra
+     * RAM: every edit replaces a layer's bitmap / mask with a new object (masks are copy-on-write,
+     * e.g. a mask stroke paints a private copy made at the start of the stroke), so a snapshot's
+     * pixels never change. Copying a document-sized mask on every step used to cost up to 12 MB
+     * per masked layer per undo step, outside the history memory budget.
      */
     fun snapshotLayer(): Layer {
         return this.copy(
             textConfig = textConfig.copy(),
             adjustments = adjustments.copy(),
             isBitmapDirty = isBitmapDirty,
-            maskBitmap = maskBitmap?.copy(maskBitmap?.config ?: Bitmap.Config.ALPHA_8, true)
+            distort = distort?.copyOf()
         )
     }
 
