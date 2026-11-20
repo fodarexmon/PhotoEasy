@@ -17,6 +17,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.BlurOn
+import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.SelectAll
@@ -108,13 +109,21 @@ fun FiltersPanel(
     onToggleFavorite: (String) -> Unit = {},
     onImportLut: (android.net.Uri) -> Unit = {},
     onDeleteLut: (String) -> Unit = {},
+    /** Tab shown when the panel opens (the Effects tool opens Pro effects directly). */
+    initialTab: FilterPanelTab = FilterPanelTab.PRESETS,
+    /** Opens the Liquify workspace (shown in the Pro effects tab). */
+    onOpenLiquify: (() -> Unit)? = null,
+    /** Opens Liquify on its Face-Aware tab. */
+    onOpenFaceLiquify: (() -> Unit)? = null,
+    /** Opens the frequency separation setup. */
+    onOpenFrequencySeparation: (() -> Unit)? = null,
     /** Number of projects whose layers use the LUT (deleting it removes their look). */
     onCountLutUsage: suspend (String) -> Int = { 0 },
     onSaveLook: (String) -> Unit = {},
     onDeleteCustomPreset: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    var activeTab by remember { mutableStateOf(FilterPanelTab.PRESETS) }
+    var activeTab by remember(initialTab) { mutableStateOf(initialTab) }
     var pendingLutDelete by remember { mutableStateOf<com.example.engine.LutInfo?>(null) }
     // Thumbnails keyed "f:<FilterType>", "lut:<id>" or "preset:<id>".
     var previews by remember { mutableStateOf<Map<String, Bitmap>>(emptyMap()) }
@@ -574,6 +583,30 @@ fun FiltersPanel(
             }
         } else {
             // PRO BLUR & EFFECTS
+            if (onOpenLiquify != null) {
+                OutlinedButton(
+                    onClick = onOpenLiquify,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp).testTag("btn_open_liquify")
+                ) {
+                    Icon(Icons.Default.Gesture, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(R.string.liq_open), fontWeight = FontWeight.SemiBold)
+                }
+                Spacer(Modifier.height(6.dp))
+            }
+            if (onOpenFaceLiquify != null || onOpenFrequencySeparation != null) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (onOpenFaceLiquify != null) OutlinedButton(
+                        onClick = onOpenFaceLiquify,
+                        modifier = Modifier.weight(1f).heightIn(min = 44.dp).testTag("btn_open_face_liquify")
+                    ) { Text(stringResource(R.string.face_open), fontSize = 12.sp, maxLines = 2) }
+                    if (onOpenFrequencySeparation != null) OutlinedButton(
+                        onClick = onOpenFrequencySeparation,
+                        modifier = Modifier.weight(1f).heightIn(min = 44.dp).testTag("btn_open_fs")
+                    ) { Text(stringResource(R.string.fs_open), fontSize = 12.sp, maxLines = 2) }
+                }
+                Spacer(Modifier.height(8.dp))
+            }
             LazyRow(
                 contentPadding = PaddingValues(horizontal = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)

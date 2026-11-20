@@ -84,7 +84,8 @@ fun LayersPanel(
     onMergeDown: () -> Unit,
     onAddImageClick: () -> Unit,
     onAddTextClick: (String) -> Unit,
-    onAddAdjustmentClick: () -> Unit = {},
+    onAddAdjustmentClick: (com.example.data.model.AdjustmentKind) -> Unit = {},
+    onAddEmptyClick: () -> Unit = {},
     onAddLayerMask: ((Boolean) -> Unit)? = null,
     onInvertLayerMask: (() -> Unit)? = null,
     onToggleLayerMaskEnabled: (() -> Unit)? = null,
@@ -117,6 +118,13 @@ fun LayersPanel(
     var renameIndex by remember { mutableStateOf<Int?>(null) }
     val selectedLayer = layers.getOrNull(selectedIndex)
 
+    var showAdjustmentPicker by remember { mutableStateOf(false) }
+    if (showAdjustmentPicker) {
+        AdjustmentKindPickerDialog(
+            onPick = { kind -> showAdjustmentPicker = false; onAddAdjustmentClick(kind) },
+            onDismiss = { showAdjustmentPicker = false }
+        )
+    }
     Column(modifier.fillMaxWidth().fillMaxHeight().background(StudioSurface).padding(12.dp)) {
         Row(
             Modifier.fillMaxWidth(),
@@ -133,6 +141,12 @@ fun LayersPanel(
                 }
                 DropdownMenu(expanded = showAddMenu, onDismissRequest = { showAddMenu = false }) {
                     DropdownMenuItem(
+                        text = { Text(stringResource(R.string.layer_add_empty)) },
+                        leadingIcon = { Icon(Icons.Default.Layers, null) },
+                        onClick = { showAddMenu = false; onAddEmptyClick() },
+                        modifier = Modifier.testTag("menu_add_empty_layer")
+                    )
+                    DropdownMenuItem(
                         text = { Text(stringResource(R.string.layer_add_image)) },
                         leadingIcon = { Icon(Icons.Default.Image, null) },
                         onClick = { showAddMenu = false; onAddImageClick() }
@@ -145,7 +159,7 @@ fun LayersPanel(
                     DropdownMenuItem(
                         text = { Text(stringResource(R.string.layer_add_adjustment)) },
                         leadingIcon = { Icon(Icons.Default.Tune, null) },
-                        onClick = { showAddMenu = false; onAddAdjustmentClick() }
+                        onClick = { showAddMenu = false; showAdjustmentPicker = true }
                     )
                 }
             }

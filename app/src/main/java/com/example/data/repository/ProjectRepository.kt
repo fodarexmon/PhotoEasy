@@ -224,6 +224,10 @@ class ProjectRepository(private val context: Context) {
                         put("filter", layer.filter.name)
                         put("filterIntensity", layer.filterIntensity.toDouble())
                         layer.lutId?.let { put("lutId", it) }
+                        if (layer.type == LayerType.ADJUSTMENT) {
+                            put("adjustmentKind", layer.adjustmentKind.name)
+                            put("adjustmentParams", com.example.engine.AdjustmentLayerEngine.toJson(layer.adjustmentParams))
+                        }
                         layer.exifTags?.takeIf { it.isNotEmpty() }?.let { tags ->
                             put("exifTags", JSONObject().apply { tags.forEach { (k, v) -> put(k, v) } })
                         }
@@ -264,6 +268,9 @@ class ProjectRepository(private val context: Context) {
                             put("gradientEnabled", layer.textConfig.gradientEnabled)
                             put("gradientEndColorHex", layer.textConfig.gradientEndColorHex)
                             put("gradientAngle", layer.textConfig.gradientAngle.toDouble())
+                            put("strokeEnabled", layer.textConfig.strokeEnabled)
+                            put("glowEnabled", layer.textConfig.glowEnabled)
+                            put("shadowEnabled", layer.textConfig.shadowEnabled)
                         }
                         put("textConfig", textObj)
 
@@ -560,6 +567,7 @@ class ProjectRepository(private val context: Context) {
                 colorHex = 0xFFFFFFFF.toInt(),
                 strokeColorHex = 0xFF6366F1.toInt(),
                 strokeWidthDp = 2f,
+                strokeEnabled = true,
                 alignment = TextAlignment.CENTER
             ),
             positionY = 280f
@@ -879,7 +887,11 @@ class ProjectRepository(private val context: Context) {
                         backgroundCorner = textObj.optDouble("backgroundCorner", 12.0).toFloat(),
                         gradientEnabled = textObj.optBoolean("gradientEnabled", false),
                         gradientEndColorHex = textObj.optInt("gradientEndColorHex", 0xFF06B6D4.toInt()),
-                        gradientAngle = textObj.optDouble("gradientAngle", 90.0).toFloat()
+                        gradientAngle = textObj.optDouble("gradientAngle", 90.0).toFloat(),
+                        // Older projects had no switches: an effect was on when its size was above 0.
+                        strokeEnabled = textObj.optBoolean("strokeEnabled", textObj.optDouble("strokeWidthDp", 0.0) > 0.0),
+                        glowEnabled = textObj.optBoolean("glowEnabled", textObj.optDouble("outerGlowRadiusDp", 0.0) > 0.0),
+                        shadowEnabled = textObj.optBoolean("shadowEnabled", textObj.optDouble("shadowRadiusDp", 0.0) > 0.0)
                     )
                 } else TextLayerConfig()
 
@@ -909,6 +921,8 @@ class ProjectRepository(private val context: Context) {
                     filter = safeValueOf(layerObj.optString("filter", ""), FilterType.NONE),
                     filterIntensity = layerObj.optDouble("filterIntensity", 1.0).toFloat().coerceIn(0f, 1f),
                     lutId = layerObj.optString("lutId", "").ifBlank { null },
+                    adjustmentKind = safeValueOf(layerObj.optString("adjustmentKind", ""), com.example.data.model.AdjustmentKind.GENERAL),
+                    adjustmentParams = com.example.engine.AdjustmentLayerEngine.fromJson(layerObj.optJSONObject("adjustmentParams")),
                     exifTags = layerObj.optJSONObject("exifTags")?.let { o ->
                         o.keys().asSequence().associateWith { k -> o.optString(k) }.ifEmpty { null }
                     },

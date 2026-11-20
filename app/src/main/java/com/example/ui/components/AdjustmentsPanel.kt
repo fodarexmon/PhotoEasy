@@ -50,6 +50,8 @@ enum class AdjustmentsTab(val labelRes: Int) {
 @Composable
 fun AdjustmentsPanel(
     adjustments: ColorAdjustments,
+    /** Tab shown first (a Curves or Hue/Saturation adjustment layer opens on its own tab). */
+    initialTab: AdjustmentsTab = AdjustmentsTab.BASIC,
     onAdjustmentsChange: (ColorAdjustments) -> Unit,
     onAdjustmentsCommit: () -> Unit,
     onSmartAutoClick: () -> Unit,
@@ -75,7 +77,7 @@ fun AdjustmentsPanel(
     onReplacePickChange: (Pair<Int, Boolean>?) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    var activeTab by remember { mutableStateOf(AdjustmentsTab.BASIC) }
+    var activeTab by remember(initialTab) { mutableStateOf(initialTab) }
     // Picking on the image only makes sense while the curves are shown.
     LaunchedEffect(activeTab) {
         if (activeTab != AdjustmentsTab.CURVES) onCurvePickModeChange(null)

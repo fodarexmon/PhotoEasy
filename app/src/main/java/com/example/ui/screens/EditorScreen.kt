@@ -4,6 +4,9 @@ import android.content.ClipData
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.PointF
+import androidx.compose.material.icons.filled.BlurOn
+import androidx.compose.material.icons.filled.EmojiEmotions
+import androidx.compose.material.icons.filled.Healing
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarResult
@@ -142,7 +145,7 @@ fun EditorScreen(
     val activeSelectionTool = uiState.activeSelectionTool
     val inpaintSelectionMode = uiState.inpaintSelectionMode
     val selectionMask = uiState.selectionMask
-    val brushSizeDp = uiState.brushSizeDp
+    val brushSizeDp = if (uiState.activeTool == ActiveTool.RETOUCH) uiState.retouchSizeDp else uiState.brushSizeDp
     val magicWandTolerance = uiState.magicWandTolerance
     val isMagicWandContiguous = uiState.isMagicWandContiguous
     val wandOptions = uiState.wandOptions
@@ -192,7 +195,7 @@ fun EditorScreen(
     val onMergeDown: () -> Unit = { viewModel.mergeSelectedLayerDown() }
     val onAddImageUri: (Uri) -> Unit = { uri -> viewModel.addImageFromUri(uri) }
     val onAddText: (String) -> Unit = { text -> viewModel.addTextLayer(text) }
-    val onAddAdjustmentLayer: () -> Unit = { viewModel.addAdjustmentLayer() }
+    val onAddAdjustmentLayer: (com.example.data.model.AdjustmentKind) -> Unit = { kind -> viewModel.addAdjustmentLayer(kind) }
     val onSmartAutoClick: () -> Unit = { viewModel.applySmartAutoCorrection() }
     val onObjectRemovalClick: () -> Unit = { viewModel.applyObjectRemoval() }
     val onInpaintSelectionModeChange: (com.example.ui.viewmodel.InpaintSelectionMode) -> Unit = { viewModel.setInpaintSelectionMode(it) }
@@ -251,6 +254,7 @@ fun EditorScreen(
     val onStrokeSegment: ((List<PointF>, Float, com.example.ui.viewmodel.StrokePhase) -> Unit) = { points, radius, phase ->
         val activeLayer = project.layers.getOrNull(uiState.selectedLayerIndex)
         when {
+            uiState.activeTool == ActiveTool.RETOUCH -> viewModel.retouchSegment(points, radius, phase)
             uiState.activeTool == ActiveTool.OBJECT_REMOVAL && uiState.isInpaintProtectMode ->
                 viewModel.paintProtectSegment(points, radius, phase)
             uiState.activeTool == ActiveTool.LAYERS && activeLayer?.isEditingMask == true ->
@@ -384,6 +388,9 @@ fun EditorScreen(
     var showExportDialog by remember { mutableStateOf(false) }
     var showTopMenu by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
+    var showLiquify by remember { mutableStateOf(false) }
+    var liquifyFaceTab by remember { mutableStateOf(false) }
+    var showFrequencySeparation by remember { mutableStateOf(false) }
     var compareOriginal by remember { mutableStateOf(false) }
     var showGeneralOriginal by remember { mutableStateOf(false) }
     var isSplitCompareActive by remember { mutableStateOf(false) }
@@ -397,7 +404,7 @@ fun EditorScreen(
     }
 
     LaunchedEffect(activeTool) {
-        if (activeTool != ActiveTool.ADJUST && activeTool != ActiveTool.FILTERS) compareOriginal = false
+        if (activeTool != ActiveTool.ADJUST && activeTool != ActiveTool.FILTERS && activeTool != ActiveTool.EFFECTS) compareOriginal = false
     }
 
     // Curves: tapping the image adds a point / sets black, grey or white points.
@@ -450,13 +457,13 @@ fun EditorScreen(
     // normalised to the layer image so preview and full-resolution apply agree.
     var proCenter by remember { mutableStateOf(0.5f to 0.5f) }
     var proCenterPick by remember { mutableStateOf(false) }
-    LaunchedEffect(activeTool, selectedLayerIndex) { if (activeTool != ActiveTool.FILTERS) proCenterPick = false; proCenter = 0.5f to 0.5f }
+    LaunchedEffect(activeTool, selectedLayerIndex) { if (activeTool != ActiveTool.FILTERS && activeTool != ActiveTool.EFFECTS) proCenterPick = false; proCenter = 0.5f to 0.5f }
 
     // Replace colour: eyedropper for (replacement index, source?).
     var replacePick by remember { mutableStateOf<Pair<Int, Boolean>?>(null) }
     LaunchedEffect(activeTool) { if (activeTool != ActiveTool.ADJUST) { curvePickMode = null; curveSample = null; replacePick = null } }
     val canvasSampler: ((Float, Float) -> Unit)? = when {
-        activeTool == ActiveTool.FILTERS && proCenterPick -> { x, y ->
+        (activeTool == ActiveTool.FILTERS || activeTool == ActiveTool.EFFECTS) && proCenterPick -> { x, y ->
             val l = project.layers.getOrNull(selectedLayerIndex)
             val bmp = l?.bitmap
             if (l != null && bmp != null && !bmp.isRecycled) {
@@ -468,6 +475,7 @@ fun EditorScreen(
                 }
             }
         }
+        activeTool == ActiveTool.RETOUCH && uiState.isCloneSourcePicking -> { x, y -> viewModel.setCloneSource(x, y) }
         activeTool == ActiveTool.ADJUST && replacePick != null -> { x, y ->
             val target = replacePick
             val color = onSampleReplaceColor?.invoke(x, y)
@@ -523,7 +531,7 @@ fun EditorScreen(
             return@BackHandler
         }
         when (activeTool) {
-            ActiveTool.FILTERS -> {
+            ActiveTool.FILTERS, ActiveTool.EFFECTS -> {
                 // Filter browsing is a transient preview. Back means Cancel, never Apply.
                 onCancelHistoryState()
                 onToolSelect(ActiveTool.NONE)
@@ -798,8 +806,33 @@ fun EditorScreen(
                 when (activeTool) {
                     ActiveTool.ADJUST -> {
                         val hasSel = hasActiveSelectionCached
-                        selectedLayer?.let { layer ->
+                        val adjKind = selectedLayer?.takeIf { it.type == com.example.data.model.LayerType.ADJUSTMENT }?.adjustmentKind
+                        if (selectedLayer != null && adjKind != null && adjKind != com.example.data.model.AdjustmentKind.GENERAL &&
+                            adjKind != com.example.data.model.AdjustmentKind.CURVES && adjKind != com.example.data.model.AdjustmentKind.HUE_SATURATION
+                        ) {
+                            // Photoshop-style adjustment layer: only this kind's own controls.
+                            com.example.ui.components.AdjustmentLayerPanel(
+                                kind = adjKind,
+                                adjustments = selectedLayer.adjustments,
+                                params = selectedLayer.adjustmentParams,
+                                onChange = { a, p -> onUpdateLayerTransient { l -> l.adjustments = a; l.adjustmentParams = p } },
+                                onCommit = onCommitHistoryState,
+                                onReset = {
+                                    onUpdateLayerTransient { l ->
+                                        l.adjustments = ColorAdjustments()
+                                        l.adjustmentParams = com.example.data.model.AdjustmentLayerParams()
+                                    }
+                                    onCommitHistoryState()
+                                },
+                                onCompareChange = { compareOriginal = it }
+                            )
+                        } else selectedLayer?.let { layer ->
                             AdjustmentsPanel(
+                                initialTab = when (adjKind) {
+                                    com.example.data.model.AdjustmentKind.CURVES -> com.example.ui.components.AdjustmentsTab.CURVES
+                                    com.example.data.model.AdjustmentKind.HUE_SATURATION -> com.example.ui.components.AdjustmentsTab.HSL
+                                    else -> com.example.ui.components.AdjustmentsTab.BASIC
+                                },
                                 adjustments = layer.adjustments,
                                 onAdjustmentsChange = { newAdj ->
                                     onUpdateLayerTransient { l -> l.adjustments = newAdj }
@@ -830,7 +863,7 @@ fun EditorScreen(
                         }
                     }
 
-                    ActiveTool.FILTERS -> {
+                    ActiveTool.FILTERS, ActiveTool.EFFECTS -> {
                         val hasSel = hasActiveSelectionCached
                         selectedLayer?.let { layer ->
                             // Same size the ViewModel decodes for destructive effects (authoritative source),
@@ -868,6 +901,10 @@ fun EditorScreen(
                                 }
                             }
                             FiltersPanel(
+                                onOpenLiquify = { if (viewModel.canLiquifySelectedLayer()) { liquifyFaceTab = false; showLiquify = true } },
+                                onOpenFaceLiquify = { if (viewModel.canLiquifySelectedLayer()) { liquifyFaceTab = true; showLiquify = true } },
+                                onOpenFrequencySeparation = { if (viewModel.canLiquifySelectedLayer()) showFrequencySeparation = true },
+                                initialTab = if (activeTool == ActiveTool.EFFECTS) com.example.ui.components.FilterPanelTab.PRO_EFFECTS else com.example.ui.components.FilterPanelTab.PRESETS,
                                 selectedFilter = layer.filter,
                                 filterIntensity = layer.filterIntensity,
                                 sourceBitmap = previewSource,
@@ -918,6 +955,31 @@ fun EditorScreen(
                                 isImageLayer = layer.type == com.example.data.model.LayerType.IMAGE
                             )
                         }
+                    }
+
+                    ActiveTool.RETOUCH -> {
+                        com.example.ui.components.RetouchPanel(
+                            tool = uiState.retouchTool,
+                            sizeDp = uiState.retouchSizeDp,
+                            brush = uiState.retouchBrush,
+                            hasCloneSource = uiState.cloneSourceDoc != null,
+                            isPickingSource = uiState.isCloneSourcePicking,
+                            hasSelection = hasActiveSelectionCached,
+                            onToolChange = { viewModel.setRetouchTool(it) },
+                            onSizeChange = { viewModel.setRetouchSize(it) },
+                            onBrushChange = { viewModel.setRetouchBrush(it) },
+                            onPickSourceChange = { viewModel.setCloneSourcePicking(it) },
+                            onSelectArea = {
+                                viewModel.setSelectionTool(SelectionToolType.LASSO)
+                                onToolSelect(ActiveTool.SELECTION)
+                            }
+                        )
+                    }
+
+                    ActiveTool.STICKERS -> {
+                        com.example.ui.components.StickersPanel(
+                            onAddSticker = { def, style -> viewModel.addStickerLayer(def, style) }
+                        )
                     }
 
                     ActiveTool.CROP_PERSPECTIVE -> {
@@ -1095,6 +1157,7 @@ fun EditorScreen(
                             onAddImageClick = { launchPhotoPicker() },
                             onAddTextClick = onAddText,
                             onAddAdjustmentClick = onAddAdjustmentLayer,
+                            onAddEmptyClick = { viewModel.addEmptyLayer() },
                             onAddLayerMask = onAddLayerMask,
                             onInvertLayerMask = onInvertLayerMask,
                             onToggleLayerMaskEnabled = onToggleLayerMaskEnabled,
@@ -1211,12 +1274,15 @@ fun EditorScreen(
                 val tools = listOf(
                     Triple(stringResource(R.string.tool_adjust), Icons.Default.Tune, ActiveTool.ADJUST to "tool_btn_adjust"),
                     Triple(stringResource(R.string.tool_filters), Icons.Default.AutoFixHigh, ActiveTool.FILTERS to "tool_btn_filters"),
+                    Triple(stringResource(R.string.tool_effects), Icons.Default.BlurOn, ActiveTool.EFFECTS to "tool_btn_effects"),
                     Triple(stringResource(R.string.tool_transform), Icons.Default.Transform, ActiveTool.TRANSFORM to "tool_btn_transform"),
                     Triple(stringResource(R.string.tool_crop), Icons.Default.Crop, ActiveTool.CROP_PERSPECTIVE to "tool_btn_crop"),
                     Triple(stringResource(R.string.tool_select), Icons.Default.SelectAll, ActiveTool.SELECTION to "tool_btn_selection"),
                     Triple(stringResource(R.string.tool_layers), Icons.Default.Layers, ActiveTool.LAYERS to "tool_btn_layers"),
                     Triple(stringResource(R.string.tool_text), Icons.Default.TextFields, ActiveTool.TEXT to "tool_btn_text"),
-                    Triple(stringResource(R.string.tool_inpaint), Icons.Default.CleaningServices, ActiveTool.OBJECT_REMOVAL to "tool_btn_inpaint")
+                    Triple(stringResource(R.string.tool_stickers), Icons.Default.EmojiEmotions, ActiveTool.STICKERS to "tool_btn_stickers"),
+                    Triple(stringResource(R.string.tool_inpaint), Icons.Default.CleaningServices, ActiveTool.OBJECT_REMOVAL to "tool_btn_inpaint"),
+                    Triple(stringResource(R.string.tool_retouch), Icons.Default.Healing, ActiveTool.RETOUCH to "tool_btn_retouch")
                 )
 
                 if (isVertical) {
@@ -1329,6 +1395,8 @@ fun EditorScreen(
                             showMaskRubyOverlay = showMaskRubyOverlay,
                             maskBrushSizeDp = maskBrushSizeDp,
                             onStrokeSegment = onStrokeSegment,
+                            retouchTool = if (activeTool == ActiveTool.RETOUCH) uiState.retouchTool else null,
+                            retouchMarkerDoc = uiState.retouchMarkerDoc,
                             selectionRevision = selectionRevision,
                             isMagneticSnap = isMagneticSnap,
                             magicWandTolerance = magicWandTolerance,
@@ -1450,6 +1518,8 @@ fun EditorScreen(
                             showMaskRubyOverlay = showMaskRubyOverlay,
                             maskBrushSizeDp = maskBrushSizeDp,
                             onStrokeSegment = onStrokeSegment,
+                            retouchTool = if (activeTool == ActiveTool.RETOUCH) uiState.retouchTool else null,
+                            retouchMarkerDoc = uiState.retouchMarkerDoc,
                             selectionRevision = selectionRevision,
                             isMagneticSnap = isMagneticSnap,
                             magicWandTolerance = magicWandTolerance,
@@ -1629,6 +1699,36 @@ fun EditorScreen(
             onRequestPreview = onRequestRefinePreview,
             documentMaxDim = maxOf(project.width, project.height)
         )
+    }
+
+    if (showLiquify) {
+        val liqLayer = project.layers.getOrNull(selectedLayerIndex)
+        val liqSource = liqLayer?.bitmap?.takeIf { !it.isRecycled && liqLayer.type == com.example.data.model.LayerType.IMAGE }
+        if (liqSource == null) {
+            showLiquify = false
+        } else {
+            com.example.ui.components.LiquifyDialog(
+                source = liqSource,
+                onDismiss = { showLiquify = false },
+                onApply = { engine -> showLiquify = false; viewModel.applyLiquify(engine) },
+                startOnFaceTab = liquifyFaceTab
+            )
+        }
+    }
+
+    if (showFrequencySeparation) {
+        val fsLayer = project.layers.getOrNull(selectedLayerIndex)
+        val fsPreview = fsLayer?.bitmap?.takeIf { !it.isRecycled && fsLayer.type == com.example.data.model.LayerType.IMAGE }
+        if (fsPreview == null) {
+            showFrequencySeparation = false
+        } else {
+            com.example.ui.components.FrequencySeparationDialog(
+                preview = fsPreview,
+                docPerPreview = fsLayer.intrinsicDocumentWidth() / fsPreview.width.coerceAtLeast(1),
+                onDismiss = { showFrequencySeparation = false },
+                onCreate = { r -> showFrequencySeparation = false; viewModel.createFrequencySeparation(r) }
+            )
+        }
     }
 }
 
