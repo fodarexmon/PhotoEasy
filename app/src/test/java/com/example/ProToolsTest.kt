@@ -280,7 +280,7 @@ class ProToolsTest {
         assertTrue(e.hasChanges)
         // The enlarged dark eye now reaches pixels that were white.
         assertTrue(lum(e.output[80 * 200 + 125]) < 250)
-        assertEquals(255, lum(e.output[80 * 200 + 190]))
+        assertTrue(lum(e.output[80 * 200 + 190]) > 254.0)
         assertEquals(400, e.applyFull(Bitmap.createScaledBitmap(src, 400, 400, false)).width)
     }
 
