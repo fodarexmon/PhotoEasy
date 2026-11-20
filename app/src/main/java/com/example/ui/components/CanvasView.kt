@@ -202,6 +202,8 @@ fun CanvasView(
     modifier: Modifier = Modifier,
     showSelectedLayerOriginal: Boolean = false,
     showGeneralOriginal: Boolean = false,
+    /** Pre-retouch pixels per layer id: the Before view shows them instead of the retouched layer. */
+    compareBefore: Map<String, com.example.data.model.LayerBefore> = emptyMap(),
     isSplitCompareActive: Boolean = false,
     splitComparePosition: Float = 0.5f,
     onSplitComparePositionChange: ((Float) -> Unit)? = null,
@@ -536,7 +538,18 @@ fun CanvasView(
 
     // Render composite layer stack asynchronously on Dispatchers.Default (Proxy Preview)
     // Conflates rapid slider movements and provides cooperative cancellation checks
-    LaunchedEffect(project.id, project.width, project.height, renderRevision, previewMaxDimension, showSelectedLayerOriginal, showGeneralOriginal, isSplitCompareActive, selectedLayerIndex, selectionMask, proEffectPreview) {
+    /** The "before" of Before/After: no filters or adjustments, no stickers, no retouching. */
+    fun asBefore(snapshot: com.example.data.model.Layer) {
+        snapshot.filter = com.example.data.model.FilterType.NONE
+        snapshot.lutId = null
+        snapshot.adjustments = com.example.data.model.ColorAdjustments(); snapshot.adjustmentKind = com.example.data.model.AdjustmentKind.GENERAL
+        if (snapshot.isSticker) snapshot.isVisible = false
+        compareBefore[snapshot.id]?.let { b ->
+            if (!b.bitmap.isRecycled && b.contentWidth == snapshot.contentWidth && b.contentHeight == snapshot.contentHeight) snapshot.bitmap = b.bitmap
+        }
+    }
+
+    LaunchedEffect(project.id, project.width, project.height, renderRevision, previewMaxDimension, showSelectedLayerOriginal, showGeneralOriginal, isSplitCompareActive, selectedLayerIndex, selectionMask, proEffectPreview, compareBefore) {
         val gen = renderGeneration.incrementAndGet()
 
         // 1. Conflate/Debounce rapid slider micro-updates (~16ms = 1 frame window)
@@ -548,9 +561,7 @@ fun CanvasView(
         val layersSnapshot = project.layers.mapIndexed { index, layer ->
             layer.previewSnapshot().also { snapshot ->
                 if (showGeneralOriginal) {
-                    snapshot.filter = com.example.data.model.FilterType.NONE
-                    snapshot.lutId = null
-                    snapshot.adjustments = com.example.data.model.ColorAdjustments(); snapshot.adjustmentKind = com.example.data.model.AdjustmentKind.GENERAL
+                    asBefore(snapshot)
                 } else if (showSelectedLayerOriginal && index == selectedLayerIndex) {
                     snapshot.filter = com.example.data.model.FilterType.NONE
                     snapshot.lutId = null
@@ -609,13 +620,7 @@ fun CanvasView(
 
             // If split comparison is active, also render the unadjusted original image
             if (isSplitCompareActive) {
-                val originalLayersSnapshot = project.layers.map { layer ->
-                    layer.previewSnapshot().also { snapshot ->
-                        snapshot.filter = com.example.data.model.FilterType.NONE
-                        snapshot.lutId = null
-                        snapshot.adjustments = com.example.data.model.ColorAdjustments(); snapshot.adjustmentKind = com.example.data.model.AdjustmentKind.GENERAL
-                    }
-                }
+                val originalLayersSnapshot = project.layers.map { layer -> layer.previewSnapshot().also { asBefore(it) } }
                 val origRendered = withContext(Dispatchers.Default) {
                     LayerRenderer.renderCompositeCanvas(
                         context = context,

@@ -323,6 +323,7 @@ class ProjectRepository(private val context: Context) {
                         put("maskFeather", layer.maskFeather.toDouble())
                         put("isMaskLinked", layer.isMaskLinked)
                         put("isClipped", layer.isClipped)
+                        put("isSticker", layer.isSticker)
                         layer.maskAnchor?.let { a ->
                             put("maskAnchor", JSONObject().apply {
                                 put("x", a.x.toDouble()); put("y", a.y.toDouble())
@@ -936,6 +937,7 @@ class ProjectRepository(private val context: Context) {
                     contentHeight = layerObj.optDouble("contentHeight", layerBmp?.height?.toDouble() ?: 0.0).toFloat(),
                     isMaskLinked = layerObj.optBoolean("isMaskLinked", true),
                     isClipped = layerObj.optBoolean("isClipped", false),
+                    isSticker = layerObj.optBoolean("isSticker", false),
                     skewX = layerObj.optDouble("skewX", 0.0).toFloat(),
                     skewY = layerObj.optDouble("skewY", 0.0).toFloat(),
                     distort = layerObj.optJSONArray("distort")?.takeIf { it.length() == 8 }?.let { a ->

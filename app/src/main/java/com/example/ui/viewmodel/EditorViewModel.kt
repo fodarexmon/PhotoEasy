@@ -197,7 +197,9 @@ data class EditorUiState(
     val cloneSourceDoc: PointF? = null,
     val isCloneSourcePicking: Boolean = false,
     /** Where the Clone Stamp is currently sampling (shown as a cross-hair on the canvas). */
-    val retouchMarkerDoc: PointF? = null
+    val retouchMarkerDoc: PointF? = null,
+    /** Pre-retouch pixels per layer id, for the Before view of Before/After. */
+    val compareBefore: Map<String, com.example.data.model.LayerBefore> = emptyMap()
 )
 
 data class EditableShape(
@@ -586,6 +588,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         retouchSession = null
         retouchPending = 0
         retouchStepOpen = false
+        _uiState.value = _uiState.value.copy(compareBefore = emptyMap())
         cloneOffsetDoc = null
         pendingTransactionSnapshot = null
         pendingTransactionWasDirty = false
@@ -706,6 +709,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         retouchSession = null
         retouchPending = 0
         retouchStepOpen = false
+        _uiState.value = _uiState.value.copy(compareBefore = emptyMap())
         cloneOffsetDoc = null
         undoStack.clear()
         redoStack.clear()
@@ -1424,7 +1428,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 val layer = Layer(
                     id = java.util.UUID.randomUUID().toString(),
                     name = uniqueLayerName(tr(R.string.layer_name_sticker), proj),
-                    type = LayerType.IMAGE
+                    type = LayerType.IMAGE,
+                    isSticker = true
                 )
                 if (!commitDestructiveBitmap(proj, layer, a, a.width * fit, a.height * fit, "sticker")) {
                     throw java.io.IOException("Save failed")
@@ -4198,6 +4203,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private fun beginRetouchStep(layer: Layer): Bitmap? {
         val old = layer.bitmap?.takeIf { !it.isRecycled } ?: return null
         if (pendingTransactionSnapshot != null) saveHistoryState()
+        rememberBeforeRetouch(layer, old)
         saveHistoryState()
         val preview = try { old.copy(Bitmap.Config.ARGB_8888, true) } catch (e: OutOfMemoryError) { null } ?: run {
             rollbackToLastHistoryState(); return null
@@ -4206,6 +4212,17 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         retouchStepOpen = true
         retouchStrokeFailed = false
         return preview
+    }
+
+    /** Keeps the layer's pixels from before its first retouch, for Before/After. */
+    private fun rememberBeforeRetouch(layer: Layer, current: Bitmap) {
+        val known = _uiState.value.compareBefore[layer.id]
+        if (known != null && !known.bitmap.isRecycled &&
+            known.contentWidth == layer.contentWidth && known.contentHeight == layer.contentHeight) return
+        val copy = try { current.copy(Bitmap.Config.ARGB_8888, false) } catch (e: OutOfMemoryError) { null } ?: return
+        _uiState.value = _uiState.value.copy(
+            compareBefore = _uiState.value.compareBefore + (layer.id to com.example.data.model.LayerBefore(copy, layer.contentWidth, layer.contentHeight))
+        )
     }
 
     private fun onRetouchFailed(@StringRes msg: Int) {
