@@ -108,13 +108,15 @@ fun FiltersPanel(
     onToggleFavorite: (String) -> Unit = {},
     onImportLut: (android.net.Uri) -> Unit = {},
     onDeleteLut: (String) -> Unit = {},
+    /** Tab shown when the panel opens (the Effects tool opens Pro effects directly). */
+    initialTab: FilterPanelTab = FilterPanelTab.PRESETS,
     /** Number of projects whose layers use the LUT (deleting it removes their look). */
     onCountLutUsage: suspend (String) -> Int = { 0 },
     onSaveLook: (String) -> Unit = {},
     onDeleteCustomPreset: (String) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    var activeTab by remember { mutableStateOf(FilterPanelTab.PRESETS) }
+    var activeTab by remember(initialTab) { mutableStateOf(initialTab) }
     var pendingLutDelete by remember { mutableStateOf<com.example.engine.LutInfo?>(null) }
     // Thumbnails keyed "f:<FilterType>", "lut:<id>" or "preset:<id>".
     var previews by remember { mutableStateOf<Map<String, Bitmap>>(emptyMap()) }

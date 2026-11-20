@@ -675,7 +675,7 @@ object LayerRenderer {
 
         private fun layoutWith(paint: TextPaint): StaticLayout = LayerRenderer.buildTextLayout(cfg, paint, layoutWidth.toInt())
 
-        val strokePx: Float get() = cfg.strokeWidthDp * 3f * unit
+        val strokePx: Float get() = cfg.effectiveStrokeDp * 3f * unit
         val paddingPx: Float get() = if (cfg.backgroundEnabled) cfg.backgroundPadding * unit else 0f
 
         fun draw(canvas: Canvas) {
@@ -688,7 +688,7 @@ object LayerRenderer {
             }
 
             // Outer glow: only the blurred halo outside the glyphs (no tinted copy of the text).
-            if (cfg.outerGlowRadiusDp > 0f && cfg.glowOpacity > 0f) {
+            if (cfg.glowEnabled && cfg.outerGlowRadiusDp > 0f && cfg.glowOpacity > 0f) {
                 val glowPaint = TextPaint(basePaint).apply {
                     shader = null
                     color = withOpacity(cfg.outerGlowColorHex, cfg.glowOpacity)
@@ -705,7 +705,8 @@ object LayerRenderer {
             }
 
             // Drop shadow: the text shape (with its outline) blurred and offset, drawn only once.
-            if (cfg.shadowRadiusDp > 0f && cfg.shadowOpacity > 0f) {
+            // Size 0 is a hard shadow, as in Photoshop.
+            if (cfg.shadowEnabled && cfg.shadowOpacity > 0f) {
                 val blur = cfg.shadowRadiusDp * 2f * unit
                 val shadowPaint = TextPaint(basePaint).apply {
                     shader = null
@@ -795,7 +796,7 @@ object LayerRenderer {
      */
     private fun textLayoutWidth(cfg: TextLayerConfig, paint: TextPaint, docWidth: Float): Int {
         val maxWidth = (docWidth * (cfg.maxLineWidthPercent.coerceIn(10f, 100f) / 100f)).coerceAtLeast(1f)
-        val extra = cfg.strokeWidthDp * 3f * textUnit(docWidth) + (if (cfg.isItalic) paint.textSize * 0.25f else 0f) + 2f
+        val extra = cfg.effectiveStrokeDp * 3f * textUnit(docWidth) + (if (cfg.isItalic) paint.textSize * 0.25f else 0f) + 2f
         val desired = StaticLayout.getDesiredWidth(cfg.text, paint) + extra
         return kotlin.math.ceil(minOf(maxWidth, desired)).toInt().coerceAtLeast(1)
     }

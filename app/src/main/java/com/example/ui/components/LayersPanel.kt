@@ -85,6 +85,7 @@ fun LayersPanel(
     onAddImageClick: () -> Unit,
     onAddTextClick: (String) -> Unit,
     onAddAdjustmentClick: () -> Unit = {},
+    onAddEmptyClick: () -> Unit = {},
     onAddLayerMask: ((Boolean) -> Unit)? = null,
     onInvertLayerMask: (() -> Unit)? = null,
     onToggleLayerMaskEnabled: (() -> Unit)? = null,
@@ -132,6 +133,12 @@ fun LayersPanel(
                     Icon(Icons.Default.Add, contentDescription = stringResource(R.string.cd_add_layer), tint = IndigoPrimary)
                 }
                 DropdownMenu(expanded = showAddMenu, onDismissRequest = { showAddMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.layer_add_empty)) },
+                        leadingIcon = { Icon(Icons.Default.Layers, null) },
+                        onClick = { showAddMenu = false; onAddEmptyClick() },
+                        modifier = Modifier.testTag("menu_add_empty_layer")
+                    )
                     DropdownMenuItem(
                         text = { Text(stringResource(R.string.layer_add_image)) },
                         leadingIcon = { Icon(Icons.Default.Image, null) },

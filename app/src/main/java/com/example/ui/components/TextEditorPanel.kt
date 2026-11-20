@@ -285,10 +285,13 @@ fun TextEditorPanel(
 
         SectionDivider()
 
-        // Outline
-        LabeledSlider(stringResource(R.string.text_stroke_width), config.strokeWidthDp.roundToInt().toString(), config.strokeWidthDp, 0f..20f,
-            { change(config.copy(strokeWidthDp = it)) }, onConfigCommit, bold = true)
-        if (config.strokeWidthDp > 0f) {
+        // Outline (each effect has an on/off switch, so it can always be removed completely)
+        SwitchRow(stringResource(R.string.text_stroke_width), config.strokeEnabled, bold = true) { on ->
+            changeAndCommit(config.copy(strokeEnabled = on, strokeWidthDp = if (on && config.strokeWidthDp < 0.5f) 3f else config.strokeWidthDp))
+        }
+        if (config.strokeEnabled) {
+            LabeledSlider(stringResource(R.string.text_effect_size), config.strokeWidthDp.roundToInt().toString(), config.strokeWidthDp, 0.5f..20f,
+                { change(config.copy(strokeWidthDp = it)) }, onConfigCommit)
             ColorHeader(stringResource(R.string.text_stroke_color), small = true) { colorTarget = ColorTarget.STROKE }
             ColorSwatchesRow(selectedColorHex = config.strokeColorHex, onColorSelect = { changeAndCommit(config.copy(strokeColorHex = it)) })
         }
@@ -313,9 +316,12 @@ fun TextEditorPanel(
         SectionDivider()
 
         // Outer glow
-        LabeledSlider(stringResource(R.string.text_outer_glow), config.outerGlowRadiusDp.roundToInt().toString(), config.outerGlowRadiusDp, 0f..40f,
-            { change(config.copy(outerGlowRadiusDp = it)) }, onConfigCommit, bold = true)
-        if (config.outerGlowRadiusDp > 0f) {
+        SwitchRow(stringResource(R.string.text_outer_glow), config.glowEnabled, bold = true) { on ->
+            changeAndCommit(config.copy(glowEnabled = on, outerGlowRadiusDp = if (on && config.outerGlowRadiusDp < 0.5f) 10f else config.outerGlowRadiusDp))
+        }
+        if (config.glowEnabled) {
+            LabeledSlider(stringResource(R.string.text_effect_size), config.outerGlowRadiusDp.roundToInt().toString(), config.outerGlowRadiusDp, 0.5f..40f,
+                { change(config.copy(outerGlowRadiusDp = it)) }, onConfigCommit)
             ColorHeader(stringResource(R.string.text_glow_color), small = true) { colorTarget = ColorTarget.GLOW }
             ColorSwatchesRow(selectedColorHex = config.outerGlowColorHex, onColorSelect = { changeAndCommit(config.copy(outerGlowColorHex = it)) })
             LabeledSlider(stringResource(R.string.text_opacity), "${(config.glowOpacity * 100).roundToInt()}%", config.glowOpacity, 0f..1f,
@@ -324,10 +330,13 @@ fun TextEditorPanel(
 
         SectionDivider()
 
-        // Drop shadow
-        LabeledSlider(stringResource(R.string.text_drop_shadow), config.shadowRadiusDp.roundToInt().toString(), config.shadowRadiusDp, 0f..35f,
-            { change(config.copy(shadowRadiusDp = it)) }, onConfigCommit, bold = true)
-        if (config.shadowRadiusDp > 0f) {
+        // Drop shadow (size 0 = hard shadow)
+        SwitchRow(stringResource(R.string.text_drop_shadow), config.shadowEnabled, bold = true) { on ->
+            changeAndCommit(config.copy(shadowEnabled = on, shadowRadiusDp = if (on && config.shadowRadiusDp <= 0f) 6f else config.shadowRadiusDp))
+        }
+        if (config.shadowEnabled) {
+            LabeledSlider(stringResource(R.string.text_effect_blur), config.shadowRadiusDp.roundToInt().toString(), config.shadowRadiusDp, 0f..35f,
+                { change(config.copy(shadowRadiusDp = it)) }, onConfigCommit)
             LabeledSlider(stringResource(R.string.text_shadow_offset_x), config.shadowDxDp.roundToInt().toString(), config.shadowDxDp, -30f..30f,
                 { change(config.copy(shadowDxDp = it)) }, onConfigCommit)
             LabeledSlider(stringResource(R.string.text_shadow_offset_y), config.shadowDyDp.roundToInt().toString(), config.shadowDyDp, -30f..30f,

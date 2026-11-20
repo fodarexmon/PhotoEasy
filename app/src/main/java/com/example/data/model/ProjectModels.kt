@@ -322,8 +322,18 @@ data class TextLayerConfig(
     /** Linear gradient fill from [colorHex] to [gradientEndColorHex]. */
     val gradientEnabled: Boolean = false,
     val gradientEndColorHex: Int = 0xFF06B6D4.toInt(),
-    val gradientAngle: Float = 90f
-)
+    val gradientAngle: Float = 90f,
+    /**
+     * Each effect has its own switch, so it can be removed completely (a slider dragged "to 0"
+     * could stop at 0.3, which still drew a visible shadow or glow). Off by default.
+     */
+    val strokeEnabled: Boolean = false,
+    val glowEnabled: Boolean = false,
+    val shadowEnabled: Boolean = false
+) {
+    /** Outline width actually drawn (0 when the outline is off). */
+    val effectiveStrokeDp: Float get() = if (strokeEnabled) strokeWidthDp else 0f
+}
 
 /**
  * The layer transform at the moment its (document-space) mask pixels were last written. While the

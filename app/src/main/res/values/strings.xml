@@ -850,4 +850,10 @@
         <item quantity="other">%d projects use this LUT. Their layers will lose this look; this cannot be undone.</item>
     </plurals>
     <string name="layer_name_copy">%1$s copy</string>
+    <string name="text_effect_size">Size</string>
+    <string name="text_effect_blur">Softness</string>
+    <string name="tool_effects">Effects</string>
+    <string name="layer_add_empty">Empty Layer</string>
+    <string name="layer_name_empty">Layer %1$d</string>
+    <string name="status_empty_layer_added">Empty layer added</string>
 </resources>

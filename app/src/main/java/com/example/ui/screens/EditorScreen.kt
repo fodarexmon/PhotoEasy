@@ -397,7 +397,7 @@ fun EditorScreen(
     }
 
     LaunchedEffect(activeTool) {
-        if (activeTool != ActiveTool.ADJUST && activeTool != ActiveTool.FILTERS) compareOriginal = false
+        if (activeTool != ActiveTool.ADJUST && activeTool != ActiveTool.FILTERS && activeTool != ActiveTool.EFFECTS) compareOriginal = false
     }
 
     // Curves: tapping the image adds a point / sets black, grey or white points.
@@ -450,13 +450,13 @@ fun EditorScreen(
     // normalised to the layer image so preview and full-resolution apply agree.
     var proCenter by remember { mutableStateOf(0.5f to 0.5f) }
     var proCenterPick by remember { mutableStateOf(false) }
-    LaunchedEffect(activeTool, selectedLayerIndex) { if (activeTool != ActiveTool.FILTERS) proCenterPick = false; proCenter = 0.5f to 0.5f }
+    LaunchedEffect(activeTool, selectedLayerIndex) { if (activeTool != ActiveTool.FILTERS && activeTool != ActiveTool.EFFECTS) proCenterPick = false; proCenter = 0.5f to 0.5f }
 
     // Replace colour: eyedropper for (replacement index, source?).
     var replacePick by remember { mutableStateOf<Pair<Int, Boolean>?>(null) }
     LaunchedEffect(activeTool) { if (activeTool != ActiveTool.ADJUST) { curvePickMode = null; curveSample = null; replacePick = null } }
     val canvasSampler: ((Float, Float) -> Unit)? = when {
-        activeTool == ActiveTool.FILTERS && proCenterPick -> { x, y ->
+        (activeTool == ActiveTool.FILTERS || activeTool == ActiveTool.EFFECTS) && proCenterPick -> { x, y ->
             val l = project.layers.getOrNull(selectedLayerIndex)
             val bmp = l?.bitmap
             if (l != null && bmp != null && !bmp.isRecycled) {
@@ -523,7 +523,7 @@ fun EditorScreen(
             return@BackHandler
         }
         when (activeTool) {
-            ActiveTool.FILTERS -> {
+            ActiveTool.FILTERS, ActiveTool.EFFECTS -> {
                 // Filter browsing is a transient preview. Back means Cancel, never Apply.
                 onCancelHistoryState()
                 onToolSelect(ActiveTool.NONE)
@@ -830,7 +830,7 @@ fun EditorScreen(
                         }
                     }
 
-                    ActiveTool.FILTERS -> {
+                    ActiveTool.FILTERS, ActiveTool.EFFECTS -> {
                         val hasSel = hasActiveSelectionCached
                         selectedLayer?.let { layer ->
                             // Same size the ViewModel decodes for destructive effects (authoritative source),
@@ -868,6 +868,7 @@ fun EditorScreen(
                                 }
                             }
                             FiltersPanel(
+                                initialTab = if (activeTool == ActiveTool.EFFECTS) com.example.ui.components.FilterPanelTab.PRO_EFFECTS else com.example.ui.components.FilterPanelTab.PRESETS,
                                 selectedFilter = layer.filter,
                                 filterIntensity = layer.filterIntensity,
                                 sourceBitmap = previewSource,
@@ -1095,6 +1096,7 @@ fun EditorScreen(
                             onAddImageClick = { launchPhotoPicker() },
                             onAddTextClick = onAddText,
                             onAddAdjustmentClick = onAddAdjustmentLayer,
+                            onAddEmptyClick = { viewModel.addEmptyLayer() },
                             onAddLayerMask = onAddLayerMask,
                             onInvertLayerMask = onInvertLayerMask,
                             onToggleLayerMaskEnabled = onToggleLayerMaskEnabled,
@@ -1211,6 +1213,7 @@ fun EditorScreen(
                 val tools = listOf(
                     Triple(stringResource(R.string.tool_adjust), Icons.Default.Tune, ActiveTool.ADJUST to "tool_btn_adjust"),
                     Triple(stringResource(R.string.tool_filters), Icons.Default.AutoFixHigh, ActiveTool.FILTERS to "tool_btn_filters"),
+                    Triple(stringResource(R.string.tool_effects), Icons.Default.BlurOn, ActiveTool.EFFECTS to "tool_btn_effects"),
                     Triple(stringResource(R.string.tool_transform), Icons.Default.Transform, ActiveTool.TRANSFORM to "tool_btn_transform"),
                     Triple(stringResource(R.string.tool_crop), Icons.Default.Crop, ActiveTool.CROP_PERSPECTIVE to "tool_btn_crop"),
                     Triple(stringResource(R.string.tool_select), Icons.Default.SelectAll, ActiveTool.SELECTION to "tool_btn_selection"),

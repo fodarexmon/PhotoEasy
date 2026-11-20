@@ -69,6 +69,8 @@ enum class ActiveTool {
     NONE,
     ADJUST,
     FILTERS,
+    /** The Filters panel opened on its Pro effects tab (blur, sharpen, oil paint... with sliders). */
+    EFFECTS,
     TRANSFORM,
     CROP_PERSPECTIVE,
     SELECTION,
@@ -1319,6 +1321,45 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         )
         proj.layers.add(layer)
         commitProjectMutation(selectedLayerIndex = proj.layers.size - 1)
+    }
+
+    /**
+     * Adds a transparent pixel layer the size of the canvas above the selected layer (Photoshop's
+     * "New Layer"): a place to paint, retouch, clone or put stickers without touching the photo.
+     */
+    fun addEmptyLayer() {
+        val proj = _uiState.value.currentProject ?: return
+        if (_uiState.value.isProcessing) return
+        val insertAt = (_uiState.value.selectedLayerIndex + 1).coerceIn(0, proj.layers.size)
+        val name = uniqueLayerName(tr(R.string.layer_name_empty, proj.layers.size + 1), proj)
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isProcessing = true)
+            var full: Bitmap? = null
+            try {
+                full = withContext(Dispatchers.Default) {
+                    Bitmap.createBitmap(proj.width, proj.height, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.TRANSPARENT) }
+                }
+                val layer = Layer(id = java.util.UUID.randomUUID().toString(), name = name, type = LayerType.IMAGE)
+                if (!commitDestructiveBitmap(proj, layer, full!!, proj.width.toFloat(), proj.height.toFloat(), "empty")) {
+                    throw java.io.IOException("Save failed")
+                }
+                saveHistoryState()
+                proj.layers.add(insertAt, layer)
+                commitProjectMutation(
+                    selectedLayerIndex = insertAt,
+                    statusMessage = tr(R.string.status_empty_layer_added),
+                    transformState = { it.copy(isProcessing = false) }
+                )
+            } catch (e: OutOfMemoryError) {
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_processing_failed_memory))
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_save_failed_storage))
+            } finally {
+                // The layer keeps its own preview copy.
+                full?.let { if (!it.isRecycled) it.recycle() }
+            }
+        }
     }
 
     fun addAdjustmentLayer() {
