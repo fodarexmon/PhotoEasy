@@ -912,4 +912,18 @@
     <string name="adjk_threshold_level">Threshold level</string>
     <string name="adjk_invert_info">Inverts the colors of everything below. Use the layer mask to limit it.</string>
     <string name="adjk_mask_hint">Affects all layers below. Add a layer mask (Layers) to limit it to an area, or clip it to one layer.</string>
+    <string name="tool_stickers">Stickers</string>
+    <string name="sticker_cat_emoji">Emoji</string>
+    <string name="sticker_cat_shapes">Shapes</string>
+    <string name="sticker_cat_arrows">Arrows</string>
+    <string name="sticker_cat_badges">Badges</string>
+    <string name="sticker_cat_speech">Speech</string>
+    <string name="sticker_cat_decor">Decor</string>
+    <string name="sticker_color">Color</string>
+    <string name="sticker_border">White border</string>
+    <string name="sticker_shadow">Shadow</string>
+    <string name="sticker_hint">Tap a sticker to add it as a layer, then move, scale or rotate it.</string>
+    <string name="layer_name_sticker">Sticker</string>
+    <string name="status_adding_sticker">Adding sticker…</string>
+    <string name="status_sticker_added">Sticker added</string>
 </resources>

@@ -916,4 +916,18 @@
     <string name="adjk_threshold_level">مستوى العتبة</string>
     <string name="adjk_invert_info">يعكس ألوان كل ما تحت هذه الطبقة. استخدم قناع الطبقة لحصره في منطقة.</string>
     <string name="adjk_mask_hint">يؤثر على كل الطبقات التي تحته. أضف قناع طبقة (من الطبقات) لحصره في منطقة، أو اقصصه على طبقة واحدة.</string>
+    <string name="tool_stickers">ملصقات</string>
+    <string name="sticker_cat_emoji">إيموجي</string>
+    <string name="sticker_cat_shapes">أشكال</string>
+    <string name="sticker_cat_arrows">أسهم</string>
+    <string name="sticker_cat_badges">شارات</string>
+    <string name="sticker_cat_speech">فقاعات كلام</string>
+    <string name="sticker_cat_decor">زخارف</string>
+    <string name="sticker_color">اللون</string>
+    <string name="sticker_border">حد أبيض</string>
+    <string name="sticker_shadow">ظل</string>
+    <string name="sticker_hint">اضغط على ملصق لإضافته كطبقة، ثم حرّكه أو كبّره أو دوّره.</string>
+    <string name="layer_name_sticker">ملصق</string>
+    <string name="status_adding_sticker">جارٍ إضافة الملصق…</string>
+    <string name="status_sticker_added">أُضيف الملصق</string>
 </resources>

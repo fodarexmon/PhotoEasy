@@ -784,7 +784,7 @@ fun CanvasView(
                             (activeTool == ActiveTool.LAYERS && liveLayer?.isEditingMask == true) ||
                             (activeTool == ActiveTool.TEXT && gestureOnText == true)
                         val oneFingerViewportPan = !isSplitCompareActive && !toolOwnsOneFinger && (activeTool == ActiveTool.NONE ||
-                            activeTool == ActiveTool.ADJUST || activeTool == ActiveTool.FILTERS || activeTool == ActiveTool.EFFECTS ||
+                            activeTool == ActiveTool.ADJUST || activeTool == ActiveTool.FILTERS || activeTool == ActiveTool.EFFECTS || activeTool == ActiveTool.STICKERS ||
                             activeTool == ActiveTool.LAYERS || activeTool == ActiveTool.TEXT)
                         if (pressed >= 2) multiTouchActive = true
                         val shouldTransformViewport = pressed >= 2 || (pressed == 1 && oneFingerViewportPan)

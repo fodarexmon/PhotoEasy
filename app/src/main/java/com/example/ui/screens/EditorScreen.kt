@@ -4,6 +4,8 @@ import android.content.ClipData
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.PointF
+import androidx.compose.material.icons.filled.BlurOn
+import androidx.compose.material.icons.filled.EmojiEmotions
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarResult
@@ -946,6 +948,12 @@ fun EditorScreen(
                         }
                     }
 
+                    ActiveTool.STICKERS -> {
+                        com.example.ui.components.StickersPanel(
+                            onAddSticker = { def, style -> viewModel.addStickerLayer(def, style) }
+                        )
+                    }
+
                     ActiveTool.CROP_PERSPECTIVE -> {
                         CropPerspectivePanel(
                             isPerspectiveActive = isPerspectiveActive,
@@ -1244,6 +1252,7 @@ fun EditorScreen(
                     Triple(stringResource(R.string.tool_select), Icons.Default.SelectAll, ActiveTool.SELECTION to "tool_btn_selection"),
                     Triple(stringResource(R.string.tool_layers), Icons.Default.Layers, ActiveTool.LAYERS to "tool_btn_layers"),
                     Triple(stringResource(R.string.tool_text), Icons.Default.TextFields, ActiveTool.TEXT to "tool_btn_text"),
+                    Triple(stringResource(R.string.tool_stickers), Icons.Default.EmojiEmotions, ActiveTool.STICKERS to "tool_btn_stickers"),
                     Triple(stringResource(R.string.tool_inpaint), Icons.Default.CleaningServices, ActiveTool.OBJECT_REMOVAL to "tool_btn_inpaint")
                 )
 

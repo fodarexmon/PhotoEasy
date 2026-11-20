@@ -71,6 +71,8 @@ enum class ActiveTool {
     FILTERS,
     /** The Filters panel opened on its Pro effects tab (blur, sharpen, oil paint... with sliders). */
     EFFECTS,
+    /** Sticker library: emoji and vector stickers added as layers. */
+    STICKERS,
     TRANSFORM,
     CROP_PERSPECTIVE,
     SELECTION,
@@ -1366,6 +1368,52 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
      * Adds an adjustment layer of [kind] (Levels, Curves, Black & White...) above the selected
      * layer, like Photoshop's Layer > New Adjustment Layer, and opens its settings.
      */
+    /**
+     * Adds [def] as a new image layer above the selected one, centred and sized to about 40% of
+     * the canvas, then switches to Transform so it can be moved, scaled and rotated right away.
+     */
+    fun addStickerLayer(def: com.example.engine.StickerDef, style: com.example.engine.StickerStyle) {
+        val proj = _uiState.value.currentProject ?: return
+        if (_uiState.value.isProcessing) return
+        if (pendingTransactionSnapshot != null) saveHistoryState()
+        val insertAt = (_uiState.value.selectedLayerIndex + 1).coerceIn(0, proj.layers.size)
+        val app = getApplication<Application>()
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_adding_sticker))
+            var art: Bitmap? = null
+            try {
+                // Rendered sharp for the canvas: up to 1600 px, never more than the canvas needs.
+                val renderSize = (max(proj.width, proj.height) * 0.6f).toInt().coerceIn(256, 1600)
+                art = withContext(Dispatchers.Default) { com.example.engine.StickerLibrary.render(app, def, renderSize, style) }
+                val a = art!!
+                val target = min(proj.width, proj.height) * 0.4f
+                val fit = target / max(a.width, a.height).toFloat()
+                val layer = Layer(
+                    id = java.util.UUID.randomUUID().toString(),
+                    name = uniqueLayerName(tr(R.string.layer_name_sticker), proj),
+                    type = LayerType.IMAGE
+                )
+                if (!commitDestructiveBitmap(proj, layer, a, a.width * fit, a.height * fit, "sticker")) {
+                    throw java.io.IOException("Save failed")
+                }
+                saveHistoryState()
+                proj.layers.add(insertAt, layer)
+                commitProjectMutation(
+                    selectedLayerIndex = insertAt,
+                    statusMessage = tr(R.string.status_sticker_added),
+                    transformState = { it.copy(isProcessing = false, activeTool = ActiveTool.TRANSFORM) }
+                )
+            } catch (e: OutOfMemoryError) {
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_processing_failed_memory))
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_save_failed_storage))
+            } finally {
+                art?.let { if (!it.isRecycled) it.recycle() }
+            }
+        }
+    }
+
     fun addAdjustmentLayer(kind: com.example.data.model.AdjustmentKind = com.example.data.model.AdjustmentKind.GENERAL) {
         val proj = _uiState.value.currentProject ?: return
         if (pendingTransactionSnapshot != null) saveHistoryState()
