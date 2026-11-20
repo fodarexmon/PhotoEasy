@@ -41,15 +41,20 @@ object CanvasValidation {
         return ValidationResult(true, widthInput, heightInput)
     }
 
+    /**
+     * Fits [width] x [height] inside the canvas limits with ONE uniform scale, so the aspect ratio
+     * is kept (an imported 6000 x 4000 photo becomes ~4096 x 2731, not a stretched near-square).
+     * Only a side that would fall below [MIN_DIMENSION] (extreme panoramas) is padded up.
+     */
     fun clamp(width: Int, height: Int): Pair<Int, Int> {
-        val w = width.coerceIn(MIN_DIMENSION, MAX_DIMENSION)
-        val h = height.coerceIn(MIN_DIMENSION, MAX_DIMENSION)
-        val mp = (w.toLong() * h.toLong()) / 1_000_000f
-        return if (mp > MAX_MEGAPIXELS) {
-            val scale = kotlin.math.sqrt((MAX_MEGAPIXELS * 1_000_000f) / (w.toLong() * h.toLong()))
-            Pair((w * scale).toInt().coerceAtLeast(MIN_DIMENSION), (h * scale).toInt().coerceAtLeast(MIN_DIMENSION))
-        } else {
-            Pair(w, h)
-        }
+        if (width <= 0 || height <= 0) return Pair(MIN_DIMENSION, MIN_DIMENSION)
+        val w = width.toDouble()
+        val h = height.toDouble()
+        val bySide = MAX_DIMENSION / maxOf(w, h)
+        val byArea = kotlin.math.sqrt(MAX_MEGAPIXELS * 1_000_000.0 / (w * h))
+        val scale = minOf(1.0, bySide, byArea)
+        val outW = kotlin.math.floor(w * scale).toInt().coerceIn(MIN_DIMENSION, MAX_DIMENSION)
+        val outH = kotlin.math.floor(h * scale).toInt().coerceIn(MIN_DIMENSION, MAX_DIMENSION)
+        return Pair(outW, outH)
     }
 }

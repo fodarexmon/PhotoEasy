@@ -195,6 +195,20 @@ class PhotoEasyRobolectricTest {
     }
 
     @Test
+    fun `canvas clamp keeps the photo aspect ratio`() {
+        for ((w, h) in listOf(6000 to 4000, 8000 to 6000, 4000 to 6000, 9000 to 2000, 4032 to 3024, 1080 to 1350)) {
+            val (cw, ch) = CanvasValidation.clamp(w, h)
+            assertTrue("$w x $h -> $cw x $ch exceeds the side limit", cw <= CanvasValidation.MAX_DIMENSION && ch <= CanvasValidation.MAX_DIMENSION)
+            assertTrue("$w x $h -> $cw x $ch exceeds the area limit", cw.toLong() * ch <= (CanvasValidation.MAX_MEGAPIXELS * 1_000_000).toLong())
+            val ratioIn = w.toDouble() / h
+            val ratioOut = cw.toDouble() / ch
+            assertTrue("$w x $h -> $cw x $ch changed the aspect ratio", abs(ratioOut / ratioIn - 1.0) < 0.002)
+        }
+        // Small images are not upscaled.
+        assertEquals(1080 to 1350, CanvasValidation.clamp(1080, 1350))
+    }
+
+    @Test
     fun `layer renderer handles transparent PNG export and background filled JPEG export`() = runBlocking {
         val layers = listOf(
             Layer(
@@ -1123,6 +1137,89 @@ class PhotoEasyRobolectricTest {
         // Half strength = half of the correction.
         val half = com.example.engine.ImageProcessor.combineSmartAuto(current, delta, 0.5f)
         assertEquals(delta.exposure / 2f, half.exposure, 0.01f)
+    }
+
+    // --- Review fixes: history memory, merge, save snapshot ------------------------------------
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun `undo depth is not limited by pixels shared with the open document`() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "Depth", width = 2048, height = 1536)
+        // ~12.6 MB preview layer: the old accounting counted it again in every snapshot (~6 steps).
+        project.layers.add(Layer(id = "img", name = "Img", type = LayerType.IMAGE,
+            bitmap = Bitmap.createBitmap(2048, 1536, Bitmap.Config.ARGB_8888)))
+        viewModel.openProject(project)
+        for (i in 1..12) viewModel.renameLayer(0, "n$i")
+        repeat(12) { viewModel.undo() }
+        assertEquals("Img", viewModel.uiState.value.currentProject!!.layers[0].name)
+    }
+
+    @Test
+    fun `history snapshots share the mask instead of copying it`() {
+        val mask = Bitmap.createBitmap(40, 40, Bitmap.Config.ALPHA_8)
+        val layer = Layer(id = "m", name = "M", maskBitmap = mask, distort = floatArrayOf(0f, 0f, 1f, 0f, 1f, 1f, 0f, 1f))
+        val snap = layer.snapshotLayer()
+        assertTrue("mask must be shared (masks are copy-on-write)", snap.maskBitmap === mask)
+        assertTrue("distort must not be shared", snap.distort !== layer.distort)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun `merge down bakes skew distort and LUT only once`() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "Merge", width = 80, height = 80)
+        project.layers.add(Layer(id = "bottom", name = "Bottom", type = LayerType.IMAGE,
+            bitmap = Bitmap.createBitmap(80, 80, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) },
+            skewX = 12f, skewY = -5f, distort = floatArrayOf(0f, 0.1f, 1f, 0f, 1f, 1f, 0f, 0.9f), lutId = "missing-lut"))
+        project.layers.add(Layer(id = "top", name = "Top", type = LayerType.COLOR_FILL, colorFillHex = Color.BLUE, opacity = 0.5f))
+        viewModel.openProject(project)
+        viewModel.selectLayer(1)
+        viewModel.mergeSelectedLayerDown()
+        waitUntil { viewModel.uiState.value.currentProject!!.layers.size == 1 && !viewModel.uiState.value.isProcessing }
+        val merged = viewModel.uiState.value.currentProject!!.layers.single()
+        assertEquals(0f, merged.skewX, 0f)
+        assertEquals(0f, merged.skewY, 0f)
+        assertTrue(merged.distort == null)
+        assertTrue(merged.lutId == null)
+    }
+
+    @Test
+    @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
+    fun `a layer replaced during a save stays dirty`() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "Race", width = 64, height = 64)
+        val layer = Layer(id = "img", name = "Img", type = LayerType.IMAGE,
+            bitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888), isBitmapDirty = true)
+        project.layers.add(layer)
+        viewModel.openProject(project)
+        viewModel.saveCurrentProject()
+        // A destructive edit replaces the pixels while the save is still running.
+        val replaced = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) }
+        layer.bitmap = replaced
+        layer.isBitmapDirty = true
+        waitUntil { !viewModel.uiState.value.isProcessing }
+        assertTrue("the replaced pixels were never written, so the layer must stay dirty", layer.isBitmapDirty)
+    }
+
+    @Test
+    fun `undo marks restored pixels dirty so the next save writes them`() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val viewModel = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "UndoDirty", width = 32, height = 32)
+        val original = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+        project.layers.add(Layer(id = "img", name = "Img", type = LayerType.IMAGE, bitmap = original, isBitmapDirty = false))
+        viewModel.openProject(project)
+        viewModel.updateSelectedLayer { it.bitmap = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888); it.isBitmapDirty = true }
+        // As if the edited pixels had been saved to layer_img.*
+        viewModel.uiState.value.currentProject!!.layers[0].isBitmapDirty = false
+        viewModel.undo()
+        val restored = viewModel.uiState.value.currentProject!!.layers[0]
+        assertTrue(restored.bitmap === original)
+        assertTrue("restored pixels differ from the file on disk", restored.isBitmapDirty)
     }
 
     // --- One Undo / Redo timeline for document and selection edits ---------------------------

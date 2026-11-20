@@ -219,7 +219,9 @@ fun EditorScreen(
         if (uiState.activeTool == ActiveTool.OBJECT_REMOVAL && uiState.isInpaintProtectMode) {
             viewModel.paintProtectSegment(points, docRadius, com.example.ui.viewmodel.StrokePhase.END)
         } else if (activeLayer?.isEditingMask == true) {
+            // A complete stroke in one call: end it so autosave (paused during strokes) resumes.
             viewModel.paintOnLayerMask(points, docRadius, isReveal = !uiState.isMaskEditingBlack)
+            viewModel.endMaskStroke()
         } else if (uiState.activeSelectionTool == SelectionToolType.QUICK_SELECTION && uiState.activeTool == ActiveTool.SELECTION) {
             viewModel.applyQuickSelection(points, isEraser = false, docRadius = docRadius)
         } else {

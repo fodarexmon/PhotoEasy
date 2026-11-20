@@ -420,7 +420,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         autosaveJob = viewModelScope.launch {
             delay(3000L) // 3 seconds debounced autosave
             // Do not autosave while an asynchronous long-running operation is in flight
-            if (_uiState.value.isProcessing || pendingTransactionSnapshot != null) {
+            // A mask stroke paints its private mask copy in place: wait until the finger lifts
+            // (endMaskStroke reschedules) so a half-painted mask is never written.
+            if (_uiState.value.isProcessing || pendingTransactionSnapshot != null || maskStroke != null) {
                 return@launch
             }
             val proj = _uiState.value.currentProject
@@ -508,6 +510,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         redoOrder.clear()
         lastRemoval = null
         protectLastPoint = null
+        maskStroke = null
         pendingTransactionSnapshot = null
         pendingTransactionWasDirty = false
         clearSelectionHistory()
@@ -615,6 +618,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun openProject(project: Project) {
         pendingTransactionSnapshot = null
+        maskStroke = null
         undoStack.clear()
         redoStack.clear()
         historyOrder.clear()
@@ -702,8 +706,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val proj = _uiState.value.currentProject ?: run { pendingTransactionSnapshot = null; return }
         proj.width = snapshot.width
         proj.height = snapshot.height
-        proj.layers.clear()
-        proj.layers.addAll(snapshot.layers.map { it.snapshotLayer() })
+        restoreLayers(proj, snapshot.layers.map { it.snapshotLayer() })
         proj.markDirty()
         pendingTransactionSnapshot = null
         val wasDirty = pendingTransactionWasDirty
@@ -787,31 +790,41 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         private const val MAX_HISTORY_MEMORY_BYTES = 80L * 1024L * 1024L // 80 MB History RAM Budget
     }
 
-    private fun calculateSnapshotMemoryBytes(snapshot: ProjectSnapshot): Long {
-        var bytes = 0L
-        for (l in snapshot.layers) {
-            val bmp = l.bitmap
-            if (bmp != null && !bmp.isRecycled) {
-                bytes += bmp.allocationByteCount.toLong()
-            }
+    /**
+     * Memory that history keeps alive ON TOP of the open document: every distinct bitmap / mask
+     * referenced by undo, redo or the pending transaction, counted once (snapshots share unchanged
+     * pixels with each other and with the live layers), excluding those the live layers still use.
+     */
+    private fun historyExtraBytes(): Long {
+        val live = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Bitmap, Boolean>())
+        _uiState.value.currentProject?.layers?.forEach { l ->
+            l.bitmap?.let { live.add(it) }
+            l.maskBitmap?.let { live.add(it) }
         }
+        val seen = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<Bitmap, Boolean>())
+        var bytes = 0L
+        fun count(b: Bitmap?) {
+            if (b != null && !b.isRecycled && b !in live && seen.add(b)) bytes += b.allocationByteCount.toLong()
+        }
+        fun countSnapshot(s: ProjectSnapshot?) = s?.layers?.forEach { count(it.bitmap); count(it.maskBitmap) }
+        undoStack.forEach { countSnapshot(it) }
+        redoStack.forEach { countSnapshot(it) }
+        countSnapshot(pendingTransactionSnapshot)
         return bytes
     }
 
     private fun enforceHistoryMemoryBudget() {
-        // Enforce maximum stack steps
+        var evicted = false
         while (undoStack.size > MAX_HISTORY_STEPS) {
             undoStack.removeAt(0)
+            evicted = true
         }
-
-        // Calculate total memory held across all undo snapshots
-        var totalBytes = undoStack.sumOf { calculateSnapshotMemoryBytes(it) }
-
-        // If history exceeds RAM budget (80MB), evict oldest snapshots until budget is respected
-        while (undoStack.size > 2 && totalBytes > MAX_HISTORY_MEMORY_BYTES) {
-            val evicted = undoStack.removeAt(0)
-            totalBytes -= calculateSnapshotMemoryBytes(evicted)
+        // Evict the oldest steps while the pixels only history holds exceed the budget.
+        while (undoStack.size > 2 && historyExtraBytes() > MAX_HISTORY_MEMORY_BYTES) {
+            undoStack.removeAt(0)
+            evicted = true
         }
+        if (evicted) updateHistoryFlags()
     }
 
     fun saveHistoryState() {
@@ -842,8 +855,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             pendingTransactionWasDirty = false
             proj.width = snapshot.width
             proj.height = snapshot.height
-            proj.layers.clear()
-            proj.layers.addAll(snapshot.layers)
+            restoreLayers(proj, snapshot.layers)
             proj.markDirty()
 
             val (keptLayerIndex, newMask) = selectionAfterHistoryChange(prevLayerId, proj)
@@ -874,8 +886,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val previousSnapshot = undoStack.pop()
         proj.width = previousSnapshot.width
         proj.height = previousSnapshot.height
-        proj.layers.clear()
-        proj.layers.addAll(previousSnapshot.layers)
+        restoreLayers(proj, previousSnapshot.layers)
         proj.markDirty()
 
         val (keptLayerIndex, newMask) = selectionAfterHistoryChange(prevLayerId, proj)
@@ -909,8 +920,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val nextSnapshot = redoStack.pop()
         proj.width = nextSnapshot.width
         proj.height = nextSnapshot.height
-        proj.layers.clear()
-        proj.layers.addAll(nextSnapshot.layers)
+        restoreLayers(proj, nextSnapshot.layers)
         proj.markDirty()
 
         val (keptLayerIndex, newMask) = selectionAfterHistoryChange(prevLayerId, proj)
@@ -936,14 +946,29 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val snapshot = undoStack.pop()
         proj.width = snapshot.width
         proj.height = snapshot.height
-        proj.layers.clear()
-        proj.layers.addAll(snapshot.layers)
+        restoreLayers(proj, snapshot.layers)
         proj.markDirty()
         _uiState.value = _uiState.value.copy(
             currentProject = proj.copy(layers = ArrayList(proj.layers)),
             renderRevision = proj.renderRevision
         )
         updateHistoryFlags()
+    }
+
+    /**
+     * Replaces the document's layers with history [layers]. Every layer whose pixels differ from
+     * what it showed before is marked dirty: the file on disk may hold newer pixels saved after the
+     * snapshot was taken (one layer_<id> file per layer), so a stale "clean" flag would skip the
+     * write and the reopened project would show the undone edit again.
+     */
+    private fun restoreLayers(proj: Project, layers: List<Layer>) {
+        val before = java.util.HashMap<String, Bitmap?>()
+        proj.layers.forEach { before[it.id] = it.bitmap }
+        proj.layers.clear()
+        proj.layers.addAll(layers)
+        for (l in proj.layers) {
+            if (l.bitmap != null && (!before.containsKey(l.id) || before[l.id] !== l.bitmap)) l.isBitmapDirty = true
+        }
     }
 
     /** Source asset files still referenced by undo/redo history must survive orphan cleanup. */
@@ -958,8 +983,29 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         return names
     }
 
+    /**
+     * Saves [proj]. The repository writes on a background thread while the editor keeps changing
+     * the live project, so it gets a frozen copy taken here on the main thread: its own layer list
+     * and per-layer field values (bitmaps and masks are shared; they are replaced, never edited in
+     * place, except the private mask copy of a stroke in progress, see [endMaskStroke]).
+     */
     private suspend fun persistProject(proj: Project): Boolean {
-        val ok = repository.saveProject(proj, historyProtectedFileNames())
+        val frozenLayers = proj.layers.map { it.previewSnapshot() }
+        val frozen = proj.copy(layers = ArrayList(frozenLayers))
+        val ok = repository.saveProject(frozen, historyProtectedFileNames())
+        if (ok) {
+            proj.updatedAt = frozen.updatedAt
+            proj.thumbnailPath = frozen.thumbnailPath
+            // A layer is clean only if the pixels just written are still its pixels: a destructive
+            // edit that landed during the save keeps the layer dirty for the next save.
+            val savedById = frozenLayers.associateBy { it.id }
+            for (live in proj.layers) {
+                val saved = savedById[live.id] ?: continue
+                if (live.isBitmapDirty && !saved.isBitmapDirty && live.bitmap === saved.bitmap) {
+                    live.isBitmapDirty = false
+                }
+            }
+        }
         // The active selection is kept with the project so it survives closing the app.
         if (ok && _uiState.value.currentProject?.id == proj.id) {
             repository.saveSelection(proj.id, _uiState.value.selectionMask)
@@ -1007,6 +1053,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val preview = withContext(Dispatchers.Default) { ImageProcessor.scaleBitmapToMaxDimension(full, 2048) }
         layer.bitmap = preview; layer.sourceAssetPath=file.absolutePath; layer.originalWidth=full.width; layer.originalHeight=full.height
         layer.contentWidth=contentW.coerceAtLeast(1f); layer.contentHeight=contentH.coerceAtLeast(1f); layer.isBitmapDirty=true
+        // The old pixels now live only in history: re-check the history memory budget.
+        enforceHistoryMemoryBudget()
         return true
     }
 
@@ -1463,6 +1511,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     bottomLayer.scaleX = 1f
                     bottomLayer.scaleY = 1f
                     bottomLayer.rotation = 0f
+                    // Skew / distort and the LUT look are already baked into the merged pixels.
+                    bottomLayer.skewX = 0f
+                    bottomLayer.skewY = 0f
+                    bottomLayer.distort = null
+                    bottomLayer.lutId = null
                     bottomLayer.filter = FilterType.NONE
                     bottomLayer.filterIntensity = 1f
                     bottomLayer.adjustments = ColorAdjustments()
@@ -1472,6 +1525,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     bottomLayer.isMaskEnabled = true
                     bottomLayer.maskDensity = 1f
                     bottomLayer.maskFeather = 0f
+                    bottomLayer.maskAnchor = null
+                    bottomLayer.isMaskLinked = true
 
                     proj.layers.removeAt(idx)
                     commitProjectMutation(
@@ -1898,7 +1953,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                                 if (docMask !== oldMask && !docMask.isRecycled) docMask.recycle()
                             }
                         }
-                        // The history snapshot holds its own mask copy; the live one is just replaced.
+                        // The history snapshot keeps the old mask object; the live one is just replaced.
                         layer.maskBitmap = warpedMask
                     }
 
@@ -1910,6 +1965,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     layer.scaleX = 1f
                     layer.scaleY = 1f
                     layer.rotation = 0f
+                    // The warp above went through the layer's full matrix, skew / distort included.
+                    layer.skewX = 0f
+                    layer.skewY = 0f
+                    layer.distort = null
                     if (layer.maskBitmap != null) layer.maskAnchor = layer.currentMaskAnchor()
                 }
 
@@ -3385,7 +3444,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 if (!commitDestructiveBitmap(proj, layer, result!!, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "apply_mask")) {
                     throw java.io.IOException("Failed to persist masked layer")
                 }
-                // The history snapshot owns its own mask copy; the live mask is simply dropped.
+                // The history snapshot still references the old mask; the live layer simply drops it.
                 layer.maskBitmap = null
                 layer.isEditingMask = false
                 layer.maskDensity = 1f
@@ -3575,6 +3634,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     /** Ends the current mask stroke and frees its buffers. */
     fun endMaskStroke() {
         maskStroke = null
+        if (_uiState.value.isProjectDirty) scheduleAutosave()
     }
 
     fun setLayerMaskDensity(density: Float, layerIndex: Int = _uiState.value.selectedLayerIndex) {
