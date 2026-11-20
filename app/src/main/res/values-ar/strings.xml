@@ -853,4 +853,5 @@
         <item quantity="many">%d مشروعًا يستخدم هذا الـ LUT. ستفقد طبقاته هذا المظهر، ولا يمكن التراجع عن ذلك.</item>
         <item quantity="other">%d مشروع يستخدم هذا الـ LUT. ستفقد طبقاته هذا المظهر، ولا يمكن التراجع عن ذلك.</item>
     </plurals>
+    <string name="layer_name_copy">%1$s - نسخة</string>
 </resources>

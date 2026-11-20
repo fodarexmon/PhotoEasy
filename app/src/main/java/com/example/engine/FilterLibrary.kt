@@ -66,9 +66,22 @@ object FilterLibrary {
     /** Copies a .cube file into the app, validating it first. Throws on invalid files. */
     fun importLut(context: Context, uri: Uri, displayName: String?): LutInfo {
         ensureLoaded(context)
-        val text = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-            ?.also { require(it.size <= 12 * 1024 * 1024) { "LUT file too large" } }
-            ?.toString(Charsets.UTF_8)
+        // Read at most the size limit (+1 byte to detect a larger file) instead of the whole file,
+        // so picking a huge file cannot run out of memory before it is rejected.
+        val maxBytes = 12 * 1024 * 1024
+        val text = context.contentResolver.openInputStream(uri)?.use { input ->
+            val out = java.io.ByteArrayOutputStream()
+            val buf = ByteArray(64 * 1024)
+            var total = 0
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                total += n
+                require(total <= maxBytes) { "LUT file too large" }
+                out.write(buf, 0, n)
+            }
+            out.toByteArray()
+        }?.toString(Charsets.UTF_8)
             ?: throw IllegalArgumentException("Cannot read file")
         val fallback = (displayName ?: "LUT").substringBeforeLast('.').ifBlank { "LUT" }
         val lut = CubeLut.parse(text, fallback)

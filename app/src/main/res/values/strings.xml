@@ -849,4 +849,5 @@
         <item quantity="one">%d project uses this LUT. Its layers will lose this look; this cannot be undone.</item>
         <item quantity="other">%d projects use this LUT. Their layers will lose this look; this cannot be undone.</item>
     </plurals>
+    <string name="layer_name_copy">%1$s copy</string>
 </resources>

@@ -1,39 +1,35 @@
-# Build-ready validation notes
+# Build notes
 
-Static checks performed on this package before delivery:
+## Continuous integration
 
-- All Android XML resource/manifest files parse successfully.
-- English and Arabic string resources are in 1:1 parity (502 keys each).
-- Every `R.string.*` reference in Kotlin resolves to a declared string resource.
-- No duplicate string resource keys were found.
-- Gradle Wrapper scripts and `gradle-wrapper.jar` are included.
-- UX regression tests were added for Object Removal mask mode and Perspective mode cleanup, and the asynchronous duplicate-layer regression test now waits for completion.
-- A persistence round-trip test covers curves/HSL/filter intensity/text effects and verifies that a reloaded layer mask is a mutable ALPHA_8 bitmap with its pixels intact (runs with Robolectric `GraphicsMode.NATIVE`).
+Every push and pull request is built by GitHub Actions (`.github/workflows/android.yml`):
 
-## Not yet verified by a build
+1. JDK 21 (Robolectric with SDK 36 needs Java 21) and the runner's Android SDK.
+2. `./gradlew testDebugUnitTest` — Robolectric unit tests.
+3. `./gradlew assembleDebug` — the APK is uploaded as the `PhotoEasy-apk` artifact.
 
-The latest round of fixes (persistence schema 5, document-space masks, refine edge / select subject,
-serialised selection edits, gesture handling in `CanvasView`, editor/home UX changes, rename & share)
-was made without an Android SDK, so it has **not** been compiled, linted or run. Before release:
+A failing test fails the build, so a green run means the project compiles and all unit tests pass.
+
+## Releases
+
+A push to `main` publishes GitHub Release `v<versionName>` with the APK attached when that
+version has no Release yet. To publish a new version, raise `versionName` (and `versionCode`)
+in `app/build.gradle.kts`. A pushed `v*` tag or a Release created on GitHub also gets the APK.
+
+The APK is debug-signed. Set the repository secret `DEBUG_KEYSTORE_BASE64` (a base64-encoded
+keystore, alias `androiddebugkey`, passwords `android`) so every build uses the same key and a
+newer APK installs over an older one; without it each build generates a new key.
+
+## Local build
 
 ```bash
-./gradlew clean test lint assembleDebug
+./gradlew clean test assembleDebug
 ```
 
-Then check on a device: transform/perspective/text dragging, one-finger mask painting, rapid selection
-strokes, refine edge on a transformed layer, reopening an older project that contains a mask, export → Share,
-and rename from both the project list and the editor menu.
+Needs the Android SDK (compileSdk 36) and JDK 17+ (JDK 21 to run the unit tests).
 
-### Selection tools (latest round) — also unverified on a device
+## Still to check on a device
 
-- New dependency: `com.google.android.gms:play-services-mlkit-subject-segmentation:16.0.0-beta1`
-  (Select Subject). Needs Google Play services; falls back to the built-in method otherwise.
-- Check: magnifier loupe, live brush / quick selection / mask strokes, live magnetic lasso & polygon,
-  editable rectangle/ellipse (corners + move, from-centre, square/circle, W×H label), polygon
-  double-tap close and point dragging, Move-selection tool, magic-wand drag-to-tolerance,
-  feather/grow/shrink/smooth live sliders, Refine Edge live preview + view modes, Quick Mask view,
-  hold-to-subtract button, multi-level selection undo, selection restored after reopening a project.
-
-## Known leftovers
-
-- 66 string resources are currently unused (kept for now; `shrinkResources` removes them from release builds).
+Gestures (transform / perspective / text dragging, one-finger mask painting, rapid selection
+strokes), refine edge on a transformed layer, reopening older projects with masks, export → Share,
+and Select Subject (needs Google Play services; falls back to the built-in method otherwise).
