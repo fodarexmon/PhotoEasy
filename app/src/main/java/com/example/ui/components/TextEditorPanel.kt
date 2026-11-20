@@ -508,7 +508,7 @@ private fun ColorHeader(label: String, small: Boolean = false, onCustom: () -> U
 }
 
 @Composable
-private fun ColorSwatchesRow(
+internal fun ColorSwatchesRow(
     selectedColorHex: Int,
     onColorSelect: (Int) -> Unit
 ) {
@@ -536,7 +536,7 @@ private fun ColorSwatchesRow(
 }
 
 @Composable
-private fun CustomColorPickerDialog(
+internal fun CustomColorPickerDialog(
     initialColorHex: Int,
     onDismiss: () -> Unit,
     onColorConfirmed: (Int) -> Unit

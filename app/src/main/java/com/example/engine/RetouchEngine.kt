@@ -2,13 +2,14 @@ package com.example.engine
 
 import android.graphics.Bitmap
 import android.graphics.Rect
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
-enum class RetouchTool { BLUR, SHARPEN, SMUDGE, DODGE, BURN, CLONE, PATCH }
+enum class RetouchTool { BLUR, SHARPEN, SMUDGE, DODGE, BURN, CLONE, PATCH, FILL }
 
 enum class ToneRange { SHADOWS, MIDTONES, HIGHLIGHTS }
 
@@ -18,7 +19,13 @@ data class RetouchBrush(
     val strength: Float = 0.5f,
     val range: ToneRange = ToneRange.MIDTONES,
     /** Dodge / burn: change lightness only, keeping hue and colourfulness (Photoshop "Protect Tones"). */
-    val protectTones: Boolean = true
+    val protectTones: Boolean = true,
+    /** Fill (paint bucket): colour, opacity 0..1, tolerance 0..255, contiguous, smooth edges. */
+    val fillColor: Int = 0xFFE53935.toInt(),
+    val fillOpacity: Float = 1f,
+    val fillTolerance: Int = 32,
+    val fillContiguous: Boolean = true,
+    val fillAntiAlias: Boolean = true
 )
 
 /**
@@ -146,7 +153,7 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
             RetouchTool.CLONE -> { ensureBase(l, t, rr, b); cloneDab(cx, cy, r, l, t, rr, b) }
             RetouchTool.BLUR, RetouchTool.SHARPEN -> filterDab(cx, cy, r, l, t, rr, b)
             RetouchTool.SMUDGE -> smudgeDab(cx, cy, r, l, t, rr, b)
-            RetouchTool.PATCH -> return null
+            RetouchTool.PATCH, RetouchTool.FILL -> return null
         }
         return Rect(l, t, rr + 1, b + 1)
     }
@@ -346,6 +353,100 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
         }
         for (y in gt..gb) System.arraycopy(out, (y - gt) * bw, pix, y * width + gl, bw)
         return Rect(gl, gt, gr + 1, gb + 1)
+    }
+
+    // --- Fill (paint bucket) ------------------------------------------------------------------
+
+    /**
+     * Photoshop's Paint Bucket at ([x], [y]): pixels whose colour (and alpha) differ from the
+     * clicked pixel by at most [tolerance] per channel get [color] at [opacity]; only those
+     * connected to it when [contiguous]. [antiAlias] softens the edge by one pixel. Limited to the
+     * selection [mask] (alpha bytes, row stride [maskStride]) when given; a click outside it fills
+     * nothing. Returns the changed area, or null.
+     */
+    fun fill(
+        x: Int, y: Int, color: Int, opacity: Float, tolerance: Int, contiguous: Boolean, antiAlias: Boolean,
+        mask: ByteArray? = null, maskStride: Int = width
+    ): Rect? {
+        if (x !in 0 until width || y !in 0 until height || opacity <= 0f) return null
+        if (mask != null && (mask[y * maskStride + x].toInt() and 255) <= 8) return null
+        val seed = pix[y * width + x]
+        val tol = tolerance.coerceIn(0, 255)
+        val sa = seed ushr 24; val sr = (seed shr 16) and 255; val sg = (seed shr 8) and 255; val sb = seed and 255
+        fun matches(c: Int): Boolean {
+            val a = c ushr 24
+            // Fully transparent pixels match each other whatever their (meaningless) colour.
+            if (a == 0 && sa == 0) return true
+            return abs(a - sa) <= tol && abs(((c shr 16) and 255) - sr) <= tol &&
+                abs(((c shr 8) and 255) - sg) <= tol && abs((c and 255) - sb) <= tol
+        }
+        val region = ByteArray(width * height)
+        var l = width; var t = height; var r = -1; var b = -1
+        fun mark(i: Int, px: Int, py: Int) {
+            region[i] = 1
+            if (px < l) l = px; if (px > r) r = px; if (py < t) t = py; if (py > b) b = py
+        }
+        if (contiguous) {
+            // Scanline flood fill.
+            var stack = IntArray(256); var sp = 0
+            fun push(v: Int) { if (sp == stack.size) stack = stack.copyOf(stack.size * 2); stack[sp++] = v }
+            push(y * width + x)
+            while (sp > 0) {
+                val i = stack[--sp]
+                if (region[i].toInt() != 0) continue
+                val py = i / width
+                var lx = i % width
+                while (lx > 0 && region[py * width + lx - 1].toInt() == 0 && matches(pix[py * width + lx - 1])) lx--
+                var px = lx
+                var upOpen = false; var downOpen = false
+                while (px < width) {
+                    val j = py * width + px
+                    if (region[j].toInt() != 0 || !matches(pix[j])) break
+                    mark(j, px, py)
+                    if (py > 0) {
+                        val u = j - width
+                        val ok = region[u].toInt() == 0 && matches(pix[u])
+                        if (ok && !upOpen) push(u)
+                        upOpen = ok
+                    }
+                    if (py < height - 1) {
+                        val d = j + width
+                        val ok = region[d].toInt() == 0 && matches(pix[d])
+                        if (ok && !downOpen) push(d)
+                        downOpen = ok
+                    }
+                    px++
+                }
+            }
+        } else {
+            for (py in 0 until height) for (px in 0 until width) {
+                val i = py * width + px
+                if (matches(pix[i])) mark(i, px, py)
+            }
+        }
+        if (r < 0) return null
+        // One pixel of soft edge (anti-aliasing) around the region.
+        val gl = if (antiAlias) max(0, l - 1) else l; val gt = if (antiAlias) max(0, t - 1) else t
+        val gr = if (antiAlias) min(width - 1, r + 1) else r; val gb = if (antiAlias) min(height - 1, b + 1) else b
+        val op = opacity.coerceIn(0f, 1f)
+        var any = false
+        for (py in gt..gb) for (px in gl..gr) {
+            val i = py * width + px
+            var cov = if (region[i].toInt() != 0) 1f else 0f
+            if (cov == 0f && antiAlias) {
+                var n = 0
+                for (dy in -1..1) for (dx in -1..1) {
+                    val qx = px + dx; val qy = py + dy
+                    if (qx in 0 until width && qy in 0 until height && region[qy * width + qx].toInt() != 0) n++
+                }
+                cov = n / 9f
+            }
+            if (mask != null) cov *= (mask[py * maskStride + px].toInt() and 255) / 255f
+            if (cov <= 0f) continue
+            pix[i] = mix(pix[i], color, cov * op)
+            any = true
+        }
+        return if (any) Rect(gl, gt, gr + 1, gb + 1) else null
     }
 
     // --- Preview -----------------------------------------------------------------------------

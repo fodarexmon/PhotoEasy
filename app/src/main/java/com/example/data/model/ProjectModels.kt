@@ -165,7 +165,7 @@ data class AdjustmentLayerParams(
 }
 
 /**
- * A layer's pixels before its first retouch stroke in this editing session, shown by Before/After.
+ * A layer's pixels before its first pixel edit (retouch, Liquify, effects…) in this session, shown by Before/After.
  * Used only while the layer keeps the same content size (else the "before" would not line up).
  */
 class LayerBefore(val bitmap: Bitmap, val contentWidth: Float, val contentHeight: Float)
