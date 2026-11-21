@@ -324,6 +324,33 @@ class ProToolsTest {
         assertTrue(Color.alpha(withAi.getPixel(52, 20)) < 40)
     }
 
+    // --- Colour decontamination --------------------------------------------------------------
+
+    @Test
+    fun `decontamination restores strand colours and cleans the tinted rim`() {
+        val w = 120; val h = 60
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val alpha = ByteArray(w * h)
+        for (y in 0 until h) for (x in 0 until w) {
+            val a = when { x < 50 -> 1f; x >= 60 -> 0f; else -> 1f - (x - 49) / 11f }
+            alpha[y * w + x] = (a * 255).toInt().coerceIn(0, 255).toByte()
+            val fr = 200 + (y % 5) * 6
+            var r = (a * fr + (1 - a) * 30).toInt(); val g = (a * 40 + (1 - a) * 60).toInt(); var b = (a * 30 + (1 - a) * 220).toInt()
+            if (x in 46..49) { r -= 40; b += 60 }
+            bmp.setPixel(x, y, Color.argb(255, r, g, b.coerceAtMost(255)))
+        }
+        val out = com.example.engine.ColorDecontaminator.decontaminate(bmp, alpha, 1f)!!
+        assertTrue(Color.red(out.getPixel(58, 30)) > 150 && Color.blue(out.getPixel(58, 30)) < 90)
+        assertTrue(Color.red(out.getPixel(52, 30)) > 170 && Color.blue(out.getPixel(52, 30)) < 80)
+        assertTrue(Color.blue(out.getPixel(49, 30)) < Color.blue(bmp.getPixel(49, 30)) - 15)
+        assertEquals(bmp.getPixel(10, 30), out.getPixel(10, 30))
+        assertEquals(bmp.getPixel(100, 30), out.getPixel(100, 30))
+        assertTrue((25..34).map { Color.red(out.getPixel(53, it)) }.toSet().size > 1)
+        // Amount 0 or no soft pixels: nothing to do.
+        assertNull(com.example.engine.ColorDecontaminator.decontaminate(bmp, alpha, 0f))
+        assertNull(com.example.engine.ColorDecontaminator.decontaminate(bmp, ByteArray(w * h) { 255.toByte() }, 1f))
+    }
+
     // --- Frequency separation ---------------------------------------------------------------
 
     @Test

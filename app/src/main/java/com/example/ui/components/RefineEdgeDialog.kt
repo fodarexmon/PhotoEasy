@@ -450,10 +450,9 @@ fun RefineEdgeDialog(
                             title = stringResource(R.string.refine_decontaminate),
                             description = stringResource(R.string.refine_decontaminate_desc),
                             checked = cfg.decontaminateColors,
-                            enabled = cfg.radiusPx > 0,
                             color = CyanAccent
                         ) { cfg = cfg.copy(decontaminateColors = it) }
-                        if (cfg.decontaminateColors && cfg.radiusPx > 0) {
+                        if (cfg.decontaminateColors) {
                             RefineSliderItem(
                                 label = stringResource(R.string.refine_decontaminate_amount),
                                 valueLabel = "${(cfg.decontaminateAmount * 100).toInt()}%",

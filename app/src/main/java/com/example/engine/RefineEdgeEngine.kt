@@ -116,7 +116,8 @@ object RefineEdgeEngine {
         val area = refineArea?.takeIf { it.size == n }
         val ai = aiAlpha?.takeIf { it.size == n }
         if (config.radiusPx <= 0 && area == null) {
-            return RefineResult(globalRefinements(alpha, w, h, config), null)
+            val m = globalRefinements(alpha, w, h, config)
+            return RefineResult(m, decontaminate(source, m, config))
         }
 
         // --- 2. Trimap ---------------------------------------------------------------------------
@@ -150,7 +151,8 @@ object RefineEdgeEngine {
             }
         }
 
-        val decontaminated: Bitmap? = if (config.decontaminateColors) source.copy(Bitmap.Config.ARGB_8888, true) else null
+        // Colours are decontaminated on the finished matte (see ColorDecontaminator), not per tile.
+        val decontaminated: Bitmap? = null
 
         if (maxX >= 0) {
             // Brushed areas can be wide: look further for definite foreground / background.
@@ -185,7 +187,16 @@ object RefineEdgeEngine {
         }
 
         // --- 5. Global refinements ---------------------------------------------------------------
-        return RefineResult(globalRefinements(out, w, h, config), decontaminated)
+        val finalMask = globalRefinements(out, w, h, config)
+        return RefineResult(finalMask, decontaminate(source, finalMask, config))
+    }
+
+    /** Photoshop-style colour decontamination of [source] by the final [mask], when requested. */
+    private fun decontaminate(source: Bitmap, mask: Bitmap, config: RefineEdgeConfig): Bitmap? {
+        if (!config.decontaminateColors) return null
+        val alpha = SelectionEngine.alphaBytesPacked(mask)
+        return ColorDecontaminator.decontaminate(source, alpha, config.decontaminateAmount)
+            ?: source.copy(Bitmap.Config.ARGB_8888, true) // nothing to clean: unchanged colours
     }
 
     /**
