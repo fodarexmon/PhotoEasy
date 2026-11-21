@@ -240,6 +240,65 @@ class ProToolsTest {
         assertEquals(4096, com.example.engine.LayerRenderer.sourcePixelsNeeded(layer, 1f))
     }
 
+    // --- Brush, eraser, gradient and pattern fills -----------------------------------------
+
+    @Test
+    fun `brush opacity caps a stroke and the eraser clears`() {
+        val w = 60; val h = 40
+        val px = IntArray(w * h) { Color.WHITE }
+        val c = com.example.engine.RetouchCanvas(w, h, px)
+        c.beginStroke(com.example.engine.RetouchTool.BRUSH, com.example.engine.RetouchBrush(hardness = 1f, fillColor = Color.BLUE, brushOpacity = 0.5f, brushSmoothing = 0f))
+        c.stroke(floatArrayOf(10f, 20f, 50f, 20f, 10f, 20f), 5f); c.endStroke()
+        val mid = px[20 * w + 30]
+        assertEquals(255, mid and 255)
+        assertTrue(((mid shr 16) and 255) in 120..135)
+        assertEquals(Color.WHITE, px[2 * w + 2])
+        c.beginStroke(com.example.engine.RetouchTool.ERASER, com.example.engine.RetouchBrush(hardness = 1f, brushSmoothing = 0f))
+        c.stroke(floatArrayOf(30f, 5f, 30f, 35f), 3f); c.endStroke()
+        assertEquals(0, px[20 * w + 30] ushr 24)
+    }
+
+    @Test
+    fun `gradient and pattern fills`() {
+        val w = 60; val h = 40
+        val b = com.example.engine.RetouchBrush(fillColor = Color.RED, fillColor2 = Color.BLUE)
+        val g = IntArray(w * h) { Color.WHITE }
+        com.example.engine.RetouchCanvas(w, h, g).fill(5, 5, { x, y -> com.example.engine.RetouchCanvas.gradientAt(b, 0f, 0f, w.toFloat(), 0f, x, y) }, 1f, 10, true, false)
+        assertTrue(Color.red(g[10 * w + 1]) > 240 && Color.blue(g[10 * w + 58]) > 230)
+        val gt = IntArray(w * h) { Color.GREEN }
+        val bt = b.copy(gradientToTransparent = true)
+        com.example.engine.RetouchCanvas(w, h, gt).fill(5, 5, { x, y -> com.example.engine.RetouchCanvas.gradientAt(bt, 0f, 0f, w.toFloat(), 0f, x, y) }, 1f, 10, true, false)
+        assertEquals(255, gt[10 * w + 59] ushr 24)
+        assertTrue(Color.green(gt[10 * w + 59]) > 230)
+        for (p in com.example.engine.FillPattern.values()) {
+            val vals = HashSet<Int>()
+            for (y in 0 until 200 step 3) for (x in 0 until 200 step 3) vals.add(com.example.engine.RetouchCanvas.patternAt(b.copy(pattern = p), 200, x, y))
+            assertTrue("$p", vals.size >= 2)
+        }
+    }
+
+    @Test
+    fun `skin retouch removes a blemish and keeps clean skin`() {
+        val w = 400; val h = 400
+        val skinColor = Color.rgb(210, 160, 140)
+        val g = face()
+        val fix = com.example.engine.FaceSkin.fixer(listOf(g to com.example.engine.FaceAdjust(blemishes = 100f)))!!
+        // Geometry of face() is in a 200 px image: scale 2 for this 400 px one.
+        val px2 = IntArray(w * h) { skinColor }
+        for (y in 206..214) for (x in 146..154) px2[y * w + x] = Color.rgb(122, 74, 64)
+        fix(px2, w, h, 2f)
+        assertTrue(lum(px2[210 * w + 150]) > lum(Color.rgb(122, 74, 64)) + 40)
+        assertTrue(kotlin.math.abs(lum(px2[260 * w + 150]) - lum(skinColor)) < 6)
+        assertNull(com.example.engine.FaceSkin.fixer(listOf(g to com.example.engine.FaceAdjust())))
+        // Liquify carries the skin fix to the full-resolution result.
+        val src = Bitmap.createBitmap(200, 200, Bitmap.Config.ARGB_8888).apply { eraseColor(skinColor) }
+        for (y in 103..107) for (x in 73..77) src.setPixel(x, y, Color.rgb(122, 74, 64))
+        val e = LiquifyEngine(src)
+        e.setSkinFix(fix)
+        assertTrue(e.hasChanges)
+        assertTrue(lum(e.output[105 * 200 + 75]) > lum(Color.rgb(122, 74, 64)) + 30)
+    }
+
     // --- Frequency separation ---------------------------------------------------------------
 
     @Test

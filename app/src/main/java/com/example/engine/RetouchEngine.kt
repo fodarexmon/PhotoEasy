@@ -8,8 +8,19 @@ import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import kotlin.math.sin
 
-enum class RetouchTool { BLUR, SHARPEN, SMUDGE, DODGE, BURN, CLONE, PATCH, FILL }
+enum class RetouchTool { BRUSH, ERASER, BLUR, SHARPEN, SMUDGE, DODGE, BURN, CLONE, PATCH, FILL }
+
+/** Brush tip shapes of the paint brush and eraser. */
+enum class BrushTip { ROUND, CALLIGRAPHY, SPRAY, CHALK }
+
+/** What the Fill tool puts in: a colour, a gradient (drag) or a pattern. */
+enum class FillMode { COLOR, GRADIENT, PATTERN }
+
+enum class GradientType { LINEAR, RADIAL, REFLECTED }
+
+enum class FillPattern { CHECKER, STRIPES, DOTS, GRID, BRICKS, WAVES, NOISE, MARBLE }
 
 enum class ToneRange { SHADOWS, MIDTONES, HIGHLIGHTS }
 
@@ -25,7 +36,24 @@ data class RetouchBrush(
     val fillOpacity: Float = 1f,
     val fillTolerance: Int = 32,
     val fillContiguous: Boolean = true,
-    val fillAntiAlias: Boolean = true
+    val fillAntiAlias: Boolean = true,
+    /** Second colour of gradients and patterns. */
+    val fillColor2: Int = 0xFFFFFFFF.toInt(),
+    val fillMode: FillMode = FillMode.COLOR,
+    val gradientType: GradientType = GradientType.LINEAR,
+    /** Gradient from the colour to transparent instead of to the second colour. */
+    val gradientToTransparent: Boolean = false,
+    val pattern: FillPattern = FillPattern.CHECKER,
+    /** Pattern size, 10..400 %. */
+    val patternScale: Float = 100f,
+    /** Paint brush / eraser (Photoshop): opacity caps a stroke, flow builds up per dab. */
+    val brushOpacity: Float = 1f,
+    val brushFlow: Float = 1f,
+    /** Distance between dabs, fraction of the brush diameter (0.02..1). */
+    val brushSpacing: Float = 0.12f,
+    /** Stroke smoothing 0..1 (steadier lines). */
+    val brushSmoothing: Float = 0.3f,
+    val brushTip: BrushTip = BrushTip.ROUND
 )
 
 /**
@@ -55,6 +83,9 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
     private var smudgeR = 0
     private var lastX = Float.NaN
     private var lastY = Float.NaN
+    private var smX = Float.NaN
+    private var smY = Float.NaN
+    private var dabIndex = 0
 
     fun beginStroke(tool: RetouchTool, brush: RetouchBrush, cloneOffsetX: Float = 0f, cloneOffsetY: Float = 0f) {
         this.tool = tool; this.brush = brush
@@ -62,6 +93,8 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
         baseTiles.clear(); coverage.clear()
         smudgeBuf = null
         lastX = Float.NaN; lastY = Float.NaN
+        smX = Float.NaN; smY = Float.NaN
+        dabIndex = 0
     }
 
     fun endStroke() {
@@ -119,12 +152,25 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
     fun stroke(pts: FloatArray, r: Float): Rect? {
         if (pts.size < 2) return null
         val radius = r.coerceAtLeast(1f)
-        val spacing = (radius * if (tool == RetouchTool.SMUDGE || tool == RetouchTool.BLUR) 0.15f else 0.25f).coerceAtLeast(1f)
+        val painting = tool == RetouchTool.BRUSH || tool == RetouchTool.ERASER
+        val spacing = (radius * when {
+            painting -> 2f * brush.brushSpacing.coerceIn(0.02f, 1f)
+            tool == RetouchTool.SMUDGE || tool == RetouchTool.BLUR -> 0.15f
+            else -> 0.25f
+        }).coerceAtLeast(1f)
         var dirty: Rect? = null
         fun add(rr: Rect?) { if (rr != null) { if (dirty == null) dirty = Rect(rr) else dirty!!.union(rr) } }
         var i = 0
         while (i + 1 < pts.size) {
-            val x = pts[i]; val y = pts[i + 1]
+            var x = pts[i]; var y = pts[i + 1]
+            if (painting && brush.brushSmoothing > 0f) {
+                // Lazy-follow smoothing: the brush trails the finger a little for steady lines.
+                if (smX.isNaN()) { smX = x; smY = y } else {
+                    val k = 1f - brush.brushSmoothing.coerceIn(0f, 0.95f) * 0.9f
+                    smX += (x - smX) * k; smY += (y - smY) * k
+                }
+                x = smX; y = smY
+            }
             if (lastX.isNaN()) {
                 add(dab(x, y, radius)); lastX = x; lastY = y
             } else {
@@ -153,9 +199,68 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
             RetouchTool.CLONE -> { ensureBase(l, t, rr, b); cloneDab(cx, cy, r, l, t, rr, b) }
             RetouchTool.BLUR, RetouchTool.SHARPEN -> filterDab(cx, cy, r, l, t, rr, b)
             RetouchTool.SMUDGE -> smudgeDab(cx, cy, r, l, t, rr, b)
+            RetouchTool.BRUSH, RetouchTool.ERASER -> paintDab(cx, cy, r, l, t, rr, b)
             RetouchTool.PATCH, RetouchTool.FILL -> return null
         }
         return Rect(l, t, rr + 1, b + 1)
+    }
+
+    // --- Paint brush / eraser ----------------------------------------------------------------
+
+    /** Stroke coverage that builds up by [add] per dab (flow) but never above [cap] (opacity). */
+    private fun accumulate(x: Int, y: Int, add: Float, cap: Float): Float {
+        val arr = coverage.getOrPut(tileKey(x, y)) { ByteArray(tile * tile) }
+        val i = (y % tile) * tile + (x % tile)
+        val old = (arr[i].toInt() and 255) / 255f
+        if (old >= cap) return old
+        val nv = min(cap, old + (1f - old) * add)
+        arr[i] = (nv * 255f).roundToInt().coerceIn(0, 255).toByte()
+        return nv
+    }
+
+    private fun hash(x: Int, y: Int, s: Int): Float {
+        var h = x * 374761393 + y * 668265263 + s * 1274126177
+        h = (h xor (h ushr 13)) * 1274126177
+        return ((h xor (h ushr 16)) and 0xFFFFFF) / 16777215f
+    }
+
+    /** Tip shape weight at pixel (x, y) for a dab at (cx, cy). */
+    private fun tipWeight(x: Int, y: Int, cx: Float, cy: Float, r: Float): Float = when (brush.brushTip) {
+        BrushTip.ROUND -> weight(dist(x, y, cx, cy), r)
+        BrushTip.CALLIGRAPHY -> {
+            // A flat nib at 45°: thin one way, wide the other.
+            val dx = x + 0.5f - cx; val dy = y + 0.5f - cy
+            val u = (dx + dy) * 0.7071f; val v = (dy - dx) * 0.7071f
+            weight(sqrt(u * u + (v / 0.28f) * (v / 0.28f)), r)
+        }
+        BrushTip.SPRAY -> {
+            val w = weight(dist(x, y, cx, cy), r)
+            if (w > 0f && hash(x, y, dabIndex) < 0.07f + 0.1f * brush.hardness) 1f else 0f
+        }
+        BrushTip.CHALK -> {
+            // Fixed grain on the image: repeated dabs leave the gaps, like chalk on paper.
+            val w = weight(dist(x, y, cx, cy), r)
+            if (w <= 0f) 0f else w * (if (hash(x shr 1, y shr 1, 7) > 0.42f) 1f else 0.12f)
+        }
+    }
+
+    private fun paintDab(cx: Float, cy: Float, r: Float, l: Int, t: Int, rr: Int, b: Int) {
+        ensureBase(l, t, rr, b)
+        dabIndex++
+        val flow = brush.brushFlow.coerceIn(0.01f, 1f)
+        val cap = brush.brushOpacity.coerceIn(0.01f, 1f)
+        val erase = tool == RetouchTool.ERASER
+        val color = brush.fillColor or (0xFF shl 24)
+        for (y in t..b) for (x in l..rr) {
+            val w = tipWeight(x, y, cx, cy, r)
+            if (w <= 0f) continue
+            val cov = accumulate(x, y, w * flow, cap)
+            val c = base(x, y)
+            pix[y * width + x] = if (erase) {
+                val a = ((c ushr 24) * (1f - cov)).roundToInt()
+                if (a <= 0) 0 else (a shl 24) or (c and 0xFFFFFF)
+            } else over(c, color, cov)
+        }
     }
 
     private fun rangeWeight(lum: Float): Float = when (brush.range) {
@@ -367,6 +472,12 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
     fun fill(
         x: Int, y: Int, color: Int, opacity: Float, tolerance: Int, contiguous: Boolean, antiAlias: Boolean,
         mask: ByteArray? = null, maskStride: Int = width
+    ): Rect? = fill(x, y, { _, _ -> color }, opacity, tolerance, contiguous, antiAlias, mask, maskStride)
+
+    /** As [fill] with a colour per pixel ([paint], e.g. a gradient or a pattern). */
+    fun fill(
+        x: Int, y: Int, paint: (Int, Int) -> Int, opacity: Float, tolerance: Int, contiguous: Boolean, antiAlias: Boolean,
+        mask: ByteArray? = null, maskStride: Int = width
     ): Rect? {
         if (x !in 0 until width || y !in 0 until height || opacity <= 0f) return null
         if (mask != null && (mask[y * maskStride + x].toInt() and 255) <= 8) return null
@@ -443,7 +554,7 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
             }
             if (mask != null) cov *= (mask[py * maskStride + px].toInt() and 255) / 255f
             if (cov <= 0f) continue
-            pix[i] = mix(pix[i], color, cov * op)
+            pix[i] = over(pix[i], paint(px, py), cov * op)
             any = true
         }
         return if (any) Rect(gl, gt, gr + 1, gb + 1) else null
@@ -490,6 +601,94 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
             ((g * 255f).roundToInt().coerceIn(0, 255) shl 8) or (b * 255f).roundToInt().coerceIn(0, 255)
 
     companion object {
+        /** [src] painted over [dst] at strength [k] (src alpha times k), "normal" blending. */
+        fun over(dst: Int, src: Int, k: Float): Int {
+            val sa = (src ushr 24) / 255f * k.coerceIn(0f, 1f)
+            if (sa <= 0f) return dst
+            val da = (dst ushr 24) / 255f
+            val oa = sa + da * (1f - sa)
+            if (oa <= 0f) return 0
+            fun ch(sh: Int): Int {
+                val s = ((src shr sh) and 255) * sa; val d = ((dst shr sh) and 255) * da * (1f - sa)
+                return ((s + d) / oa).roundToInt().coerceIn(0, 255)
+            }
+            return ((oa * 255f).roundToInt().coerceIn(0, 255) shl 24) or (ch(16) shl 16) or (ch(8) shl 8) or ch(0)
+        }
+
+        /** Colour of a gradient from ([sx], [sy]) to ([ex], [ey]) at pixel (x, y). */
+        fun gradientAt(b: RetouchBrush, sx: Float, sy: Float, ex: Float, ey: Float, x: Int, y: Int): Int {
+            val vx = ex - sx; val vy = ey - sy
+            val len2 = max(1e-3f, vx * vx + vy * vy)
+            val px = x + 0.5f - sx; val py = y + 0.5f - sy
+            val t = when (b.gradientType) {
+                GradientType.LINEAR -> (px * vx + py * vy) / len2
+                GradientType.RADIAL -> sqrt((px * px + py * py) / len2)
+                GradientType.REFLECTED -> abs((px * vx + py * vy) / len2)
+            }.coerceIn(0f, 1f)
+            val c1 = b.fillColor or (0xFF shl 24)
+            val c2 = if (b.gradientToTransparent) c1 and 0xFFFFFF else b.fillColor2 or (0xFF shl 24)
+            return mix(c1, c2, t).let { if (b.gradientToTransparent && t >= 1f) c1 and 0xFFFFFF else it }
+        }
+
+        private fun h2(x: Int, y: Int): Float {
+            var h = x * 374761393 + y * 668265263
+            h = (h xor (h ushr 13)) * 1274126177
+            return ((h xor (h ushr 16)) and 0xFFFFFF) / 16777215f
+        }
+
+        private fun valueNoise(x: Float, y: Float): Float {
+            val xi = kotlin.math.floor(x).toInt(); val yi = kotlin.math.floor(y).toInt()
+            val tx = x - xi; val ty = y - yi
+            val sx = tx * tx * (3 - 2 * tx); val sy = ty * ty * (3 - 2 * ty)
+            val a = h2(xi, yi); val b = h2(xi + 1, yi); val c = h2(xi, yi + 1); val d = h2(xi + 1, yi + 1)
+            return (a + (b - a) * sx) * (1 - sy) + (c + (d - c) * sx) * sy
+        }
+
+        /**
+         * Colour of pattern [b].pattern at pixel (x, y) of an image whose shorter side is
+         * [size] (the pattern scales with the image, so the preview matches the result).
+         */
+        fun patternAt(b: RetouchBrush, size: Int, x: Int, y: Int): Int {
+            val c1 = b.fillColor or (0xFF shl 24); val c2 = b.fillColor2 or (0xFF shl 24)
+            val cell = max(2f, size / 16f * (b.patternScale / 100f).coerceIn(0.1f, 4f))
+            val u = x / cell; val v = y / cell
+            fun frac(f: Float) = f - kotlin.math.floor(f)
+            val t: Float = when (b.pattern) {
+                FillPattern.CHECKER -> if (((kotlin.math.floor(u).toInt() + kotlin.math.floor(v).toInt()) and 1) == 0) 0f else 1f
+                FillPattern.STRIPES -> if (frac((u + v) * 0.5f) < 0.5f) 0f else 1f
+                FillPattern.DOTS -> {
+                    val dx = frac(u) - 0.5f; val dy = frac(v) - 0.5f
+                    val d = sqrt(dx * dx + dy * dy)
+                    ((d - 0.28f) / 0.04f).coerceIn(0f, 1f)
+                }
+                FillPattern.GRID -> {
+                    val lw = 0.08f
+                    if (frac(u) < lw || frac(v) < lw) 0f else 1f
+                }
+                FillPattern.BRICKS -> {
+                    val bv = v * 2f
+                    val row = kotlin.math.floor(bv).toInt()
+                    val bu = u + if (row and 1 == 1) 0.5f else 0f
+                    if (frac(bv) < 0.1f || frac(bu) < 0.05f) 0f else 1f
+                }
+                FillPattern.WAVES -> {
+                    val w = sin((u * 1.5f + sin(v * 0.9f) * 0.8f) * 3.14159f)
+                    (w * 0.5f + 0.5f)
+                }
+                FillPattern.NOISE -> {
+                    val n = valueNoise(u * 4f, v * 4f) * 0.6f + valueNoise(u * 9f, v * 9f) * 0.4f
+                    ((n - 0.2f) / 0.6f).coerceIn(0f, 1f)
+                }
+                FillPattern.MARBLE -> {
+                    var n = 0f; var amp = 0.5f; var fq = 1f
+                    repeat(4) { n += valueNoise(u * fq, v * fq) * amp; amp *= 0.5f; fq *= 2f }
+                    val w = sin((u + v + n * 5f) * 3.14159f * 0.6f)
+                    (w * 0.5f + 0.5f).let { it * it }
+                }
+            }
+            return mix(c1, c2, t)
+        }
+
         /** Premultiplied mix of two ARGB colours: [t] = 0 gives [a], 1 gives [b]. */
         fun mix(a: Int, b: Int, t: Float): Int {
             if (t <= 0f) return a

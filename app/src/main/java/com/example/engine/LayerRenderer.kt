@@ -51,15 +51,14 @@ object LayerRenderer {
     // Last Pro effect preview result: panning, zooming or moving another slider re-renders the
     // canvas, and effects like oil paint are too slow to recompute for every frame.
     private val proCacheLock = Any()
-    private var proCacheKey: String? = null
-    private var proCacheBitmap: Bitmap? = null
+    /** Two entries: the quick low-resolution preview pass and the sharp one. */
+    private val proCache = LinkedHashMap<String, Bitmap>()
 
     /** Frees the cached Pro effect preview (call when the preview is closed). */
     fun clearProEffectCache() {
         synchronized(proCacheLock) {
-            proCacheBitmap?.let { if (!it.isRecycled) it.recycle() }
-            proCacheBitmap = null
-            proCacheKey = null
+            proCache.values.forEach { if (!it.isRecycled) it.recycle() }
+            proCache.clear()
         }
     }
 
@@ -71,8 +70,8 @@ object LayerRenderer {
         val key = "${System.identityHashCode(preview.sourceBitmap)}:${preview.sourceBitmap?.generationId}:" +
                 "${input.width}x${input.height}:${preview.effect}:${preview.params}:${preview.fullResMaxDimension}"
         synchronized(proCacheLock) {
-            val cached = proCacheBitmap
-            if (key == proCacheKey && cached != null && !cached.isRecycled) {
+            val cached = proCache[key]
+            if (cached != null && !cached.isRecycled) {
                 return cached.copy(Bitmap.Config.ARGB_8888, true)
             }
         }
@@ -87,9 +86,12 @@ object LayerRenderer {
             throw e
         }
         synchronized(proCacheLock) {
-            proCacheBitmap?.let { if (!it.isRecycled) it.recycle() }
-            proCacheBitmap = result.copy(Bitmap.Config.ARGB_8888, false)
-            proCacheKey = key
+            proCache.remove(key)?.let { if (!it.isRecycled) it.recycle() }
+            proCache[key] = result.copy(Bitmap.Config.ARGB_8888, false)
+            while (proCache.size > 2) {
+                val eldest = proCache.keys.first()
+                proCache.remove(eldest)?.let { if (!it.isRecycled) it.recycle() }
+            }
         }
         return result
     }

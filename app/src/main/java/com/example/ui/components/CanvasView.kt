@@ -509,6 +509,8 @@ fun CanvasView(
     var showSnapH by remember { mutableStateOf(false) }
 
     var compositeBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    /** How long the last full preview render took (ms): decides whether a quick pass goes first. */
+    val lastRenderMs = remember { LongArray(1) }
     var originalCompositeBitmap by remember { mutableStateOf<Bitmap?>(null) }
 
     // Reusable double-buffer pool for Proxy Preview rendering:
@@ -590,6 +592,22 @@ fun CanvasView(
         val renderTarget: Bitmap = backBuffer
 
         try {
+            // Slow looks (heavy filters, effects): show a quick low-resolution pass first so the
+            // change appears at once, then the sharp one replaces it.
+            val shownMax = max(targetW, targetH)
+            if (lastRenderMs[0] > 90L && shownMax > 900) {
+                val quick = withContext(Dispatchers.Default) {
+                    LayerRenderer.renderCompositeCanvas(
+                        context = context, layers = layersSnapshot, width = w, height = h,
+                        includeBackground = false, maxPreviewDimension = 600,
+                        activeSelectionMask = null, selectedLayerId = null,
+                        proEffectPreview = if (showGeneralOriginal || showSelectedLayerOriginal) null else proEffectPreview,
+                        proEffectMask = selectionMask
+                    )
+                }
+                if (gen == renderGeneration.get() && currentCoroutineContext().isActive) compositeBitmap = quick
+            }
+            val renderStart = android.os.SystemClock.uptimeMillis()
             busyBuffers.add(renderTarget)
             val rendered = try { withContext(Dispatchers.Default) {
                 LayerRenderer.renderCompositeCanvas(
@@ -615,6 +633,7 @@ fun CanvasView(
             }
 
             // Swap buffers only if this generation is still the latest and the coroutine is active
+            lastRenderMs[0] = android.os.SystemClock.uptimeMillis() - renderStart
             if (gen == renderGeneration.get() && currentCoroutineContext().isActive) {
                 activeBufferIndex = backBufferIndex
                 compositeBitmap = rendered

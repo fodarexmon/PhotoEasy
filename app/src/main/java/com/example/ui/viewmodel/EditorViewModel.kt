@@ -190,7 +190,7 @@ data class EditorUiState(
     val customPresets: List<com.example.engine.CustomPreset> = emptyList(),
     val favoriteFilters: Set<String> = emptySet(),
     // Retouch brushes
-    val retouchTool: com.example.engine.RetouchTool = com.example.engine.RetouchTool.BLUR,
+    val retouchTool: com.example.engine.RetouchTool = com.example.engine.RetouchTool.BRUSH,
     val retouchSizeDp: Float = 60f,
     val retouchBrush: com.example.engine.RetouchBrush = com.example.engine.RetouchBrush(),
     /** Clone Stamp source point (document coordinates), set by tapping in "set source" mode. */
@@ -4062,7 +4062,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         ) : RetouchEvent()
         class Move(val points: List<PointF>, val docRadius: Float) : RetouchEvent()
         class Fill(
-            val layer: Layer, val docW: Int, val docH: Int, val pointDoc: PointF,
+            val layer: Layer, val docW: Int, val docH: Int, val pointDoc: PointF, val endDoc: PointF?,
             val brush: com.example.engine.RetouchBrush, val selection: Bitmap?
         ) : RetouchEvent()
         class End(val points: List<PointF>, val docRadius: Float) : RetouchEvent()
@@ -4083,11 +4083,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private val retouchEvents = kotlinx.coroutines.channels.Channel<RetouchEvent>(kotlinx.coroutines.channels.Channel.UNLIMITED)
     private var retouchConsumer: Job? = null
     private val retouchWrites = java.util.Collections.synchronizedList(mutableListOf<Job>())
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val retouchWriteDispatcher = Dispatchers.IO.limitedParallelism(1)
     /** Retouch strokes queued or being painted: autosave waits until they are committed. */
     private var retouchPending = 0
     private val retouchStrokeActive: Boolean get() = retouchPending > 0
     /** The stroke being processed has recorded its undo step (roll it back if it fails). */
     private var retouchStepOpen = false
+    private class GradientDrag(val layer: Layer, val start: PointF, val selection: Bitmap?)
+    /** Fill in gradient mode: where the drag started. */
+    private var gradientStart: GradientDrag? = null
     /** Patch's lasso points while it is being drawn (document coordinates). */
     private var patchLasso: MutableList<PointF>? = null
     private var retouchStrokeRejected = false
@@ -4114,7 +4119,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
-    fun setRetouchSize(sizeDp: Float) { _uiState.value = _uiState.value.copy(retouchSizeDp = sizeDp.coerceIn(4f, 400f)) }
+    fun setRetouchSize(sizeDp: Float) { _uiState.value = _uiState.value.copy(retouchSizeDp = sizeDp.coerceIn(1f, 400f)) }
 
     fun setRetouchBrush(brush: com.example.engine.RetouchBrush) { _uiState.value = _uiState.value.copy(retouchBrush = brush) }
 
@@ -4197,12 +4202,23 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
             if (tool == com.example.engine.RetouchTool.PATCH) { patchStartDoc = points.firstOrNull(); return }
             val first = points.firstOrNull() ?: return
-            if (tool == com.example.engine.RetouchTool.FILL) {
-                // A tap: fills (or picks the colour) once; the rest of the touch is ignored.
+            val paints = tool == com.example.engine.RetouchTool.FILL || tool == com.example.engine.RetouchTool.BRUSH
+            if (paints && st.isFillColorPicking) {
+                // Eyedropper: the touch picks the colour instead of painting.
                 retouchStrokeRejected = true
-                if (st.isFillColorPicking) { pickFillColor(layer!!, first.x, first.y, proj.width, proj.height); return }
+                pickFillColor(layer!!, first.x, first.y, proj.width, proj.height)
+                return
+            }
+            if (tool == com.example.engine.RetouchTool.FILL) {
                 val sel = st.selectionMask?.takeIf { hasSelection }
-                queueRetouch(RetouchEvent.Fill(layer!!, proj.width, proj.height, PointF(first.x, first.y), st.retouchBrush, sel))
+                if (st.retouchBrush.fillMode == com.example.engine.FillMode.GRADIENT) {
+                    // A gradient is dragged: from where the finger goes down to where it lifts.
+                    gradientStart = GradientDrag(layer!!, PointF(first.x, first.y), sel)
+                    return
+                }
+                // A tap: fills once; the rest of the touch is ignored.
+                retouchStrokeRejected = true
+                queueRetouch(RetouchEvent.Fill(layer!!, proj.width, proj.height, PointF(first.x, first.y), null, st.retouchBrush, sel))
                 return
             }
             if (tool == com.example.engine.RetouchTool.CLONE) {
@@ -4216,6 +4232,18 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         if (retouchStrokeRejected) return
+        val grad = gradientStart
+        if (tool == com.example.engine.RetouchTool.FILL && grad != null) {
+            if (phase != StrokePhase.END) return
+            gradientStart = null
+            val end = points.lastOrNull() ?: return
+            if (kotlin.math.hypot(end.x - grad.start.x, end.y - grad.start.y) < 3f) {
+                _uiState.value = st.copy(statusMessage = tr(R.string.fill_gradient_hint))
+                return
+            }
+            queueRetouch(RetouchEvent.Fill(grad.layer, proj.width, proj.height, grad.start, PointF(end.x, end.y), st.retouchBrush, grad.selection))
+            return
+        }
         val lasso = patchLasso
         if (tool == com.example.engine.RetouchTool.PATCH && lasso != null) {
             lasso.addAll(points)
@@ -4394,8 +4422,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 val session = ensureRetouchSession(ev.layer)
                 prepareStrokeMapping(ev.layer, session.canvas, ev.docW, ev.docH)
                 val c = session.canvas
-                val local = toLocalPoints(listOf(ev.pointDoc))
+                val local = toLocalPoints(listOfNotNull(ev.pointDoc, ev.endDoc))
                 val b = ev.brush
+                val size = kotlin.math.min(c.width, c.height)
+                val paint: (Int, Int) -> Int = when {
+                    b.fillMode == com.example.engine.FillMode.GRADIENT && local.size >= 4 -> { x, y ->
+                        com.example.engine.RetouchCanvas.gradientAt(b, local[0], local[1], local[2], local[3], x, y)
+                    }
+                    b.fillMode == com.example.engine.FillMode.PATTERN -> { x, y -> com.example.engine.RetouchCanvas.patternAt(b, size, x, y) }
+                    else -> { _, _ -> b.fillColor or (0xFF shl 24) }
+                }
                 val changed = withContext(retouchDispatcher) {
                     var bytes: ByteArray? = null; var stride = c.width
                     ev.selection?.takeIf { !it.isRecycled }?.let { sel ->
@@ -4405,7 +4441,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                         bytes = r.first; stride = r.second
                     }
                     c.fill(
-                        kotlin.math.floor(local[0]).toInt(), kotlin.math.floor(local[1]).toInt(), b.fillColor, b.fillOpacity,
+                        kotlin.math.floor(local[0]).toInt(), kotlin.math.floor(local[1]).toInt(), paint, b.fillOpacity,
                         b.fillTolerance, b.fillContiguous, b.fillAntiAlias, bytes, stride
                     )?.also { area -> c.downsampleInto(preview, area) }
                 }
@@ -4451,19 +4487,29 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val layer = strokeLayer ?: return
         val proj = _uiState.value.currentProject ?: return
         val c = session.canvas
-        val snapshot = withContext(retouchDispatcher) { c.pix.copyOf() }
+        // Never more than two strokes waiting to be written: each holds a full-size copy.
+        while (retouchWrites.size >= 2) { val w = retouchWrites.firstOrNull() ?: break; w.join(); retouchWrites.remove(w) }
+        // The copy is a Bitmap (native memory), not an IntArray on the small Java heap.
+        val snapshot = withContext(retouchDispatcher) {
+            Bitmap.createBitmap(c.width, c.height, Bitmap.Config.ARGB_8888).also { it.setPixels(c.pix, 0, c.width, 0, 0, c.width, c.height) }
+        }
         val ext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) "webp" else "png"
         val file = File(repository.getProjectDir(proj.id), "source_retouch_${layer.id}_${System.currentTimeMillis()}.$ext")
-        val job = viewModelScope.launch(Dispatchers.IO) {
-            val bmp = Bitmap.createBitmap(c.width, c.height, Bitmap.Config.ARGB_8888)
+        // One write at a time, and a failed write (e.g. out of memory) never takes the app down:
+        // the layer then keeps using its preview pixels for that step.
+        val job = viewModelScope.launch(retouchWriteDispatcher) {
             try {
-                bmp.setPixels(snapshot, 0, c.width, 0, 0, c.width, c.height)
                 val tmp = File(file.path + ".tmp")
-                if (ImageProcessor.saveLosslessBitmap(bmp, tmp)) {
+                if (ImageProcessor.saveLosslessBitmap(snapshot, tmp)) {
                     if (!tmp.renameTo(file)) { file.delete(); tmp.renameTo(file) }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                file.delete()
+                System.gc()
             } finally {
-                bmp.recycle()
+                snapshot.recycle()
             }
         }
         retouchWrites.add(job)

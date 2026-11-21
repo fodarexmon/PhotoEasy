@@ -17,6 +17,9 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.layout.height
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.content.ContextCompat
 import com.example.data.model.SelectionToolType
@@ -57,8 +60,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        com.example.util.CrashReporter.install(this)
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        val crashReport = androidx.compose.runtime.mutableStateOf(com.example.util.CrashReporter.lastReport(this))
 
         setContent {
             val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -71,6 +76,12 @@ class MainActivity : AppCompatActivity() {
 
             CompositionLocalProvider(LocalLayoutDirection provides layoutDirection) {
                 PhotoEasyTheme {
+                    crashReport.value?.let { report ->
+                        CrashReportDialog(report) {
+                            com.example.util.CrashReporter.clear(this)
+                            crashReport.value = null
+                        }
+                    }
                     when (uiState.currentScreen) {
                         Screen.HOME -> {
                             HomeScreen(
@@ -117,4 +128,41 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+}
+
+
+/** Shown once after a crash: the report can be shared (to send to the developer) or dismissed. */
+@Composable
+private fun CrashReportDialog(report: String, onDone: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDone,
+        title = { androidx.compose.material3.Text(androidx.compose.ui.res.stringResource(R.string.crash_title)) },
+        text = {
+            androidx.compose.foundation.layout.Column {
+                androidx.compose.material3.Text(androidx.compose.ui.res.stringResource(R.string.crash_message))
+                androidx.compose.foundation.layout.Spacer(androidx.compose.ui.Modifier.height(8.dp))
+                androidx.compose.material3.Text(
+                    report.lineSequence().firstOrNull { it.contains("Exception") || it.contains("Error") } ?: "",
+                    fontSize = 11.sp, maxLines = 3
+                )
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = {
+                val send = android.content.Intent(android.content.Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(android.content.Intent.EXTRA_SUBJECT, "PhotoEasy crash report")
+                    putExtra(android.content.Intent.EXTRA_TEXT, report)
+                }
+                runCatching { context.startActivity(android.content.Intent.createChooser(send, null)) }
+                onDone()
+            }) { androidx.compose.material3.Text(androidx.compose.ui.res.stringResource(R.string.crash_share)) }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onDone) {
+                androidx.compose.material3.Text(androidx.compose.ui.res.stringResource(R.string.crash_dismiss))
+            }
+        }
+    )
 }

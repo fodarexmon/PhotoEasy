@@ -19,6 +19,7 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 /**
  * A face found in the image, in the image's pixel coordinates. [ax] points from the face's
@@ -68,10 +69,16 @@ data class FaceAdjust(
     val chinHeight: Float = 0f,
     val jawline: Float = 0f,
     val faceWidth: Float = 0f,
-    val headSize: Float = 0f
+    val headSize: Float = 0f,
+    /** Skin (0..100): blemish removal, dark circles under the eyes, smoothing. */
+    val blemishes: Float = 0f,
+    val darkCircles: Float = 0f,
+    val skinSmooth: Float = 0f
 ) {
     val isNeutral: Boolean get() = this == FaceAdjust()
-    val hasWarp: Boolean get() = copy(eyeBrightness = 0f) != FaceAdjust()
+    val hasWarp: Boolean get() = copy(eyeBrightness = 0f, blemishes = 0f, darkCircles = 0f, skinSmooth = 0f) != FaceAdjust()
+    /** The skin settings only (to know when the slow skin pass must be redone). */
+    val skinKey: Triple<Float, Float, Float> get() = Triple(blemishes, darkCircles, skinSmooth)
 }
 
 object FaceWarp {
@@ -210,7 +217,7 @@ object FaceWarp {
         val dx = FloatArray(w * h); val dy = FloatArray(w * h)
         val acc = FloatArray(2)
         for ((g, a) in active) {
-            val reach = max(g.width, g.height) * (if (a.headSize != 0f) 1.9f else 1.3f)
+            val reach = max(g.width, g.height) * (if (a.headSize != 0f) 2.4f else 1.3f)
             val l = max(0, (g.center.x - reach).toInt()); val r = min(w - 1, (g.center.x + reach).toInt())
             val t = max(0, (g.center.y - reach).toInt()); val b = min(h - 1, (g.center.y + reach).toInt())
             val ops = buildOps(g, a)
@@ -230,7 +237,7 @@ object FaceWarp {
     }
 
     /** A local warp around [c] inside an ellipse with radii [rx] (along ax) and [ry] (along ay). */
-    private sealed class Op(val c: PointF, val rx: Float, val ry: Float) {
+    private sealed class Op(val c: PointF, val rx: Float, val ry: Float, val core: Float = -1f) {
         /** Smooth weight 1 at the centre to 0 at the ellipse edge; also returns local coords. */
         protected fun local(x: Float, y: Float, ax: PointF, ay: PointF, out: FloatArray): Float {
             val ox = x - c.x; val oy = y - c.y
@@ -238,6 +245,13 @@ object FaceWarp {
             val rho = (lx / rx) * (lx / rx) + (ly / ry) * (ly / ry)
             if (rho >= 1f) return 0f
             out[0] = lx; out[1] = ly
+            if (core >= 0f) {
+                // Flat inside the core (an even scale), smooth to 0 at the edge.
+                val r = sqrt(rho)
+                if (r <= core) return 1f
+                val t = (r - core) / (1f - core)
+                return 1f - t * t * (3f - 2f * t)
+            }
             val k = 1f - rho
             return k * k
         }
@@ -253,7 +267,7 @@ object FaceWarp {
         abstract fun apply(lx: Float, ly: Float, w: Float, ax: PointF, ay: PointF, acc: FloatArray)
 
         /** Enlarges (s > 1) or shrinks the content around [c]. */
-        class Scale(c: PointF, rx: Float, ry: Float, val sx: Float, val sy: Float) : Op(c, rx, ry) {
+        class Scale(c: PointF, rx: Float, ry: Float, val sx: Float, val sy: Float, core: Float = -1f) : Op(c, rx, ry, core) {
             override fun apply(lx: Float, ly: Float, w: Float, ax: PointF, ay: PointF, acc: FloatArray) {
                 val ex = 1f + (sx - 1f) * w; val ey = 1f + (sy - 1f) * w
                 addLocal(lx / ex - lx, ly / ey - ly, ax, ay, acc)
@@ -288,9 +302,10 @@ object FaceWarp {
 
         // Head and face shape first (large areas), then the features on top.
         if (a.headSize != 0f) {
-            val c = p(g.center, g, 0f, -g.height * 0.12f)
-            val s = 1f + 0.22f * k(a.headSize)
-            ops += Op.Scale(c, g.width * 1.35f, g.height * 1.55f, s, s)
+            // The whole head (hair included) is scaled evenly; only the band around it bends.
+            val c = p(g.center, g, 0f, -g.height * 0.16f)
+            val s = 1f + 0.3f * k(a.headSize)
+            ops += Op.Scale(c, g.width * 1.05f / 0.6f, g.height * 1.25f / 0.6f, s, s, core = 0.6f)
         }
         if (a.faceWidth != 0f) ops += Op.Scale(p(g.center, g, 0f, g.height * 0.08f), g.width * 0.78f, g.height * 0.72f, 1f + 0.16f * k(a.faceWidth), 1f)
         if (a.forehead != 0f) ops += Op.Move(g.forehead, g.width * 0.55f, g.height * 0.3f, 0f, -0.07f * g.height * k(a.forehead))
