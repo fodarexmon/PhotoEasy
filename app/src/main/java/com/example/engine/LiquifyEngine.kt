@@ -52,17 +52,28 @@ class LiquifyEngine(private val source: Bitmap) {
     private var fy: FloatArray? = null
     /** Colour change applied at the source position (x, y in working pixels), e.g. brighter eyes. */
     var postProcess: ((Float, Float, Int) -> Int)? = null
+    /** Skin retouch done on the source before warping (pixels, w, h, scale from working size). */
+    private var skinFix: ((IntArray, Int, Int, Float) -> Unit)? = null
+    /** The source with [skinFix] applied (working size), or null. */
+    private var fixedSrc: IntArray? = null
 
     val canUndo: Boolean get() = undo.isNotEmpty()
     val hasChanges: Boolean
         get() = dx.any { it != 0f } || dy.any { it != 0f } ||
-            (fx?.any { it != 0f } == true) || (fy?.any { it != 0f } == true) || postProcess != null
+            (fx?.any { it != 0f } == true) || (fy?.any { it != 0f } == true) || postProcess != null || fixedSrc != null
 
     /** Sets (or clears, with nulls) the face field; arrays are width x height. Re-renders everything. */
     fun setFaceField(faceDx: FloatArray?, faceDy: FloatArray?, post: ((Float, Float, Int) -> Int)?): Rect {
         fx = faceDx?.takeIf { it.size == n }
         fy = faceDy?.takeIf { it.size == n }
         postProcess = post
+        return render(Rect(0, 0, width, height))
+    }
+
+    /** Sets (or clears) the skin retouch; it is slow, so only call it when its settings change. */
+    fun setSkinFix(fix: ((IntArray, Int, Int, Float) -> Unit)?): Rect {
+        skinFix = fix
+        fixedSrc = fix?.let { f -> src.copyOf().also { f(it, width, height, 1f) } }
         return render(Rect(0, 0, width, height))
     }
 
@@ -214,6 +225,7 @@ class LiquifyEngine(private val source: Bitmap) {
         val t = FloatArray(2)
         val post = postProcess
         val plain = fx == null && post == null
+        val src = fixedSrc ?: this.src
         for (py in area.top until area.bottom) {
             for (px in area.left until area.right) {
                 val i = py * width + px
@@ -239,6 +251,7 @@ class LiquifyEngine(private val source: Bitmap) {
         // Source rows are read on demand through a small band cache.
         val fullPx = IntArray(fw * fh)
         full.getPixels(fullPx, 0, fw, 0, 0, fw, fh)
+        skinFix?.invoke(fullPx, fw, fh, fw.toFloat() / width)
         val out = Bitmap.createBitmap(fw, fh, Bitmap.Config.ARGB_8888)
         val row = IntArray(fw)
         val tmp = FloatArray(2)

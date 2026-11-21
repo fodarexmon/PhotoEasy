@@ -165,6 +165,8 @@ fun LiquifyDialog(
     // Edits run one after another on a worker thread; changed areas are copied to the display.
     LaunchedEffect(engine) {
         val e = engine ?: return@LaunchedEffect
+        // Skin settings last applied (the skin pass is slow: only redone when they change).
+        var lastSkin: List<Triple<Float, Float, Float>> = emptyList()
         for (ev in events) {
             val rect: android.graphics.Rect? = withContext(worker) {
                 when (ev) {
@@ -177,7 +179,14 @@ fun LiquifyDialog(
                         else {
                             val field = com.example.engine.FaceWarp.field(ev.faces, e.width, e.height) { ev.seq != faceSeq.get() }
                             if (ev.seq != faceSeq.get()) null
-                            else e.setFaceField(field?.first, field?.second, com.example.engine.FaceWarp.eyeBrightener(ev.faces))
+                            else {
+                                val skin = ev.faces.map { it.second.skinKey }
+                                if (skin != lastSkin) {
+                                    lastSkin = skin
+                                    e.setSkinFix(com.example.engine.FaceSkin.fixer(ev.faces))
+                                }
+                                e.setFaceField(field?.first, field?.second, com.example.engine.FaceWarp.eyeBrightener(ev.faces))
+                            }
                         }
                     }
                 }
@@ -230,12 +239,12 @@ fun LiquifyDialog(
         }
     }
 
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         Surface(
             shape = RoundedCornerShape(16.dp),
             color = StudioSurface,
             border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
-            modifier = Modifier.fillMaxSize().padding(6.dp)
+            modifier = Modifier.safeDrawingPadding().fillMaxSize().padding(6.dp)
         ) {
             Column(Modifier.fillMaxSize().padding(10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -478,6 +487,10 @@ private fun FaceAwarePanel(
                 FaceSlider(R.string.face_jawline, a.jawline) { set(a.copy(jawline = it)) }
                 FaceSlider(R.string.face_face_width, a.faceWidth) { set(a.copy(faceWidth = it)) }
                 FaceSlider(R.string.face_head_size, a.headSize) { set(a.copy(headSize = it)) }
+                FaceSection(R.string.face_sec_skin)
+                FaceSlider(R.string.face_blemishes, a.blemishes, 0f..100f) { set(a.copy(blemishes = it)) }
+                FaceSlider(R.string.face_dark_circles, a.darkCircles, 0f..100f) { set(a.copy(darkCircles = it)) }
+                FaceSlider(R.string.face_skin_smooth, a.skinSmooth, 0f..100f) { set(a.copy(skinSmooth = it)) }
             }
         }
     }

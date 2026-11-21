@@ -184,13 +184,15 @@ data class EditorUiState(
     val refinePreview: Bitmap? = null,
     /** The same preview area before refinement (hold "Before" in the refine workspace). */
     val refinePreviewOriginal: Bitmap? = null,
+    /** Maps the refine preview's pixels back to the layer (for the refine brushes). */
+    val refinePreviewGeom: RefinePreviewGeom? = null,
     val refinePreviewMode: RefinePreviewMode = RefinePreviewMode.OVERLAY,
     /** User filter library: imported LUTs, saved looks and favourite filter keys. */
     val luts: List<com.example.engine.LutInfo> = emptyList(),
     val customPresets: List<com.example.engine.CustomPreset> = emptyList(),
     val favoriteFilters: Set<String> = emptySet(),
     // Retouch brushes
-    val retouchTool: com.example.engine.RetouchTool = com.example.engine.RetouchTool.BLUR,
+    val retouchTool: com.example.engine.RetouchTool = com.example.engine.RetouchTool.BRUSH,
     val retouchSizeDp: Float = 60f,
     val retouchBrush: com.example.engine.RetouchBrush = com.example.engine.RetouchBrush(),
     /** Clone Stamp source point (document coordinates), set by tapping in "set source" mode. */
@@ -233,6 +235,18 @@ data class SelectionRefineParams(
 enum class StrokePhase { START, MOVE, END }
 
 enum class RefinePreviewMode { OVERLAY, ON_BLACK, ON_WHITE, MASK }
+
+/** Brushes of the refine workspace: Refine Edge (matte here), Add to / Subtract from the selection. */
+enum class RefineBrushMode { REFINE, ADD, SUBTRACT }
+
+/**
+ * One brush stroke of the refine workspace. Points are in layer-normalised coordinates (0..1 of
+ * the layer image), [radius] is a fraction of the layer image's longer side.
+ */
+data class RefineStroke(val mode: RefineBrushMode, val points: List<PointF>, val radius: Float)
+
+/** Where the refine preview's pixels come from: [crop] of the layer preview, shown at [w] x [h]. */
+data class RefinePreviewGeom(val crop: android.graphics.Rect, val proxyW: Int, val proxyH: Int, val w: Int, val h: Int)
 
 enum class InpaintSelectionMode {
     BRUSH,
@@ -4062,7 +4076,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         ) : RetouchEvent()
         class Move(val points: List<PointF>, val docRadius: Float) : RetouchEvent()
         class Fill(
-            val layer: Layer, val docW: Int, val docH: Int, val pointDoc: PointF,
+            val layer: Layer, val docW: Int, val docH: Int, val pointDoc: PointF, val endDoc: PointF?,
             val brush: com.example.engine.RetouchBrush, val selection: Bitmap?
         ) : RetouchEvent()
         class End(val points: List<PointF>, val docRadius: Float) : RetouchEvent()
@@ -4083,11 +4097,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private val retouchEvents = kotlinx.coroutines.channels.Channel<RetouchEvent>(kotlinx.coroutines.channels.Channel.UNLIMITED)
     private var retouchConsumer: Job? = null
     private val retouchWrites = java.util.Collections.synchronizedList(mutableListOf<Job>())
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val retouchWriteDispatcher = Dispatchers.IO.limitedParallelism(1)
     /** Retouch strokes queued or being painted: autosave waits until they are committed. */
     private var retouchPending = 0
     private val retouchStrokeActive: Boolean get() = retouchPending > 0
     /** The stroke being processed has recorded its undo step (roll it back if it fails). */
     private var retouchStepOpen = false
+    private class GradientDrag(val layer: Layer, val start: PointF, val selection: Bitmap?)
+    /** Fill in gradient mode: where the drag started. */
+    private var gradientStart: GradientDrag? = null
     /** Patch's lasso points while it is being drawn (document coordinates). */
     private var patchLasso: MutableList<PointF>? = null
     private var retouchStrokeRejected = false
@@ -4114,7 +4133,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
-    fun setRetouchSize(sizeDp: Float) { _uiState.value = _uiState.value.copy(retouchSizeDp = sizeDp.coerceIn(4f, 400f)) }
+    fun setRetouchSize(sizeDp: Float) { _uiState.value = _uiState.value.copy(retouchSizeDp = sizeDp.coerceIn(1f, 400f)) }
 
     fun setRetouchBrush(brush: com.example.engine.RetouchBrush) { _uiState.value = _uiState.value.copy(retouchBrush = brush) }
 
@@ -4197,12 +4216,23 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
             if (tool == com.example.engine.RetouchTool.PATCH) { patchStartDoc = points.firstOrNull(); return }
             val first = points.firstOrNull() ?: return
-            if (tool == com.example.engine.RetouchTool.FILL) {
-                // A tap: fills (or picks the colour) once; the rest of the touch is ignored.
+            val paints = tool == com.example.engine.RetouchTool.FILL || tool == com.example.engine.RetouchTool.BRUSH
+            if (paints && st.isFillColorPicking) {
+                // Eyedropper: the touch picks the colour instead of painting.
                 retouchStrokeRejected = true
-                if (st.isFillColorPicking) { pickFillColor(layer!!, first.x, first.y, proj.width, proj.height); return }
+                pickFillColor(layer!!, first.x, first.y, proj.width, proj.height)
+                return
+            }
+            if (tool == com.example.engine.RetouchTool.FILL) {
                 val sel = st.selectionMask?.takeIf { hasSelection }
-                queueRetouch(RetouchEvent.Fill(layer!!, proj.width, proj.height, PointF(first.x, first.y), st.retouchBrush, sel))
+                if (st.retouchBrush.fillMode == com.example.engine.FillMode.GRADIENT) {
+                    // A gradient is dragged: from where the finger goes down to where it lifts.
+                    gradientStart = GradientDrag(layer!!, PointF(first.x, first.y), sel)
+                    return
+                }
+                // A tap: fills once; the rest of the touch is ignored.
+                retouchStrokeRejected = true
+                queueRetouch(RetouchEvent.Fill(layer!!, proj.width, proj.height, PointF(first.x, first.y), null, st.retouchBrush, sel))
                 return
             }
             if (tool == com.example.engine.RetouchTool.CLONE) {
@@ -4216,6 +4246,18 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         if (retouchStrokeRejected) return
+        val grad = gradientStart
+        if (tool == com.example.engine.RetouchTool.FILL && grad != null) {
+            if (phase != StrokePhase.END) return
+            gradientStart = null
+            val end = points.lastOrNull() ?: return
+            if (kotlin.math.hypot(end.x - grad.start.x, end.y - grad.start.y) < 3f) {
+                _uiState.value = st.copy(statusMessage = tr(R.string.fill_gradient_hint))
+                return
+            }
+            queueRetouch(RetouchEvent.Fill(grad.layer, proj.width, proj.height, grad.start, PointF(end.x, end.y), st.retouchBrush, grad.selection))
+            return
+        }
         val lasso = patchLasso
         if (tool == com.example.engine.RetouchTool.PATCH && lasso != null) {
             lasso.addAll(points)
@@ -4394,8 +4436,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 val session = ensureRetouchSession(ev.layer)
                 prepareStrokeMapping(ev.layer, session.canvas, ev.docW, ev.docH)
                 val c = session.canvas
-                val local = toLocalPoints(listOf(ev.pointDoc))
+                val local = toLocalPoints(listOfNotNull(ev.pointDoc, ev.endDoc))
                 val b = ev.brush
+                val size = kotlin.math.min(c.width, c.height)
+                val paint: (Int, Int) -> Int = when {
+                    b.fillMode == com.example.engine.FillMode.GRADIENT && local.size >= 4 -> { x, y ->
+                        com.example.engine.RetouchCanvas.gradientAt(b, local[0], local[1], local[2], local[3], x, y)
+                    }
+                    b.fillMode == com.example.engine.FillMode.PATTERN -> { x, y -> com.example.engine.RetouchCanvas.patternAt(b, size, x, y) }
+                    else -> { _, _ -> b.fillColor or (0xFF shl 24) }
+                }
                 val changed = withContext(retouchDispatcher) {
                     var bytes: ByteArray? = null; var stride = c.width
                     ev.selection?.takeIf { !it.isRecycled }?.let { sel ->
@@ -4405,7 +4455,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                         bytes = r.first; stride = r.second
                     }
                     c.fill(
-                        kotlin.math.floor(local[0]).toInt(), kotlin.math.floor(local[1]).toInt(), b.fillColor, b.fillOpacity,
+                        kotlin.math.floor(local[0]).toInt(), kotlin.math.floor(local[1]).toInt(), paint, b.fillOpacity,
                         b.fillTolerance, b.fillContiguous, b.fillAntiAlias, bytes, stride
                     )?.also { area -> c.downsampleInto(preview, area) }
                 }
@@ -4451,19 +4501,29 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val layer = strokeLayer ?: return
         val proj = _uiState.value.currentProject ?: return
         val c = session.canvas
-        val snapshot = withContext(retouchDispatcher) { c.pix.copyOf() }
+        // Never more than two strokes waiting to be written: each holds a full-size copy.
+        while (retouchWrites.size >= 2) { val w = retouchWrites.firstOrNull() ?: break; w.join(); retouchWrites.remove(w) }
+        // The copy is a Bitmap (native memory), not an IntArray on the small Java heap.
+        val snapshot = withContext(retouchDispatcher) {
+            Bitmap.createBitmap(c.width, c.height, Bitmap.Config.ARGB_8888).also { it.setPixels(c.pix, 0, c.width, 0, 0, c.width, c.height) }
+        }
         val ext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) "webp" else "png"
         val file = File(repository.getProjectDir(proj.id), "source_retouch_${layer.id}_${System.currentTimeMillis()}.$ext")
-        val job = viewModelScope.launch(Dispatchers.IO) {
-            val bmp = Bitmap.createBitmap(c.width, c.height, Bitmap.Config.ARGB_8888)
+        // One write at a time, and a failed write (e.g. out of memory) never takes the app down:
+        // the layer then keeps using its preview pixels for that step.
+        val job = viewModelScope.launch(retouchWriteDispatcher) {
             try {
-                bmp.setPixels(snapshot, 0, c.width, 0, 0, c.width, c.height)
                 val tmp = File(file.path + ".tmp")
-                if (ImageProcessor.saveLosslessBitmap(bmp, tmp)) {
+                if (ImageProcessor.saveLosslessBitmap(snapshot, tmp)) {
                     if (!tmp.renameTo(file)) { file.delete(); tmp.renameTo(file) }
                 }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                file.delete()
+                System.gc()
             } finally {
-                bmp.recycle()
+                snapshot.recycle()
             }
         }
         retouchWrites.add(job)
@@ -4819,7 +4879,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun clearRefinePreview() {
         refinePreviewJob?.cancel()
         refinePreviewJob = null
-        _uiState.value = _uiState.value.copy(refinePreview = null, refinePreviewOriginal = null)
+        refineAiCache = null
+        _uiState.value = _uiState.value.copy(refinePreview = null, refinePreviewOriginal = null, refinePreviewGeom = null)
     }
 
     fun setRefinePreviewMode(mode: RefinePreviewMode) {
@@ -4832,7 +4893,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
      * visible within a fraction of a second. Pixel radii are scaled to the preview size so the
      * preview matches the full-resolution result.
      */
-    fun requestRefinePreview(config: RefineEdgeConfig) {
+    fun requestRefinePreview(config: RefineEdgeConfig, strokes: List<RefineStroke> = emptyList()) {
         val proj = _uiState.value.currentProject ?: return
         val layer = proj.layers.getOrNull(_uiState.value.selectedLayerIndex) ?: return
         val proxy = layer.bitmap ?: return
@@ -4845,7 +4906,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val mode = _uiState.value.refinePreviewMode
             for (size in intArrayOf(360, 720)) {
                 val pair = try {
-                    withContext(Dispatchers.Default) { buildRefinePreview(proj, layer, proxy, docMask, config, mode, size) }
+                    withContext(Dispatchers.Default) { buildRefinePreview(proj, layer, proxy, docMask, config, mode, size, strokes) }
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
                 } catch (e: Throwable) {
@@ -4855,23 +4916,33 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     if (size == 360) _uiState.value = _uiState.value.copy(refinePreview = null, refinePreviewOriginal = null)
                     break
                 }
-                _uiState.value = _uiState.value.copy(refinePreview = pair.first, refinePreviewOriginal = pair.second)
+                _uiState.value = _uiState.value.copy(refinePreview = pair.first, refinePreviewOriginal = pair.second, refinePreviewGeom = pair.third)
             }
         }
     }
 
-    private fun buildRefinePreview(
+    private suspend fun buildRefinePreview(
         proj: Project,
         layer: Layer,
         proxy: Bitmap,
         docMask: Bitmap,
         config: RefineEdgeConfig,
         mode: RefinePreviewMode,
-        maxSize: Int = 720
-    ): Pair<Bitmap, Bitmap>? {
+        maxSize: Int = 720,
+        strokes: List<RefineStroke> = emptyList()
+    ): Triple<Bitmap, Bitmap, RefinePreviewGeom>? {
         val local = SelectionEngine.mapDocumentMaskToLayerLocal(docMask, layer, proj.width, proj.height)
         try {
-            val bounds = SelectionEngine.selectionBounds(local) ?: return null
+            // The area shown: the selection plus everything brushed.
+            var bounds = SelectionEngine.selectionBounds(local)?.let { android.graphics.Rect(it) }
+            val longer = max(proxy.width, proxy.height).toFloat()
+            for (st in strokes) for (pt in st.points) {
+                val r = (st.radius * longer).toInt() + 1
+                val x = (pt.x * proxy.width).toInt(); val y = (pt.y * proxy.height).toInt()
+                val b = android.graphics.Rect(x - r, y - r, x + r, y + r)
+                if (bounds == null) bounds = b else bounds.union(b)
+            }
+            if (bounds == null) return null
             val margin = (max(bounds.width(), bounds.height()) * 0.15f).toInt() + 8
             val crop = android.graphics.Rect(
                 (bounds.left - margin).coerceAtLeast(0),
@@ -4887,6 +4958,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val srcSmall = Bitmap.createScaledBitmap(srcCrop, pw, ph, true)
             val maskCrop = Bitmap.createBitmap(local, crop.left, crop.top, crop.width(), crop.height())
             val maskSmall = Bitmap.createScaledBitmap(maskCrop, pw, ph, true)
+            val rx = pw.toFloat() / crop.width(); val ry = ph.toFloat() / crop.height()
+            val toPx: (Float, Float) -> Pair<Float, Float> = { u, v -> (u * proxy.width - crop.left) * rx to (v * proxy.height - crop.top) * ry }
+            val brushed = applySelectionStrokes(maskSmall, strokes, toPx, longer * rx)
+            val area = refineAreaBytes(strokes, pw, ph, toPx, longer * rx)
+            val ai = if (config.aiAssist) refineAiAlpha(layer, pw, ph, crop) else null
 
             // The real refine runs on the full-resolution source: scale pixel radii accordingly.
             val fullMax = max(layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight()).coerceAtLeast(1f)
@@ -4900,7 +4976,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 shiftEdgePx = sc(config.shiftEdgePx),
                 borderPx = if (config.borderPx >= 1f) max(1f, sc(config.borderPx)) else 0f
             )
-            val result = RefineEdgeEngine.refineEdges(srcSmall, maskSmall, previewConfig)
+            val result = RefineEdgeEngine.refineEdges(srcSmall, brushed, previewConfig, area, ai)
             val shown = result.decontaminatedSource ?: srcSmall
             fun compose(colors: Bitmap, maskBmp: Bitmap): Bitmap {
                 val src = IntArray(pw * ph)
@@ -4928,9 +5004,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
             val after = compose(shown, result.refinedMask)
             val before = compose(srcSmall, maskSmall)
-            listOf(srcCrop, srcSmall, maskCrop, maskSmall, result.refinedMask).forEach { if (it !== proxy && !it.isRecycled) it.recycle() }
+            listOf(srcCrop, srcSmall, maskCrop, maskSmall, brushed, result.refinedMask).forEach { if (it !== proxy && !it.isRecycled) it.recycle() }
             result.decontaminatedSource?.let { if (!it.isRecycled) it.recycle() }
-            return after to before
+            return Triple(after, before, RefinePreviewGeom(android.graphics.Rect(crop), proxy.width, proxy.height, pw, ph))
         } finally {
             if (!local.isRecycled) local.recycle()
         }
@@ -5019,59 +5095,113 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         return doc
     }
 
-    fun applyRefineEdgeMatting(config: RefineEdgeConfig) {
+    fun applyRefineEdgeMatting(config: RefineEdgeConfig, strokes: List<RefineStroke> = emptyList()) {
         val proj = _uiState.value.currentProject ?: return
         val idx = _uiState.value.selectedLayerIndex
         if (idx !in proj.layers.indices) return
         val layer = proj.layers[idx]
         val currentMask = _uiState.value.selectionMask ?: return
+        val toNewLayer = config.output == com.example.engine.RefineOutput.NEW_LAYER || config.output == com.example.engine.RefineOutput.NEW_LAYER_WITH_MASK
 
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.refine_hair_desc))
             var src: Bitmap? = null
+            var localResult: Bitmap? = null
+            var decontaminated: Bitmap? = null
+            var cutout: Bitmap? = null
             try {
                 src = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Layer image unavailable")
-                val workLayer = workLayerFor(layer, src!!)
+                val s0 = src!!
+                val workLayer = workLayerFor(layer, s0)
+                val ai = if (config.aiAssist) refineAiAlpha(layer, s0.width, s0.height, null) else null
                 // Matting runs in layer-local pixel space: the document selection is mapped onto the
                 // layer's source pixels and the refined result is mapped back into document space.
                 val result = withContext(Dispatchers.Default) {
                     val localMask = SelectionEngine.mapDocumentMaskToLayerLocal(currentMask, workLayer, proj.width, proj.height)
+                    var input = localMask
                     try {
-                        SelectionEngine.refineEdgesWithMatting(src!!, localMask, config)
+                        // Add / Subtract brushes change the selection first (in order), then the
+                        // Refine Edge Brush marks the areas to matte.
+                        val toPx: (Float, Float) -> Pair<Float, Float> = { u, v -> u * s0.width to v * s0.height }
+                        val rScale = max(s0.width, s0.height).toFloat()
+                        input = applySelectionStrokes(localMask, strokes, toPx, rScale)
+                        val area = refineAreaBytes(strokes, s0.width, s0.height, toPx, rScale)
+                        com.example.engine.RefineEdgeEngine.refineEdges(s0, input, config, area, ai)
                     } finally {
+                        if (input !== localMask && !input.isRecycled) input.recycle()
                         if (!localMask.isRecycled) localMask.recycle()
                     }
                 }
+                localResult = result.refinedMask
+                decontaminated = result.decontaminatedSource
                 val refinedDocMask = withContext(Dispatchers.Default) {
-                    try {
-                        layerLocalMaskToDocument(result.refinedMask, workLayer, proj, base = currentMask)
-                    } finally {
-                        if (!result.refinedMask.isRecycled) result.refinedMask.recycle()
+                    layerLocalMaskToDocument(result.refinedMask, workLayer, proj, base = if (toNewLayer) null else currentMask)
+                }
+
+                when (config.output) {
+                    com.example.engine.RefineOutput.SELECTION, com.example.engine.RefineOutput.LAYER_MASK -> {
+                        // Decontamination only runs when the user explicitly enabled it in the dialog.
+                        val deco = decontaminated
+                        if (deco != null) {
+                            saveHistoryState()
+                            val committed = commitDestructiveBitmap(
+                                proj, layer, deco, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(),
+                                "refine_decontaminate", keepBefore = true
+                            )
+                            if (!committed) throw java.io.IOException("Failed to persist decontaminated layer")
+                            commitProjectMutation()
+                        }
+                        if (config.output == com.example.engine.RefineOutput.SELECTION) {
+                            selectionMutex.withLock {
+                                endTransientSelectionSessions()
+                                rememberSelectionState()
+                                publishSelection(refinedDocMask)
+                            }
+                        } else {
+                            saveHistoryState()
+                            layer.maskBitmap = refinedDocMask
+                            layer.isMaskEnabled = true
+                            layer.isEditingMask = false
+                            layer.isMaskLinked = true
+                            layer.maskAnchor = layer.currentMaskAnchor()
+                            selectionMutex.withLock {
+                                endTransientSelectionSessions()
+                                rememberSelectionState()
+                                publishSelection(SelectionEngine.createBlankMask(proj.width, proj.height))
+                            }
+                            commitProjectMutation()
+                        }
                     }
-                }
-
-                // Decontamination only runs when the user explicitly enabled it in the dialog.
-                val decontaminated = result.decontaminatedSource
-                if (decontaminated != null) {
-                    saveHistoryState()
-                    val committed = commitDestructiveBitmap(
-                        proj,
-                        layer,
-                        decontaminated,
-                        layer.intrinsicDocumentWidth(),
-                        layer.intrinsicDocumentHeight(),
-                        "refine_decontaminate",
-                        keepBefore = true
-                    )
-                    if (decontaminated !== layer.bitmap && !decontaminated.isRecycled) decontaminated.recycle()
-                    if (!committed) throw java.io.IOException("Failed to persist decontaminated layer")
-                    commitProjectMutation()
-                }
-
-                selectionMutex.withLock {
-                    endTransientSelectionSessions()
-                    rememberSelectionState()
-                    publishSelection(refinedDocMask)
+                    com.example.engine.RefineOutput.NEW_LAYER, com.example.engine.RefineOutput.NEW_LAYER_WITH_MASK -> {
+                        // As in Photoshop: a new layer above, the original hidden; decontaminated
+                        // colours go to the new layer only.
+                        val dup = withContext(Dispatchers.Default) { layer.duplicateLayer(uniqueLayerName(tr(R.string.layer_name_copy, layer.name), proj)) }
+                        dup.maskBitmap = null
+                        dup.isEditingMask = false
+                        val pixels: Bitmap? = if (config.output == com.example.engine.RefineOutput.NEW_LAYER) {
+                            cutout = withContext(Dispatchers.Default) { cutoutPixels(decontaminated ?: s0, result.refinedMask) }
+                            cutout
+                        } else decontaminated
+                        saveHistoryState()
+                        if (pixels != null && !commitDestructiveBitmap(proj, dup, pixels, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "refine_layer")) {
+                            rollbackToLastHistoryState()
+                            throw java.io.IOException("Save failed")
+                        }
+                        if (config.output == com.example.engine.RefineOutput.NEW_LAYER_WITH_MASK) {
+                            dup.maskBitmap = refinedDocMask
+                            dup.isMaskEnabled = true
+                            dup.isMaskLinked = true
+                            dup.maskAnchor = dup.currentMaskAnchor()
+                        }
+                        layer.isVisible = false
+                        proj.layers.add(idx + 1, dup)
+                        selectionMutex.withLock {
+                            endTransientSelectionSessions()
+                            rememberSelectionState()
+                            publishSelection(SelectionEngine.createBlankMask(proj.width, proj.height))
+                        }
+                        commitProjectMutation(selectedLayerIndex = idx + 1)
+                    }
                 }
                 clearRefinePreview()
                 _uiState.value = _uiState.value.copy(
@@ -5087,6 +5217,115 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             } finally {
                 val p = layer.bitmap
                 src?.let { if (it !== p && !it.isRecycled) it.recycle() }
+                localResult?.let { if (!it.isRecycled) it.recycle() }
+                decontaminated?.let { if (it !== layer.bitmap && !it.isRecycled) it.recycle() }
+                cutout?.let { if (!it.isRecycled) it.recycle() }
+            }
+        }
+    }
+
+    /** [src] with its alpha multiplied by [mask] (same size): the selected pixels only. */
+    private fun cutoutPixels(src: Bitmap, mask: Bitmap): Bitmap {
+        val w = src.width; val h = src.height
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val a = SelectionEngine.alphaBytesPacked(mask)
+        val row = IntArray(w)
+        for (y in 0 until h) {
+            src.getPixels(row, 0, w, 0, y, w, 1)
+            for (x in 0 until w) {
+                val c = row[x]
+                val m = a[y * w + x].toInt() and 0xFF
+                val na = ((c ushr 24) * m + 127) / 255
+                row[x] = (na shl 24) or (c and 0xFFFFFF)
+            }
+            out.setPixels(row, 0, w, 0, y, w, 1)
+        }
+        return out
+    }
+
+    private fun strokePaint(radiusPx: Float) = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+        strokeWidth = (radiusPx * 2f).coerceAtLeast(1f)
+        color = Color.BLACK
+    }
+
+    private fun strokePath(points: List<PointF>, toPx: (Float, Float) -> Pair<Float, Float>): android.graphics.Path {
+        val path = android.graphics.Path()
+        points.forEachIndexed { i, p ->
+            val (x, y) = toPx(p.x, p.y)
+            if (i == 0) { path.moveTo(x, y); if (points.size == 1) path.lineTo(x + 0.01f, y) } else path.lineTo(x, y)
+        }
+        return path
+    }
+
+    /**
+     * The selection [mask] with the Add / Subtract brush strokes applied in order (a new
+     * bitmap; [mask] itself when there is none). [toPx] maps layer-normalised points to pixels.
+     */
+    private fun applySelectionStrokes(mask: Bitmap, strokes: List<RefineStroke>, toPx: (Float, Float) -> Pair<Float, Float>, radiusScale: Float): Bitmap {
+        val edits = strokes.filter { it.mode != RefineBrushMode.REFINE && it.points.isNotEmpty() }
+        if (edits.isEmpty()) return mask
+        val out = mask.copy(Bitmap.Config.ALPHA_8, true)
+        val canvas = android.graphics.Canvas(out)
+        for (st in edits) {
+            val paint = strokePaint(st.radius * radiusScale)
+            if (st.mode == RefineBrushMode.SUBTRACT) paint.xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.CLEAR)
+            canvas.drawPath(strokePath(st.points, toPx), paint)
+        }
+        return out
+    }
+
+    /** Refine Edge Brush strokes as w x h bytes (255 = painted), or null when there is none. */
+    private fun refineAreaBytes(strokes: List<RefineStroke>, w: Int, h: Int, toPx: (Float, Float) -> Pair<Float, Float>, radiusScale: Float): ByteArray? {
+        val refine = strokes.filter { it.mode == RefineBrushMode.REFINE && it.points.isNotEmpty() }
+        if (refine.isEmpty()) return null
+        val m = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
+        try {
+            val canvas = android.graphics.Canvas(m)
+            for (st in refine) canvas.drawPath(strokePath(st.points, toPx), strokePaint(st.radius * radiusScale))
+            return SelectionEngine.alphaBytesPacked(m)
+        } finally {
+            m.recycle()
+        }
+    }
+
+    /** Subject segmentation of a layer, computed once per layer image (at most 1024 px). */
+    private var refineAiCache: Pair<Bitmap, Bitmap?>? = null
+
+    /**
+     * Subject-segmentation confidence for [layer] as w x h bytes, optionally only for [crop]
+     * (in the layer preview's pixels). Null when segmentation is unavailable.
+     */
+    private suspend fun refineAiAlpha(layer: Layer, w: Int, h: Int, crop: android.graphics.Rect?): ByteArray? {
+        val proxy = layer.bitmap?.takeIf { !it.isRecycled } ?: return null
+        val cached = refineAiCache
+        val aiMask: Bitmap = (if (cached != null && cached.first === proxy) cached.second else {
+            val small = withContext(Dispatchers.Default) { ImageProcessor.scaleBitmapToMaxDimension(proxy, 1024) }
+            val m = try { com.example.engine.AiSubjectSegmenter.foregroundMask(small) } finally { if (small !== proxy && !small.isRecycled) small.recycle() }
+            refineAiCache = proxy to m
+            m
+        }) ?: return null
+        return withContext(Dispatchers.Default) {
+            val sx = aiMask.width.toFloat() / proxy.width; val sy = aiMask.height.toFloat() / proxy.height
+            val part = if (crop != null) {
+                val l = (crop.left * sx).toInt().coerceIn(0, aiMask.width - 1); val t = (crop.top * sy).toInt().coerceIn(0, aiMask.height - 1)
+                val r = kotlin.math.ceil(crop.right * sx).toInt().coerceIn(l + 1, aiMask.width); val b = kotlin.math.ceil(crop.bottom * sy).toInt().coerceIn(t + 1, aiMask.height)
+                Bitmap.createBitmap(aiMask, l, t, r - l, b - t)
+            } else aiMask
+            val scaled = Bitmap.createScaledBitmap(part, w, h, true)
+            try {
+                val px = IntArray(w)
+                val out = ByteArray(w * h)
+                for (y in 0 until h) {
+                    scaled.getPixels(px, 0, w, 0, y, w, 1)
+                    for (x in 0 until w) out[y * w + x] = (px[x] ushr 24).toByte()
+                }
+                out
+            } finally {
+                if (scaled !== part && scaled !== aiMask) scaled.recycle()
+                if (part !== aiMask) part.recycle()
             }
         }
     }
