@@ -363,6 +363,19 @@ class ProToolsTest {
         assertEquals(orig[20 * w + 20], px[20 * w + 20])
     }
 
+    @Test
+    fun `clipping groups find their base and count`() {
+        fun l(id: String, clipped: Boolean) = Layer(id = id, name = id, type = LayerType.IMAGE, isClipped = clipped)
+        // Bottom to top: photo, curves (clipped), text (clipped), sticker.
+        val layers = listOf(l("photo", false), l("curves", true), l("text", true), l("sticker", false))
+        assertEquals(0, com.example.ui.components.clipBaseIndex(layers, 1))
+        assertEquals(0, com.example.ui.components.clipBaseIndex(layers, 2))
+        assertNull(com.example.ui.components.clipBaseIndex(layers, 3))
+        assertEquals(2, com.example.ui.components.clippedCountAbove(layers, 0))
+        assertEquals(0, com.example.ui.components.clippedCountAbove(layers, 3))
+        assertEquals(0, com.example.ui.components.clippedCountAbove(layers, 1))
+    }
+
     // --- Colour decontamination --------------------------------------------------------------
 
     @Test

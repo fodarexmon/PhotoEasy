@@ -9,6 +9,15 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import com.example.ui.theme.StudioBorder
+import com.example.ui.theme.IndigoLight
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -125,19 +134,65 @@ fun LayersPanel(
             onDismiss = { showAdjustmentPicker = false }
         )
     }
-    Column(modifier.fillMaxWidth().fillMaxHeight().background(StudioSurface).padding(12.dp)) {
+    // Flexible height: as tall as the layers need (up to ~42% of the screen) until the user drags
+    // the handle; then the chosen height (kept while the editor is open).
+    val density = LocalDensity.current
+    val screenH = LocalConfiguration.current.screenHeightDp.dp
+    val maxPanel = screenH * 0.75f
+    val minPanel = 150.dp
+    var userHeight by rememberSaveable { mutableStateOf<Float?>(null) } // dp
+    var measuredPx by remember { mutableIntStateOf(0) }
+    val handleLabel = stringResource(R.string.layers_panel_resize)
+    val sized = userHeight?.let { Modifier.height(it.dp.coerceIn(minPanel, maxPanel)) } ?: Modifier.wrapContentHeight()
+    Column(
+        modifier.fillMaxWidth().then(sized).onSizeChanged { measuredPx = it.height }
+            .background(StudioSurface).padding(start = 12.dp, end = 12.dp, bottom = 8.dp)
+    ) {
+        // Drag handle: drag up for a taller panel, down for a smaller one; double tap resets.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(22.dp)
+                .pointerInput(Unit) {
+                    detectVerticalDragGestures(
+                        onVerticalDrag = { change, amount ->
+                            change.consume()
+                            val cur = userHeight ?: with(density) { measuredPx.toDp().value }
+                            userHeight = (cur - with(density) { amount.toDp().value }).coerceIn(minPanel.value, maxPanel.value)
+                        }
+                    )
+                }
+                .pointerInput(Unit) { detectTapGestures(onDoubleTap = { userHeight = null }) }
+                .semantics { contentDescription = handleLabel }
+                .testTag("layers_panel_handle"),
+            contentAlignment = Alignment.Center
+        ) {
+            Box(Modifier.size(width = 40.dp, height = 4.dp).clip(RoundedCornerShape(2.dp)).background(StudioBorder))
+        }
         Row(
             Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(stringResource(R.string.layers_title), style = MaterialTheme.typography.titleMedium, color = Color.White, fontWeight = FontWeight.Bold)
+            Text(
+                "${layers.size}",
+                color = Color.LightGray,
+                fontSize = 11.sp,
+                modifier = Modifier.clip(RoundedCornerShape(10.dp)).background(StudioSurfaceVariant).padding(horizontal = 8.dp, vertical = 1.dp)
+            )
+            Spacer(Modifier.weight(1f))
             Box {
-                IconButton(
+                Button(
                     onClick = { showAddMenu = true },
-                    modifier = Modifier.size(48.dp).testTag("btn_add_layer")
+                    colors = ButtonDefaults.buttonColors(containerColor = IndigoPrimary),
+                    shape = RoundedCornerShape(10.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                    modifier = Modifier.height(36.dp).testTag("btn_add_layer")
                 ) {
-                    Icon(Icons.Default.Add, contentDescription = stringResource(R.string.cd_add_layer), tint = IndigoPrimary)
+                    Icon(Icons.Default.Add, contentDescription = stringResource(R.string.cd_add_layer), modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(stringResource(R.string.layer_add_button), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 }
                 DropdownMenu(expanded = showAddMenu, onDismissRequest = { showAddMenu = false }) {
                     DropdownMenuItem(
@@ -166,31 +221,32 @@ fun LayersPanel(
         }
 
         if (selectedLayer != null) {
+            Spacer(Modifier.height(6.dp))
             Row(
                 Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Column(Modifier.weight(1f)) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text(stringResource(R.string.layer_opacity), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-                        Text("${(selectedLayer.opacity * 100).roundToInt()}%", color = IndigoPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    }
-                    Slider(
-                        value = selectedLayer.opacity,
-                        onValueChange = onOpacityChange,
-                        onValueChangeFinished = { onOpacityCommit?.invoke() },
-                        valueRange = 0f..1f,
-                        modifier = Modifier.testTag("slider_layer_opacity")
-                    )
-                }
+                Text(stringResource(R.string.layer_opacity), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+                ThinSlider(
+                    value = selectedLayer.opacity,
+                    onValueChange = onOpacityChange,
+                    onValueChangeFinished = { onOpacityCommit?.invoke() },
+                    modifier = Modifier.weight(1f).testTag("slider_layer_opacity")
+                )
+                Text(
+                    "${(selectedLayer.opacity * 100).roundToInt()}%",
+                    color = IndigoLight, fontSize = 12.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.width(38.dp)
+                )
                 Box {
                     OutlinedButton(
                         onClick = { showBlendMenu = true },
-                        modifier = Modifier.heightIn(min = 48.dp).testTag("btn_blend_mode"),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                        modifier = Modifier.height(32.dp).testTag("btn_blend_mode"),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
                     ) {
-                        Text(stringResource(selectedLayer.blendMode.resId), fontSize = 12.sp, maxLines = 1)
+                        Text(stringResource(selectedLayer.blendMode.resId), fontSize = 11.sp, maxLines = 1)
                     }
                     DropdownMenu(expanded = showBlendMenu, onDismissRequest = { showBlendMenu = false }) {
                         BlendModeType.getAvailableModes().forEach { mode ->
@@ -300,18 +356,22 @@ fun LayersPanel(
                     }
                 }
 
-                IconButton(onClick = onToggleVisibility, modifier = Modifier.size(48.dp)) {
+                // Clipping mask (Photoshop's "Create Clipping Mask"): the layer shows only where the
+                // layer below it has pixels. Not possible for the bottom layer.
+                val canClip = selectedLayer.isClipped || selectedIndex > 0
+                IconButton(
+                    onClick = { actions.onToggleClip() },
+                    enabled = canClip,
+                    modifier = Modifier.size(48.dp).testTag("btn_toggle_clip")
+                ) {
                     Icon(
-                        if (selectedLayer.isVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                        contentDescription = stringResource(R.string.layer_visibility),
-                        tint = if (selectedLayer.isVisible) IndigoPrimary else Color.Gray
-                    )
-                }
-                IconButton(onClick = onToggleLock, modifier = Modifier.size(48.dp)) {
-                    Icon(
-                        if (selectedLayer.isLocked) Icons.Default.Lock else Icons.Default.LockOpen,
-                        contentDescription = stringResource(R.string.layer_lock),
-                        tint = if (selectedLayer.isLocked) MaterialTheme.colorScheme.error else Color.White
+                        Icons.Default.SubdirectoryArrowRight,
+                        contentDescription = stringResource(if (selectedLayer.isClipped) R.string.layer_clip_release else R.string.layer_clip_create),
+                        tint = when {
+                            selectedLayer.isClipped -> IndigoLight
+                            canClip -> Color.White
+                            else -> Color.Gray.copy(alpha = 0.5f)
+                        }
                     )
                 }
                 Box {
@@ -391,13 +451,15 @@ fun LayersPanel(
             }
         }
 
-        Spacer(Modifier.height(4.dp))
-        Text(
-            stringResource(R.string.layer_reorder_hint),
-            color = Color.Gray,
-            fontSize = 10.sp,
-            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
-        )
+        if (layers.size > 1) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                stringResource(R.string.layer_reorder_hint),
+                color = Color.Gray,
+                fontSize = 10.sp,
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+            )
+        } else Spacer(Modifier.height(6.dp))
 
         // Drag-to-reorder state (list is shown top layer first).
         var draggingId by remember { mutableStateOf<String?>(null) }
@@ -407,7 +469,9 @@ fun LayersPanel(
         val latestLayers by rememberUpdatedState(layers)
 
         LazyColumn(
-            modifier = Modifier.fillMaxWidth().weight(1f),
+            modifier = Modifier.fillMaxWidth().then(
+                if (userHeight != null) Modifier.weight(1f) else Modifier.heightIn(max = screenH * 0.42f - 120.dp)
+            ),
             verticalArrangement = Arrangement.spacedBy(6.dp),
             contentPadding = PaddingValues(bottom = 8.dp)
         ) {
@@ -430,7 +494,8 @@ fun LayersPanel(
                         .border(if (isSelected) 1.5.dp else 0.dp, if (isSelected) IndigoPrimary else Color.Transparent, RoundedCornerShape(10.dp))
                         .clickable { onSelectLayer(actualIdx) }
                         .padding(start = 0.dp, end = 4.dp, top = 6.dp, bottom = 6.dp)
-                        .padding(start = if (layer.isClipped) 14.dp else 0.dp),
+                        // Clipped layers are indented, as in Photoshop.
+                        .padding(start = if (layer.isClipped) 22.dp else 0.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Drag handle: drag up/down to reorder.
@@ -464,13 +529,14 @@ fun LayersPanel(
                     }
 
                     if (layer.isClipped) {
+                        // Arrow pointing down to the layer it is clipped to.
                         Icon(
                             Icons.Default.SubdirectoryArrowRight,
                             contentDescription = stringResource(R.string.cd_layer_clipped),
-                            tint = IndigoPrimary,
-                            modifier = Modifier.size(14.dp)
+                            tint = IndigoLight,
+                            modifier = Modifier.size(20.dp).graphicsLayer { rotationZ = 90f }
                         )
-                        Spacer(Modifier.width(2.dp))
+                        Spacer(Modifier.width(4.dp))
                     }
 
                     // Layer Content Thumbnail
@@ -547,17 +613,23 @@ fun LayersPanel(
 
                     Spacer(Modifier.width(8.dp))
                     Column(Modifier.weight(1f)) {
+                        // A base of a clipping group has its name underlined (Photoshop).
+                        val clipCount = clippedCountAbove(layers, actualIdx)
                         Text(
                             layer.name,
                             color = if (isSelected) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                             fontSize = 13.sp,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            textDecoration = if (clipCount > 0) androidx.compose.ui.text.style.TextDecoration.Underline else null
                         )
+                        val clipBase = if (layer.isClipped) clipBaseIndex(layers, actualIdx)?.let { layers[it].name } else null
                         Text(
                             when {
                                 layer.maskBitmap != null && layer.isEditingMask -> stringResource(R.string.layer_mask_editing_mask)
+                                clipBase != null -> stringResource(R.string.layer_clipped_to, clipBase)
+                                clipCount > 0 -> stringResource(R.string.layer_clip_base, clipCount)
                                 else -> buildString {
                                     append(
                                         stringResource(
@@ -573,7 +645,11 @@ fun LayersPanel(
                                     if (layer.opacity < 0.995f) append(" · ").append((layer.opacity * 100).roundToInt()).append('%')
                                 }
                             },
-                            color = if (layer.maskBitmap != null && layer.isEditingMask) IndigoPrimary else Color.Gray,
+                            color = when {
+                                layer.maskBitmap != null && layer.isEditingMask -> IndigoPrimary
+                                clipBase != null || clipCount > 0 -> IndigoLight
+                                else -> Color.Gray
+                            },
                             fontSize = 11.sp,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
@@ -918,4 +994,60 @@ private fun LayerThumbnailContent(layer: Layer, docW: Int, docH: Int) {
             }
         }
     }
+}
+
+
+/** Index of the layer [idx] is clipped to: the nearest layer below it that is not clipped itself. */
+internal fun clipBaseIndex(layers: List<Layer>, idx: Int): Int? {
+    if (idx !in layers.indices || !layers[idx].isClipped) return null
+    var j = idx - 1
+    while (j >= 0 && layers[j].isClipped) j--
+    return j.takeIf { it >= 0 }
+}
+
+/** How many layers directly above [idx] are clipped to it (0 when it is not a clipping base). */
+internal fun clippedCountAbove(layers: List<Layer>, idx: Int): Int {
+    if (idx !in layers.indices || layers[idx].isClipped) return 0
+    var n = 0
+    var j = idx + 1
+    while (j < layers.size && layers[j].isClipped) { n++; j++ }
+    return n
+}
+
+/** A slim slider (4 dp track, 16 dp thumb) that still has a full-size touch area. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ThinSlider(
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    onValueChangeFinished: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val interaction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    Slider(
+        value = value,
+        onValueChange = onValueChange,
+        onValueChangeFinished = onValueChangeFinished,
+        valueRange = 0f..1f,
+        interactionSource = interaction,
+        modifier = modifier.height(32.dp),
+        thumb = {
+            Box(Modifier.size(16.dp).clip(androidx.compose.foundation.shape.CircleShape).background(Color.White))
+        },
+        track = { state ->
+            val frac = ((state.value - state.valueRange.start) / (state.valueRange.endInclusive - state.valueRange.start)).coerceIn(0f, 1f)
+            val rtl = LocalLayoutDirection.current == LayoutDirection.Rtl
+            androidx.compose.foundation.Canvas(Modifier.fillMaxWidth().height(4.dp)) {
+                val r = size.height / 2f
+                drawRoundRect(StudioBorder, cornerRadius = androidx.compose.ui.geometry.CornerRadius(r, r))
+                val w = size.width * frac
+                drawRoundRect(
+                    IndigoPrimary,
+                    topLeft = androidx.compose.ui.geometry.Offset(if (rtl) size.width - w else 0f, 0f),
+                    size = androidx.compose.ui.geometry.Size(w, size.height),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(r, r)
+                )
+            }
+        }
+    )
 }

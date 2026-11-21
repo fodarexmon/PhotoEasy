@@ -140,7 +140,7 @@
     <string name="inpaint_success">تمت إزالة الكائن بنجاح!</string>
     
     <!-- Layers Panel -->
-    <string name="layers_title">شجرة الطبقات</string>
+    <string name="layers_title">الطبقات</string>
     <string name="layer_add">إضافة طبقة</string>
     <string name="layer_add_image">طبقة صورة</string>
     <string name="layer_add_text">طبقة نص</string>
@@ -1107,4 +1107,8 @@
     <string name="face_eyes_unlinked">كل عين وحدها</string>
     <string name="face_eye_left">العين اليسرى (في الصورة)</string>
     <string name="face_eye_right">العين اليمنى (في الصورة)</string>
+    <string name="layer_add_button">طبقة</string>
+    <string name="layers_panel_resize">اسحب لتغيير حجم لوحة الطبقات، والنقر المزدوج يعيدها</string>
+    <string name="layer_clipped_to">مقصوصة على «%1$s»</string>
+    <string name="layer_clip_base">أساس قص لـ %1$d</string>
 </resources>

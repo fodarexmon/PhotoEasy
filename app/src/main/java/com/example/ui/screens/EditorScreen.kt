@@ -1585,6 +1585,8 @@ fun EditorScreen(
                     }
                     AnimatedVisibility(visible = activeTool != ActiveTool.NONE, enter = slideInVertically { it }, exit = slideOutVertically { it }) {
                         val panelMaxHeight = when {
+                            // The layers panel sizes itself (fits its layers; the user can drag it taller).
+                            activeTool == ActiveTool.LAYERS -> screenMaxHeight * 0.75f
                             screenMaxHeight < 480.dp -> screenMaxHeight * 0.32f
                             screenMaxHeight < 600.dp -> screenMaxHeight * 0.36f
                             else -> screenMaxHeight * 0.42f

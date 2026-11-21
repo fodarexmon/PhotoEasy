@@ -140,7 +140,7 @@
     <string name="inpaint_success">Object removed!</string>
     
     <!-- Layers Panel -->
-    <string name="layers_title">Layers Stack</string>
+    <string name="layers_title">Layers</string>
     <string name="layer_add">Add Layer</string>
     <string name="layer_add_image">Image Layer</string>
     <string name="layer_add_text">Text Layer</string>
@@ -1103,4 +1103,8 @@
     <string name="face_eyes_unlinked">Each eye separately</string>
     <string name="face_eye_left">Left eye (in image)</string>
     <string name="face_eye_right">Right eye (in image)</string>
+    <string name="layer_add_button">Layer</string>
+    <string name="layers_panel_resize">Drag to resize the layers panel, double tap to reset</string>
+    <string name="layer_clipped_to">Clipped to “%1$s”</string>
+    <string name="layer_clip_base">Clipping base for %1$d</string>
 </resources>
