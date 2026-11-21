@@ -830,6 +830,23 @@ class PhotoEasyRobolectricTest {
     }
 
     @Test
+    fun `removal leaves a touching neighbour of similar colour alone`() {
+        val blue = Color.rgb(40, 70, 210)
+        val darkRed = Color.rgb(180, 20, 20)
+        // Red object 20..39 with a dark red block touching it on the right (40..70): only the
+        // object is masked; the block must not be eaten beyond the few-pixel edge band.
+        val (src, mask) = redSquareScene(80, 80, { x, y -> if (x in 40..70 && y in 20..39) darkRed else blue }, 20, 20, 39, 39)
+        val result = com.example.engine.InpaintEngine.inpaint(src, mask, com.example.engine.InpaintEngineMode.AI_PATCH_SYNTHESIS)
+        for (x in 44..60 step 4) assertEquals("neighbour changed at x=$x", darkRed, result.getPixel(x, 30))
+        assertEquals("untouched background", blue, result.getPixel(2, 2))
+        // Nothing outside the edge band changes anywhere.
+        for (y in 0 until 80 step 3) for (x in 0 until 80 step 3) {
+            val d = maxOf(maxOf(20 - x, x - 39), maxOf(20 - y, y - 39))
+            if (d > 3 && !(x in 40..70 && y in 20..39)) assertEquals("($x,$y)", src.getPixel(x, y), result.getPixel(x, y))
+        }
+    }
+
+    @Test
     fun `patch synthesis also fills an object touching the image border`() {
         val (src, mask) = redSquareScene(64, 64, { _, _ -> Color.GREEN }, 0, 20, 10, 40)
         val result = com.example.engine.InpaintEngine.inpaint(src, mask, com.example.engine.InpaintEngineMode.AI_PATCH_SYNTHESIS)
