@@ -2031,6 +2031,12 @@ fun CanvasView(
                     path.close()
                     drawPath(path = path, color = Color.Black.copy(alpha = 0.6f), style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
                     drawPath(path = path, color = CyanAccent, style = Stroke(width = 1.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+                } else if (activeTool == ActiveTool.RETOUCH && retouchTool == com.example.engine.RetouchTool.HEAL) {
+                    // Spot Healing: the painted area is shown as a band of the brush size until the
+                    // finger lifts and it is healed.
+                    val bandW = with(density) { effectiveBrushSizeDp.dp.toPx() }
+                    drawPath(path = path, color = Color.White.copy(alpha = 0.35f), style = Stroke(width = bandW, cap = StrokeCap.Round, join = StrokeJoin.Round))
+                    drawPath(path = path, color = Color.Black.copy(alpha = 0.35f), style = Stroke(width = 1.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
                 } else if (activeTool == ActiveTool.RETOUCH) {
                     // Retouch brushes show their result live on the image: only a thin guide line
                     // (Patch: where the selection is dragged) and the brush outline at the finger.

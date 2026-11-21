@@ -4092,6 +4092,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val points: List<PointF>, val docRadius: Float
         ) : RetouchEvent()
         class Move(val points: List<PointF>, val docRadius: Float) : RetouchEvent()
+        class Heal(val layer: Layer, val docW: Int, val docH: Int, val points: List<PointF>, val docRadius: Float) : RetouchEvent()
         class Fill(
             val layer: Layer, val docW: Int, val docH: Int, val pointDoc: PointF, val endDoc: PointF?,
             val brush: com.example.engine.RetouchBrush, val selection: Bitmap?
@@ -4122,6 +4123,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     /** The stroke being processed has recorded its undo step (roll it back if it fails). */
     private var retouchStepOpen = false
     private class GradientDrag(val layer: Layer, val start: PointF, val selection: Bitmap?)
+    private class HealStroke(val layer: Layer, val points: MutableList<PointF>, val docRadius: Float)
+    /** Spot Healing stroke being painted (document coordinates). */
+    private var healStroke: HealStroke? = null
     /** Fill in gradient mode: where the drag started. */
     private var gradientStart: GradientDrag? = null
     /** Stroke points not painted yet (merged moves), see [retouchSegment]. */
@@ -4242,6 +4246,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 return
             }
             if (tool == com.example.engine.RetouchTool.PATCH) { patchStartDoc = points.firstOrNull(); return }
+            if (tool == com.example.engine.RetouchTool.HEAL) {
+                // Spot Healing: the stroke is collected and healed when the finger lifts.
+                healStroke = HealStroke(layer!!, points.toMutableList(), docRadius)
+                return
+            }
             val first = points.firstOrNull() ?: return
             val paints = tool == com.example.engine.RetouchTool.FILL || tool == com.example.engine.RetouchTool.BRUSH
             if (paints && st.isFillColorPicking) {
@@ -4273,6 +4282,15 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         if (retouchStrokeRejected) return
+        val heal = healStroke
+        if (tool == com.example.engine.RetouchTool.HEAL && heal != null) {
+            heal.points.addAll(points)
+            if (phase == StrokePhase.END) {
+                healStroke = null
+                queueRetouch(RetouchEvent.Heal(heal.layer, proj.width, proj.height, heal.points.toList(), heal.docRadius))
+            }
+            return
+        }
         val grad = gradientStart
         if (tool == com.example.engine.RetouchTool.FILL && grad != null) {
             if (phase != StrokePhase.END) return
@@ -4471,6 +4489,25 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 if (pts.isNotEmpty()) paintRetouch(session.canvas, pts, ev.docRadius)
                 paintRetouch(session.canvas, ev.points, ev.docRadius)
                 withContext(retouchDispatcher) { session.canvas.endStroke() }
+                commitRetouch(session)
+            }
+            is RetouchEvent.Heal -> {
+                val preview = beginRetouchStep(ev.layer) ?: run { retouchPending = (retouchPending - 1).coerceAtLeast(0); return }
+                strokeLayer = ev.layer
+                strokePreview = preview
+                strokeOffsetDoc = null
+                val session = ensureRetouchSession(ev.layer)
+                prepareStrokeMapping(ev.layer, session.canvas, ev.docW, ev.docH)
+                val c = session.canvas
+                val local = toLocalPoints(ev.points)
+                val r = ev.docRadius * strokeLocalScale
+                val changed = withContext(retouchDispatcher) {
+                    c.heal(local, r)?.also { area -> c.downsampleInto(preview, area) }
+                }
+                if (changed == null) {
+                    onRetouchFailed(R.string.heal_failed)
+                    return
+                }
                 commitRetouch(session)
             }
             is RetouchEvent.Fill -> {

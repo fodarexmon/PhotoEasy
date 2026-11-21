@@ -10,7 +10,7 @@ import kotlin.math.roundToInt
 import kotlin.math.sqrt
 import kotlin.math.sin
 
-enum class RetouchTool { BRUSH, ERASER, BLUR, SHARPEN, SMUDGE, DODGE, BURN, CLONE, PATCH, FILL }
+enum class RetouchTool { BRUSH, ERASER, HEAL, BLUR, SHARPEN, SMUDGE, DODGE, BURN, CLONE, PATCH, FILL }
 
 /** Brush tip shapes of the paint brush and eraser. */
 enum class BrushTip { ROUND, CALLIGRAPHY, SPRAY, CHALK }
@@ -244,7 +244,7 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
             RetouchTool.BLUR, RetouchTool.SHARPEN -> filterDab(cx, cy, r, l, t, rr, b)
             RetouchTool.SMUDGE -> smudgeDab(cx, cy, r, l, t, rr, b)
             RetouchTool.BRUSH, RetouchTool.ERASER -> paintDab(cx, cy, r, l, t, rr, b)
-            RetouchTool.PATCH, RetouchTool.FILL -> return null
+            RetouchTool.PATCH, RetouchTool.FILL, RetouchTool.HEAL -> return null
         }
         return Rect(l, t, rr + 1, b + 1)
     }
@@ -456,11 +456,14 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
      * pixels found [ox], [oy] away, and blends their colour into the surroundings so no seam shows.
      * Returns the changed area, or null when nothing is selected.
      */
-    fun patch(mask: ByteArray, maskStride: Int, ox: Int, oy: Int): Rect? {
+    fun patch(mask: ByteArray, maskStride: Int, ox: Int, oy: Int, hint: Rect? = null): Rect? {
         var l = width; var t = height; var r = -1; var b = -1
-        for (y in 0 until height) {
+        // [hint]: the mask is known to lie inside it (no full-image scan).
+        val sy0 = hint?.top?.coerceIn(0, height) ?: 0; val sy1 = hint?.bottom?.coerceIn(0, height) ?: height
+        val sx0 = hint?.left?.coerceIn(0, width) ?: 0; val sx1 = hint?.right?.coerceIn(0, width) ?: width
+        for (y in sy0 until sy1) {
             val row = y * maskStride
-            for (x in 0 until width) if ((mask[row + x].toInt() and 255) > 8) {
+            for (x in sx0 until sx1) if ((mask[row + x].toInt() and 255) > 8) {
                 if (x < l) l = x; if (x > r) r = x; if (y < t) t = y; if (y > b) b = y
             }
         }
@@ -529,6 +532,125 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
         for (y in gt..gb) System.arraycopy(out, (y - gt) * bw, pix, y * width + gl, bw)
         return Rect(gl, gt, gr + 1, gb + 1)
     }
+
+    // --- Spot Healing ---------------------------------------------------------------------------
+
+    /**
+     * Photoshop's Spot Healing Brush: the area painted along [pts] (x0, y0, x1, y1, ... local
+     * pixels) with radius [r] is replaced by texture from the best-matching clean area around it
+     * (chosen automatically), its colour blended in seamlessly (see [patch]). Returns the changed
+     * area, or null.
+     */
+    fun heal(pts: FloatArray, r: Float): Rect? {
+        if (pts.size < 2) return null
+        val rad = r.coerceAtLeast(1.5f)
+        // Painted area (soft edge), dabs every third of the radius along the path.
+        var l = width; var t = height; var rr = -1; var b = -1
+        val dabs = ArrayList<Float>()
+        var i = 0
+        while (i + 1 < pts.size) {
+            val x = pts[i]; val y = pts[i + 1]
+            if (dabs.isEmpty()) { dabs.add(x); dabs.add(y) } else {
+                val px = dabs[dabs.size - 2]; val py = dabs[dabs.size - 1]
+                val d = sqrt((x - px) * (x - px) + (y - py) * (y - py))
+                val n = (d / (rad / 3f)).toInt()
+                for (k in 1..n) { dabs.add(px + (x - px) * k / n); dabs.add(py + (y - py) * k / n) }
+                if (n == 0 && d > 0.5f) { dabs.add(x); dabs.add(y) }
+            }
+            i += 2
+        }
+        val outer = rad * 1.15f
+        var k = 0
+        while (k < dabs.size) {
+            l = min(l, (dabs[k] - outer).toInt()); rr = max(rr, (dabs[k] + outer).toInt() + 1)
+            t = min(t, (dabs[k + 1] - outer).toInt()); b = max(b, (dabs[k + 1] + outer).toInt() + 1)
+            k += 2
+        }
+        l = max(0, l); t = max(0, t); rr = min(width - 1, rr); b = min(height - 1, b)
+        if (l > rr || t > b) return null
+        val bw = rr - l + 1; val bh = b - t + 1
+        val m = ByteArray(bw * bh)
+        k = 0
+        while (k < dabs.size) {
+            val cx = dabs[k]; val cy = dabs[k + 1]
+            val x0 = max(l, (cx - outer).toInt()); val x1 = min(rr, (cx + outer).toInt() + 1)
+            val y0 = max(t, (cy - outer).toInt()); val y1 = min(b, (cy + outer).toInt() + 1)
+            for (y in y0..y1) for (x in x0..x1) {
+                val dx = x + 0.5f - cx; val dy = y + 0.5f - cy
+                val d = sqrt(dx * dx + dy * dy)
+                val v = when { d <= rad * 0.85f -> 255; d >= outer -> 0; else -> (255 * (outer - d) / (outer - rad * 0.85f)).toInt() }
+                val j = (y - t) * bw + (x - l)
+                if (v > (m[j].toInt() and 255)) m[j] = v.toByte()
+            }
+            k += 2
+        }
+        val off = bestSource(m, l, t, bw, bh, rad) ?: return null
+        // patch() works on a full-image mask: build it only inside the box.
+        val full = ByteArray(width * height)
+        for (y in 0 until bh) System.arraycopy(m, y * bw, full, (y + t) * width + l, bw)
+        return patch(full, width, off.first, off.second, Rect(l, t, rr + 1, b + 1))
+    }
+
+    /**
+     * Offset of the clean area to copy for the painted area [m] (bw x bh at l, t): among
+     * candidates around it, the one whose surroundings match the painted area's surroundings best
+     * and whose own pixels are even (no other blemish copied in).
+     */
+    internal fun bestSource(m: ByteArray, l: Int, t: Int, bw: Int, bh: Int, rad: Float): Pair<Int, Int>? {
+        val ring = max(2, (rad * 0.6f).toInt())
+        // Ring pixels (just outside the painted area) and inner pixels, sampled.
+        val ringPts = ArrayList<Int>(); val innerPts = ArrayList<Int>()
+        val step = max(1, (max(bw, bh) / 48))
+        for (y in -ring until bh + ring step step) for (x in -ring until bw + ring step step) {
+            val gx = l + x; val gy = t + y
+            if (gx !in 0 until width || gy !in 0 until height) continue
+            val inside = x in 0 until bw && y in 0 until bh && (m[y * bw + x].toInt() and 255) > 8
+            if (inside) { innerPts.add(gy * width + gx); continue }
+            // Within `ring` px of the painted area?
+            var near = false
+            var yy = max(0, y - ring)
+            while (!near && yy <= min(bh - 1, y + ring)) {
+                var xx = max(0, x - ring)
+                while (xx <= min(bw - 1, x + ring)) { if ((m[yy * bw + xx].toInt() and 255) > 8) { near = true; break }; xx += max(1, ring / 2) }
+                yy += max(1, ring / 2)
+            }
+            if (near) ringPts.add(gy * width + gx)
+        }
+        if (ringPts.isEmpty() || innerPts.isEmpty()) return null
+        var ringLum = 0f
+        for (q in ringPts) ringLum += lumOf(pix[q])
+        ringLum /= ringPts.size
+        val extent = max(bw, bh).toFloat()
+        var best: Pair<Int, Int>? = null
+        var bestScore = Float.MAX_VALUE
+        for (f in floatArrayOf(1.1f, 1.6f, 2.4f)) for (a in 0 until 16) {
+            val ang = a * (Math.PI / 8).toFloat()
+            val ox = (kotlin.math.cos(ang) * extent * f).roundToInt(); val oy = (kotlin.math.sin(ang) * extent * f).roundToInt()
+            if (l - ring + ox < 0 || t - ring + oy < 0 || l + bw + ring + ox > width || t + bh + ring + oy > height) continue
+            // Surroundings alike: colour difference of the two rings.
+            var ssd = 0f
+            for (q in ringPts) {
+                val c1 = pix[q]; val c2 = pix[q + oy * width + ox]
+                val dr = ((c1 shr 16) and 255) - ((c2 shr 16) and 255); val dg = ((c1 shr 8) and 255) - ((c2 shr 8) and 255); val db = (c1 and 255) - (c2 and 255)
+                ssd += (dr * dr + dg * dg + db * db).toFloat()
+            }
+            ssd /= ringPts.size
+            // The source itself should look like clean surroundings (no spot, no edge).
+            var dev = 0f; var srcA = 0
+            for (q in innerPts) {
+                val c = pix[q + oy * width + ox]
+                if ((c ushr 24) < 200) srcA++
+                val d = lumOf(c) - ringLum
+                dev += d * d
+            }
+            dev /= innerPts.size
+            val score = ssd + 1.5f * dev + if (srcA > innerPts.size / 10) 1e9f else 0f
+            if (score < bestScore) { bestScore = score; best = ox to oy }
+        }
+        return best
+    }
+
+    private fun lumOf(c: Int): Float = 0.299f * ((c shr 16) and 255) + 0.587f * ((c shr 8) and 255) + 0.114f * (c and 255)
 
     // --- Fill (paint bucket) ------------------------------------------------------------------
 

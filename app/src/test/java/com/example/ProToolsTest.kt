@@ -344,6 +344,25 @@ class ProToolsTest {
         assertTrue(Color.alpha(res.getPixel(500, 60)) > 240)
     }
 
+    @Test
+    fun `spot healing removes a spot and keeps the skin texture`() {
+        val w = 300; val h = 300
+        val rnd = java.util.Random(5)
+        val px = IntArray(w * h) { val v = rnd.nextInt(17) - 8; Color.rgb(210 + v, 160 + v, 140 + v) }
+        val orig = px.copyOf()
+        for (y in 140..152) for (x in 140..152) if ((x - 146) * (x - 146) + (y - 146) * (y - 146) <= 36) px[y * w + x] = Color.rgb(120, 60, 55)
+        val c = com.example.engine.RetouchCanvas(w, h, px)
+        assertNotNull(c.heal(floatArrayOf(146f, 146f, 147f, 146f), 9f))
+        assertTrue(lum(px[146 * w + 146]) > 160)
+        fun std(a: IntArray, x0: Int, y0: Int, x1: Int, y1: Int): Double {
+            var s = 0.0; var q = 0.0; var n = 0
+            for (y in y0..y1) for (x in x0..x1) { val l = lum(a[y * w + x]); s += l; q += l * l; n++ }
+            val m = s / n; return kotlin.math.sqrt(q / n - m * m)
+        }
+        assertTrue("texture kept", std(px, 143, 143, 149, 149) > 0.5 * std(orig, 50, 50, 56, 56))
+        assertEquals(orig[20 * w + 20], px[20 * w + 20])
+    }
+
     // --- Colour decontamination --------------------------------------------------------------
 
     @Test

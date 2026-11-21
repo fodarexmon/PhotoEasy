@@ -1088,4 +1088,7 @@
     <string name="refine_out_layer_mask">Layer mask</string>
     <string name="refine_out_new_layer">New layer</string>
     <string name="refine_out_new_layer_mask">New layer with mask</string>
+    <string name="tool_heal">Spot Healing</string>
+    <string name="heal_info">Paint over a blemish, spot or small object: when you lift your finger it is replaced by texture from the best matching area around it, with the colour blended in.</string>
+    <string name="heal_failed">No suitable area around to heal from. Try a smaller stroke.</string>
 </resources>
