@@ -101,24 +101,20 @@ object FaceSkin {
         val fx = lw.toFloat() / RW; val fy = lh.toFloat() / RH
         // Box-averaged copy of the region at working size.
         val low = IntArray(lw * lh)
-        for (y in 0 until lh) for (x in 0 until lw) {
-            val sx0 = X0 + (x / fx).toInt(); val sx1 = min(X1, X0 + ((x + 1) / fx).toInt() - 1).coerceAtLeast(sx0)
-            val sy0 = Y0 + (y / fy).toInt(); val sy1 = min(Y1, Y0 + ((y + 1) / fy).toInt() - 1).coerceAtLeast(sy0)
-            var sa = 0; var sr = 0; var sg = 0; var sb = 0; var n = 0
-            var yy = sy0
-            while (yy <= sy1) {
-                var xx = sx0
-                while (xx <= sx1) {
-                    val c = px[yy * w + xx]
-                    sa += c ushr 24; sr += (c shr 16) and 255; sg += (c shr 8) and 255; sb += c and 255; n++
-                    xx++
-                }
-                yy++
+        rebuildLow(px, w, low, lw, lh, X0, Y0, X1, Y1, fx, fy)
+        // Blemishes: found at working size, healed at full resolution with real skin texture.
+        if (a.blemishes > 0f) {
+            val spots = FloatArray(lw * lh)
+            fixRegion(low.copyOf(), lw, lh, X0 * fx, Y0 * fy, g, a.copy(darkCircles = 0f, skinSmooth = 0f), s * fx, spots)
+            if (healSpots(px, w, h, X0, Y0, fx, fy, spots, lw, lh, max(g.width, g.height) * s)) {
+                // The rest works on the healed pixels.
+                rebuildLow(px, w, low, lw, lh, X0, Y0, X1, Y1, fx, fy)
             }
-            low[y * lw + x] = ((sa / n) shl 24) or ((sr / n) shl 16) or ((sg / n) shl 8) or (sb / n)
         }
+        val rest = a.copy(blemishes = 0f)
+        if (rest.darkCircles <= 0f && rest.skinSmooth <= 0f) return
         val fixed = low.copyOf()
-        fixRegion(fixed, lw, lh, X0 * fx, Y0 * fy, g, a, s * fx)
+        fixRegion(fixed, lw, lh, X0 * fx, Y0 * fy, g, rest, s * fx)
         // The change, scaled up and added to every pixel: the image keeps its own fine detail.
         val dr = FloatArray(lw * lh); val dg = FloatArray(lw * lh); val db = FloatArray(lw * lh)
         var any = false
@@ -146,11 +142,94 @@ object FaceSkin {
         }
     }
 
+    /** Box-averaged copy of the region X0..X1, Y0..Y1 of [px] into [low] (lw x lh). */
+    private fun rebuildLow(px: IntArray, w: Int, low: IntArray, lw: Int, lh: Int, X0: Int, Y0: Int, X1: Int, Y1: Int, fx: Float, fy: Float) {
+        for (y in 0 until lh) for (x in 0 until lw) {
+            val sx0 = X0 + (x / fx).toInt(); val sx1 = min(X1, X0 + ((x + 1) / fx).toInt() - 1).coerceAtLeast(sx0)
+            val sy0 = Y0 + (y / fy).toInt(); val sy1 = min(Y1, Y0 + ((y + 1) / fy).toInt() - 1).coerceAtLeast(sy0)
+            var sa = 0; var sr = 0; var sg = 0; var sb = 0; var n = 0
+            var yy = sy0
+            while (yy <= sy1) {
+                var xx = sx0
+                while (xx <= sx1) {
+                    val c = px[yy * w + xx]
+                    sa += c ushr 24; sr += (c shr 16) and 255; sg += (c shr 8) and 255; sb += c and 255; n++
+                    xx++
+                }
+                yy++
+            }
+            low[y * lw + x] = ((sa / n) shl 24) or ((sr / n) shl 16) or ((sg / n) shl 8) or (sb / n)
+        }
+    }
+
+    /**
+     * Heals every spot of [spots] (lw x lh, 0..1, working grid of the region at X0, Y0 scaled by
+     * fx, fy) at full resolution in [px]: each spot gets texture from the best-matching clean
+     * skin around it, colour-blended (Spot Healing). Returns true when something changed.
+     */
+    private fun healSpots(px: IntArray, w: Int, h: Int, X0: Int, Y0: Int, fx: Float, fy: Float, spots: FloatArray, lw: Int, lh: Int, faceSize: Float): Boolean {
+        val label = IntArray(lw * lh) { -1 }
+        val canvas = RetouchCanvas(w, h, px)
+        val full = ByteArray(w * h)
+        var changed = false
+        var next = 0
+        var stack = IntArray(64)
+        val maxSpot = faceSize * 0.12f + 4f
+        for (start in 0 until lw * lh) {
+            if (spots[start] < 0.15f || label[start] >= 0) continue
+            val id = next++
+            var sp = 0; stack[sp++] = start; label[start] = id
+            var minX = lw; var minY = lh; var maxX = -1; var maxY = -1
+            while (sp > 0) {
+                val i = stack[--sp]
+                val x = i % lw; val y = i / lw
+                if (x < minX) minX = x; if (x > maxX) maxX = x; if (y < minY) minY = y; if (y > maxY) maxY = y
+                for (dy in -1..1) for (dx in -1..1) {
+                    val nx = x + dx; val ny = y + dy
+                    if (nx !in 0 until lw || ny !in 0 until lh) continue
+                    val j = ny * lw + nx
+                    if (label[j] < 0 && spots[j] >= 0.15f) {
+                        label[j] = id
+                        if (sp == stack.size) stack = stack.copyOf(stack.size * 2)
+                        stack[sp++] = j
+                    }
+                }
+            }
+            // Full-resolution box of the spot (+1 working pixel).
+            val l = max(0, X0 + ((minX - 1) / fx).toInt()); val t = max(0, Y0 + ((minY - 1) / fy).toInt())
+            val r = min(w - 1, X0 + ((maxX + 2) / fx).toInt()); val b = min(h - 1, Y0 + ((maxY + 2) / fy).toInt())
+            val bw = r - l + 1; val bh = b - t + 1
+            if (bw < 1 || bh < 1 || max(bw, bh) > maxSpot) continue // too big to be a blemish
+            val m = ByteArray(bw * bh)
+            var any = false
+            for (y in t..b) {
+                val ly = ((y - Y0 + 0.5f) * fy - 0.5f).coerceIn(0f, (lh - 1).toFloat())
+                val y0 = ly.toInt(); val y1 = min(lh - 1, y0 + 1); val ty = ly - y0
+                for (x in l..r) {
+                    val lx = ((x - X0 + 0.5f) * fx - 0.5f).coerceIn(0f, (lw - 1).toFloat())
+                    val x0 = lx.toInt(); val x1 = min(lw - 1, x0 + 1); val tx = lx - x0
+                    fun v(i: Int) = if (label[i] == id) spots[i] else 0f
+                    val value = (v(y0 * lw + x0) * (1 - tx) + v(y0 * lw + x1) * tx) * (1 - ty) + (v(y1 * lw + x0) * (1 - tx) + v(y1 * lw + x1) * tx) * ty
+                    val bv = (value * 255f).roundToInt().coerceIn(0, 255)
+                    if (bv > 8) any = true
+                    m[(y - t) * bw + (x - l)] = bv.toByte()
+                }
+            }
+            if (!any) continue
+            val off = canvas.bestSource(m, l, t, bw, bh, max(bw, bh) / 2f) ?: continue
+            for (y in 0 until bh) System.arraycopy(m, y * bw, full, (y + t) * w + l, bw)
+            if (canvas.patch(full, w, off.first, off.second, android.graphics.Rect(l, t, r + 1, b + 1)) != null) changed = true
+            for (y in 0 until bh) java.util.Arrays.fill(full, (y + t) * w + l, (y + t) * w + l + bw, 0)
+        }
+        return changed
+    }
+
     /**
      * Retouches [buf] (rw x rh), whose pixel (x, y) is at (x + ox, y + oy) in the faces'
-     * coordinates times [s].
+     * coordinates times [s]. With [spotsOut], blemishes are only found (spot strength 0..1 written
+     * there), not filled: the caller heals them at full resolution.
      */
-    private fun fixRegion(buf: IntArray, rw: Int, rh: Int, ox: Float, oy: Float, g: FaceGeometry, a: FaceAdjust, s: Float) {
+    private fun fixRegion(buf: IntArray, rw: Int, rh: Int, ox: Float, oy: Float, g: FaceGeometry, a: FaceAdjust, s: Float, spotsOut: FloatArray? = null) {
         val fw = g.width * s; val fh = g.height * s
         val cx = g.center.x * s; val cy = g.center.y * s
         val x0 = ox; val y0 = oy
@@ -212,6 +291,10 @@ object FaceSkin {
             val grown = FloatArray(rw * rh)
             for (y in 0 until rh) for (x in 0 until rw) {
                 if (spotI.mean(x, y, grow, tmp)) grown[y * rw + x] = min(1f, max(spot[y * rw + x], tmp[2] / 255f * 2.5f))
+            }
+            if (spotsOut != null) {
+                for (i in 0 until rw * rh) spotsOut[i] = grown[i] * min(1f, skin[i] * 1.5f)
+                return
             }
             // Fill: the mean of the clean skin around (spots excluded), plus the fine texture.
             val clean = Integral(rw, rh).also { it.build({ x, y -> out[y * rw + x] }, { x, y -> skin[y * rw + x] * (1f - grown[y * rw + x]) }) }

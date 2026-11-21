@@ -114,6 +114,7 @@ fun RefineEdgeDialog(
         return proxyPx / maxOf(g.proxyW, g.proxyH)
     }
 
+    val barsPadding = hostSystemBarsPadding()
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
@@ -123,7 +124,7 @@ fun RefineEdgeDialog(
             color = StudioSurface,
             border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
             modifier = Modifier
-                .safeDrawingPadding()
+                .padding(barsPadding)
                 .fillMaxWidth(0.96f)
                 .fillMaxHeight(0.94f)
                 .padding(6.dp)
@@ -449,10 +450,9 @@ fun RefineEdgeDialog(
                             title = stringResource(R.string.refine_decontaminate),
                             description = stringResource(R.string.refine_decontaminate_desc),
                             checked = cfg.decontaminateColors,
-                            enabled = cfg.radiusPx > 0,
                             color = CyanAccent
                         ) { cfg = cfg.copy(decontaminateColors = it) }
-                        if (cfg.decontaminateColors && cfg.radiusPx > 0) {
+                        if (cfg.decontaminateColors) {
                             RefineSliderItem(
                                 label = stringResource(R.string.refine_decontaminate_amount),
                                 valueLabel = "${(cfg.decontaminateAmount * 100).toInt()}%",

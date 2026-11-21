@@ -309,10 +309,16 @@ object ImageProcessor {
         return Bitmap.createScaledBitmap(source, (source.width*r).toInt().coerceAtLeast(1), (source.height*r).toInt().coerceAtLeast(1), true)
     }
 
-    fun saveLosslessBitmap(bitmap: Bitmap, file: File): Boolean = try {
+    /**
+     * Saves without any loss. [fast]: much quicker encoding for frequent saves (e.g. after every
+     * brush stroke) at the cost of a somewhat larger file; the pixels are identical either way.
+     */
+    fun saveLosslessBitmap(bitmap: Bitmap, file: File, fast: Boolean = false): Boolean = try {
         file.parentFile?.mkdirs()
         FileOutputStream(file).use { out ->
-            val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) bitmap.compress(Bitmap.CompressFormat.WEBP_LOSSLESS, 100, out) else bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+            // For lossless WebP / PNG the "quality" is only the compression effort.
+            val effort = if (fast) 10 else 100
+            val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) bitmap.compress(Bitmap.CompressFormat.WEBP_LOSSLESS, effort, out) else bitmap.compress(Bitmap.CompressFormat.PNG, effort, out)
             out.flush(); out.fd.sync(); ok
         }
     } catch (e: Exception) { Log.e("ImageProcessor", "lossless save failed", e); false }
@@ -457,11 +463,12 @@ object ImageProcessor {
         // Colour replacements, matched and transferred in CIE Lab (perceptual).
         val replaceSpecs = adj.effectiveReplacements().filter { it.enabled }.map { ReplaceSpec.of(it) }
         val previewMask = adj.replacePreviewMask
+        // Rows are independent: they are shared out over the CPU cores.
+        fun rows(y0: Int, y1: Int) {
         val lab = FloatArray(3)
         val hsv = FloatArray(3)
         val rgb = FloatArray(3)
-
-        for (y in 0 until h) {
+        for (y in y0 until y1) {
             if ((y and 31) == 0) checkCancel()
             val row = y * w
             for (x in 0 until w) {
@@ -637,6 +644,8 @@ object ImageProcessor {
                 px[i] = (a shl 24) or (ri shl 16) or (gi shl 8) or bi
             }
         }
+        }
+        parallelRows(h) { a, b -> rows(a, b) }
 
         if (adj.sharpness > 0f) sharpenLuminance(px, w, h, adj.sharpness, ::checkCancel)
         if (adj.vignette != 0f) applyVignettePixels(px, w, h, adj.vignette, ::checkCancel)
@@ -644,6 +653,23 @@ object ImageProcessor {
         val output = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         output.setPixels(px, 0, w, 0, 0, w, h)
         return output
+    }
+
+    /**
+     * Runs [block] over row ranges [start, end) covering 0 until [h], in parallel on the CPU
+     * cores (one range per call when the image is small). Exceptions (e.g. cancellation) are
+     * rethrown to the caller.
+     */
+    internal fun parallelRows(h: Int, block: (Int, Int) -> Unit) {
+        val cores = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
+        if (cores == 1 || h < 96) { block(0, h); return }
+        val chunks = cores * 2
+        val per = (h + chunks - 1) / chunks
+        java.util.stream.IntStream.range(0, chunks).parallel().forEach { c ->
+            val a = c * per
+            val b = minOf(h, a + per)
+            if (a < b) block(a, b)
+        }
     }
 
     /** HSL range weights for a colour (targeted adjustment): keys of [com.example.data.model.HslRanges]. */

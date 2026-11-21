@@ -38,6 +38,7 @@ import kotlin.math.roundToInt
 private fun retouchIcon(t: RetouchTool): ImageVector = when (t) {
     RetouchTool.BRUSH -> Icons.Default.Brush
     RetouchTool.ERASER -> Icons.Default.AutoFixNormal
+    RetouchTool.HEAL -> Icons.Default.AutoFixHigh
     RetouchTool.BLUR -> Icons.Default.BlurOn
     RetouchTool.SHARPEN -> Icons.Default.Details
     RetouchTool.SMUDGE -> Icons.Default.Fingerprint
@@ -51,6 +52,7 @@ private fun retouchIcon(t: RetouchTool): ImageVector = when (t) {
 private fun retouchLabel(t: RetouchTool): Int = when (t) {
     RetouchTool.BRUSH -> R.string.tool_brush
     RetouchTool.ERASER -> R.string.tool_eraser
+    RetouchTool.HEAL -> R.string.tool_heal
     RetouchTool.BLUR -> R.string.retouch_blur
     RetouchTool.SHARPEN -> R.string.retouch_sharpen
     RetouchTool.SMUDGE -> R.string.retouch_smudge
@@ -178,6 +180,10 @@ fun RetouchPanel(
             RSlider(R.string.brush_flow, brush.brushFlow * 100f, 1f..100f, "${(brush.brushFlow * 100).roundToInt()}%") { onBrushChange(brush.copy(brushFlow = it / 100f)) }
             RSlider(R.string.brush_spacing, brush.brushSpacing * 100f, 2f..100f, "${(brush.brushSpacing * 100).roundToInt()}%") { onBrushChange(brush.copy(brushSpacing = it / 100f)) }
             RSlider(R.string.brush_smoothing, brush.brushSmoothing * 100f, 0f..95f, "${(brush.brushSmoothing * 100).roundToInt()}%") { onBrushChange(brush.copy(brushSmoothing = it / 100f)) }
+        } else if (tool == RetouchTool.HEAL) {
+            Text(stringResource(R.string.heal_info), color = Color.LightGray, fontSize = 12.sp)
+            Spacer(Modifier.height(6.dp))
+            RSlider(R.string.retouch_size, sizeDp, 4f..200f, "${sizeDp.roundToInt()} dp", onSizeChange)
         } else if (tool == RetouchTool.FILL) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 listOf(FillMode.COLOR to R.string.fill_mode_color, FillMode.GRADIENT to R.string.fill_mode_gradient, FillMode.PATTERN to R.string.fill_mode_pattern)

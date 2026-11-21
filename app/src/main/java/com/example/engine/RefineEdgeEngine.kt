@@ -89,7 +89,9 @@ object RefineEdgeEngine {
         mask: Bitmap,
         config: RefineEdgeConfig,
         refineArea: ByteArray? = null,
-        aiAlpha: ByteArray? = null
+        aiAlpha: ByteArray? = null,
+        /** Internal: false for the reduced-scale pass itself (see [coarseAlpha]). */
+        allowCoarse: Boolean = true
     ): RefineResult {
         require(source.width == mask.width && source.height == mask.height) {
             "Source and mask dimensions must match"
@@ -116,11 +118,17 @@ object RefineEdgeEngine {
         val area = refineArea?.takeIf { it.size == n }
         val ai = aiAlpha?.takeIf { it.size == n }
         if (config.radiusPx <= 0 && area == null) {
-            return RefineResult(globalRefinements(alpha, w, h, config), null)
+            val m = globalRefinements(alpha, w, h, config)
+            return RefineResult(m, decontaminate(source, m, config))
         }
 
         // --- 2. Trimap ---------------------------------------------------------------------------
         val radius = config.radiusPx.coerceIn(1, 64)
+        // Large image with brushed or wide edges: the sample search (a fixed number of pixels)
+        // reaches much less of the picture than at preview scale, so first matte at preview
+        // scale and use that as the reference wherever the full-resolution search finds nothing.
+        val coarse = if (allowCoarse && (area != null || radius > 24) && max(w, h) > COARSE_MAX * 1.4f)
+            coarseAlpha(source, alpha, w, h, config, area, ai) else null
         val tri = buildTrimap(alpha, w, h, radius, config.smartRadius)
         // Refine Edge Brush: painted pixels are always estimated.
         if (area != null) for (i in 0 until n) if ((area[i].toInt() and 0xFF) >= 128) tri[i] = TRI_UNKNOWN
@@ -150,7 +158,8 @@ object RefineEdgeEngine {
             }
         }
 
-        val decontaminated: Bitmap? = if (config.decontaminateColors) source.copy(Bitmap.Config.ARGB_8888, true) else null
+        // Colours are decontaminated on the finished matte (see ColorDecontaminator), not per tile.
+        val decontaminated: Bitmap? = null
 
         if (maxX >= 0) {
             // Brushed areas can be wide: look further for definite foreground / background.
@@ -179,13 +188,58 @@ object RefineEdgeEngine {
                 refineTile(
                     px, rx0, ry0, rw, rh, cx0, cy0, cx1, cy1,
                     tri, alpha, out, w, maxWalk, guideRadius, eps,
-                    decontaminated, config.decontaminateAmount, ai
+                    decontaminated, config.decontaminateAmount, ai, coarse
                 )
             }
         }
 
         // --- 5. Global refinements ---------------------------------------------------------------
-        return RefineResult(globalRefinements(out, w, h, config), decontaminated)
+        val finalMask = globalRefinements(out, w, h, config)
+        return RefineResult(finalMask, decontaminate(source, finalMask, config))
+    }
+
+    /** Longest side of the reduced-scale (preview-like) pass of large images. */
+    private const val COARSE_MAX = 1024
+
+    /**
+     * The matte at preview scale (longest side [COARSE_MAX]) scaled back to w x h bytes, from the
+     * already shifted input [alpha]; the raw matte only (no smoothing, feather, contrast).
+     */
+    private fun coarseAlpha(
+        source: Bitmap, alpha: ByteArray, w: Int, h: Int, config: RefineEdgeConfig,
+        area: ByteArray?, ai: ByteArray?
+    ): ByteArray? = try {
+        val sc = COARSE_MAX.toFloat() / max(w, h)
+        val sw = max(2, (w * sc).roundToInt()); val sh = max(2, (h * sc).roundToInt())
+        fun small(bytes: ByteArray): ByteArray {
+            val m = SelectionEngine.alphaMaskFromPacked(bytes, w, h)
+            val s2 = Bitmap.createScaledBitmap(m, sw, sh, true)
+            m.recycle()
+            return SelectionEngine.alphaBytesPacked(s2).also { if (s2 !== m) s2.recycle() }
+        }
+        val smallSrc = Bitmap.createScaledBitmap(source, sw, sh, true)
+        val smallMask = SelectionEngine.alphaMaskFromPacked(small(alpha), sw, sh)
+        val cfg = config.copy(
+            radiusPx = max(1, (config.radiusPx * sc).roundToInt()),
+            shiftEdgePx = 0f, smoothPx = 0f, featherPx = 0f, contrastPercent = 0f, borderPx = 0f,
+            removeSpecks = false, decontaminateColors = false
+        )
+        val res = refineEdges(smallSrc, smallMask, cfg, area?.let { small(it) }, ai?.let { small(it) }, allowCoarse = false)
+        if (smallSrc !== source) smallSrc.recycle()
+        smallMask.recycle()
+        val up = Bitmap.createScaledBitmap(res.refinedMask, w, h, true)
+        res.refinedMask.let { if (it !== up) it.recycle() }
+        SelectionEngine.alphaBytesPacked(up).also { up.recycle() }
+    } catch (e: OutOfMemoryError) {
+        null
+    }
+
+    /** Photoshop-style colour decontamination of [source] by the final [mask], when requested. */
+    private fun decontaminate(source: Bitmap, mask: Bitmap, config: RefineEdgeConfig): Bitmap? {
+        if (!config.decontaminateColors) return null
+        val alpha = SelectionEngine.alphaBytesPacked(mask)
+        return ColorDecontaminator.decontaminate(source, alpha, config.decontaminateAmount)
+            ?: source.copy(Bitmap.Config.ARGB_8888, true) // nothing to clean: unchanged colours
     }
 
     /**
@@ -310,7 +364,8 @@ object RefineEdgeEngine {
         tri: ByteArray, inAlpha: ByteArray, out: ByteArray, w: Int,
         maxWalk: Int, guideRadius: Int, eps: Float,
         decontaminated: Bitmap?, decontamAmount: Float,
-        ai: ByteArray? = null
+        ai: ByteArray? = null,
+        coarse: ByteArray? = null
     ) {
         val rn = rw * rh
         // p = initial alpha for the guided filter; F/B colours of the chosen sample pair.
@@ -362,10 +417,14 @@ object RefineEdgeEngine {
                     }
                 }
                 val initial = (inAlpha[gi].toInt() and 0xFF) / 255f
-                val aiA = ai?.let { (it[gi].toInt() and 0xFF) / 255f }
+                // Reference where the colour samples cannot decide: the preview-scale matte if there
+                // is one, else the subject segmentation.
+                val aiA = (coarse ?: ai)?.let { (it[gi].toInt() and 0xFF) / 255f }
                 if (nf == 0 || nb == 0) {
                     // Only one side reachable: lean on it (or on the subject segmentation).
                     p[li] = when {
+                        // The preview-scale matte already solved this pixel with a wider view.
+                        coarse != null -> aiA!!
                         aiA != null -> if (nf > 0) max(aiA, 0.5f * aiA + 0.4f) else if (nb > 0) min(aiA, 0.5f * aiA) else aiA
                         nf > 0 && nb == 0 -> max(initial, 0.85f)
                         nb > 0 && nf == 0 -> min(initial, 0.15f)

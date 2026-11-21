@@ -77,10 +77,12 @@ object InpaintEngine {
         // Grow the hole so anti-aliased object edges are removed too. A fixed 3 px is far too little
         // on a 4000 px photo, so the growth scales with the image size.
         val maxDim = max(width, height)
-        val grow = if (smartEdgeSnap) max(3, (maxDim / 350f).roundToInt()).coerceAtMost(16) else max(1, (maxDim / 1200f).roundToInt()).coerceAtMost(6)
+        // Only a few pixels: enough for an anti-aliased edge, not enough to eat what is next to it.
+        val grow = if (smartEdgeSnap) max(2, (maxDim / 700f).roundToInt()).coerceAtMost(8) else max(1, (maxDim / 1500f).roundToInt()).coerceAtMost(4)
         val feather = if (seamlessBlend) featherPx.coerceIn(1, 24) else 0
-        // Smart edge snap also looks for the object's fringe / glow beyond the grown edge.
-        val haloMax = if (smartEdgeSnap) (grow * 2).coerceIn(4, 24) else 0
+        // Smart edge snap also looks for the object's fringe / glow just beyond the grown edge.
+        // Its colour test is strict, so only pixels clearly coloured like the object are taken.
+        val haloMax = if (smartEdgeSnap) (grow * 2).coerceIn(4, 12) else 0
         val bgSampleWidth = 8
         val reach = grow + haloMax + feather + bgSampleWidth + 2
 
@@ -139,15 +141,20 @@ object InpaintEngine {
         val core = BooleanArray(n) { dist[it] <= grow }
         if (haloMax > 0) absorbObjectFringe(srcPixels, dist, core, cw, ch, grow, haloMax, bgSampleWidth)
 
-        // Feather ring distance measured from the (possibly enlarged) core.
-        val ringDist = IntArray(n) { if (core[it]) 0 else Int.MAX_VALUE }
+        // The seam is blended INSIDE the replaced area (in the band around the painted mask), so no
+        // pixel outside it changes: ringDist = distance from the core's outer edge, inwards.
+        val fade = min(feather, grow + haloMax)
+        val ringDist = IntArray(n) { if (core[it]) Int.MAX_VALUE else 0 }
         qHead = 0
         qTail = 0
-        for (i in 0 until n) if (core[i]) queue[qTail++] = i
+        for (i in 0 until n) if (!core[i]) {
+            val x = i % cw; val y = i / cw
+            if ((x > 0 && core[i - 1]) || (x < cw - 1 && core[i + 1]) || (y > 0 && core[i - cw]) || (y < ch - 1 && core[i + cw])) queue[qTail++] = i
+        }
         while (qHead < qTail) {
             val i = queue[qHead++]
             val d = ringDist[i]
-            if (d >= feather) continue
+            if (d >= fade) continue
             val x = i % cw
             val y = i / cw
             for (dy in -1..1) {
@@ -164,7 +171,7 @@ object InpaintEngine {
                 }
             }
         }
-        val hole = BooleanArray(n) { ringDist[it] <= feather }
+        val hole = core
 
         // Areas the user protected are never used as a texture source.
         var forbid: BooleanArray? = null
@@ -182,13 +189,15 @@ object InpaintEngine {
             InpaintEngineMode.FAST_MARCHING -> teleaFill(srcPixels, hole, cw, ch, telaRadius)
         }
 
-        // Composite: full replacement inside the core, cross-fade across the feather ring, which
-        // now lies entirely on clean background.
+        // Composite: the painted area is always fully replaced; the grown band around it fades
+        // from the fill to the original towards its outer edge; outside it nothing changes.
         val out = srcPixels.copyOf()
         for (i in 0 until n) {
             if (!hole[i]) continue
             val d = ringDist[i]
-            val t = if (d == 0 || feather == 0) 1f else 1f - d.toFloat() / (feather + 1).toFloat()
+            // Fades only in the grown band; the painted area and pixels taken for their object colour
+            // (glow / fringe beyond the band) are always fully replaced.
+            val t = if (dist[i] == 0 || dist[i] > grow || fade == 0 || d > fade) 1f else d.toFloat() / (fade + 1).toFloat()
             out[i] = if (t >= 0.999f) fill[i] else lerpArgb(srcPixels[i], fill[i], t)
         }
         val result = source.copy(Bitmap.Config.ARGB_8888, true)
@@ -257,10 +266,47 @@ object InpaintEngine {
                 if (!touchesCore) continue
                 val c = px[i]
                 // Clearly closer to the object than to the background (squared distances, ~0.8×).
-                if (nearest(c, objCenters) < nearest(c, bgCenters) * 0.64f) accepted.add(i)
+                // Much closer to the object than to the background (squared distances, ~0.67x):
+                // a neighbour of merely similar colour is left alone.
+                if (nearest(c, objCenters) < nearest(c, bgCenters) * 0.45f) accepted.add(i)
             }
             if (accepted.isEmpty()) break
             for (i in accepted) core[i] = true
+        }
+
+        // A glow fades out; a neighbouring thing of similar colour (a red shirt next to a red
+        // object) goes on beyond the search limit. Absorbed regions that still look like the
+        // object just past the limit are such neighbours: they are given back untouched.
+        val limit = grow + haloMax
+        val absorbed = BooleanArray(n) { core[it] && dist[it] > grow }
+        val seen = BooleanArray(n)
+        var stack = IntArray(256)
+        val comp = ArrayList<Int>()
+        for (start in 0 until n) {
+            if (!absorbed[start] || seen[start]) continue
+            comp.clear()
+            var sp = 0
+            stack[sp++] = start; seen[start] = true
+            var continues = false
+            while (sp > 0) {
+                val i = stack[--sp]
+                comp.add(i)
+                val x = i % w; val y = i / w
+                for (dy in -1..1) for (dx in -1..1) {
+                    val nx = x + dx; val ny = y + dy
+                    if (nx !in 0 until w || ny !in 0 until h) continue
+                    val j = ny * w + nx
+                    if (absorbed[j] && !seen[j]) {
+                        seen[j] = true
+                        if (sp == stack.size) stack = stack.copyOf(stack.size * 2)
+                        stack[sp++] = j
+                    } else if (!continues && dist[i] >= limit && dist[j] > limit && dist[j] <= limit + 3) {
+                        val c = px[j]
+                        if (nearest(c, objCenters) < nearest(c, bgCenters) * 0.45f) continues = true
+                    }
+                }
+            }
+            if (continues) for (i in comp) core[i] = false
         }
     }
 

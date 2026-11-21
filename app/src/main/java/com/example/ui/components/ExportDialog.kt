@@ -74,13 +74,14 @@ fun ExportDialog(
     LaunchedEffect(s.copy(fileName = "", destination = ExportDestination.GALLERY, shareAfter = false)) { onRequestEstimate(s) }
     fun set(n: ExportSettings) = onSettingsChange(n)
 
+    val barsPadding = hostSystemBarsPadding()
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         Surface(
             shape = RoundedCornerShape(20.dp),
             color = StudioSurface,
             border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
             modifier = Modifier
-                .safeDrawingPadding()
+                .padding(barsPadding)
                 .fillMaxWidth(0.95f)
                 .fillMaxHeight(0.92f)
                 .testTag("dialog_export")

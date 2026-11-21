@@ -607,6 +607,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         retouchPending = 0
         retouchStepOpen = false
         _uiState.value = _uiState.value.copy(compareBefore = emptyMap())
+        com.example.engine.LayerRenderer.clearLookCache()
         cloneOffsetDoc = null
         pendingTransactionSnapshot = null
         pendingTransactionWasDirty = false
@@ -728,6 +729,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         retouchPending = 0
         retouchStepOpen = false
         _uiState.value = _uiState.value.copy(compareBefore = emptyMap())
+        com.example.engine.LayerRenderer.clearLookCache()
         cloneOffsetDoc = null
         undoStack.clear()
         redoStack.clear()
@@ -3860,6 +3862,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
         val inner = radius * hardness
         val falloffSpan = (radius - inner).coerceAtLeast(0.001f)
+        val r2 = radius * radius
+        val selArr = stroke.selection
+        val selRb = stroke.selectionRowBytes
+        val cov = stroke.coverage
         fun stamp(cx: Float, cy: Float) {
             val minX = (cx - radius).toInt().coerceIn(left, right)
             val maxX = (cx + radius + 1).toInt().coerceIn(left, right)
@@ -3870,15 +3876,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 val row = y * w
                 for (x in minX..maxX) {
                     val dx = x + 0.5f - cx
-                    val d = kotlin.math.sqrt(dx * dx + dy * dy)
-                    if (d >= radius) continue
+                    val d2 = dx * dx + dy * dy
+                    if (d2 >= r2) continue
+                    val d = kotlin.math.sqrt(d2)
                     val f = if (d <= inner) 1f else {
                         val t = ((d - inner) / falloffSpan).coerceIn(0f, 1f)
                         1f - t * t * (3f - 2f * t)
                     }
-                    val sel = stroke.selection?.let { (it[y * stroke.selectionRowBytes + x].toInt() and 0xFF) / 255f } ?: 1f
+                    val sel = if (selArr != null) (selArr[y * selRb + x].toInt() and 0xFF) / 255f else 1f
                     val c = (f * opacity * sel * 255f).toInt()
-                    if (c > (stroke.coverage[row + x].toInt() and 0xFF)) stroke.coverage[row + x] = c.toByte()
+                    if (c > (cov[row + x].toInt() and 0xFF)) cov[row + x] = c.toByte()
                 }
             }
         }
@@ -3908,12 +3915,22 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
         mask.setPixels(out, 0, regionW, left, top, regionW, regionH)
-        commitProjectMutation()
+        // The canvas redraws the whole image: at most ~14 times a second while painting
+        // (endMaskStroke shows the final state).
+        val now = android.os.SystemClock.uptimeMillis()
+        if (recordHistory || now - lastMaskBump >= 70L) {
+            lastMaskBump = now
+            commitProjectMutation()
+        } else maskBumpPending = true
     }
+
+    private var lastMaskBump = 0L
+    private var maskBumpPending = false
 
     /** Ends the current mask stroke and frees its buffers. */
     fun endMaskStroke() {
         maskStroke = null
+        if (maskBumpPending) { maskBumpPending = false; commitProjectMutation() }
         if (_uiState.value.isProjectDirty) scheduleAutosave()
     }
 
@@ -4075,6 +4092,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val points: List<PointF>, val docRadius: Float
         ) : RetouchEvent()
         class Move(val points: List<PointF>, val docRadius: Float) : RetouchEvent()
+        class Heal(val layer: Layer, val docW: Int, val docH: Int, val points: List<PointF>, val docRadius: Float) : RetouchEvent()
         class Fill(
             val layer: Layer, val docW: Int, val docH: Int, val pointDoc: PointF, val endDoc: PointF?,
             val brush: com.example.engine.RetouchBrush, val selection: Bitmap?
@@ -4105,8 +4123,21 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     /** The stroke being processed has recorded its undo step (roll it back if it fails). */
     private var retouchStepOpen = false
     private class GradientDrag(val layer: Layer, val start: PointF, val selection: Bitmap?)
+    private class HealStroke(val layer: Layer, val points: MutableList<PointF>, val docRadius: Float)
+    /** Spot Healing stroke being painted (document coordinates). */
+    private var healStroke: HealStroke? = null
     /** Fill in gradient mode: where the drag started. */
     private var gradientStart: GradientDrag? = null
+    /** Stroke points not painted yet (merged moves), see [retouchSegment]. */
+    private val pendingMove = ArrayList<PointF>()
+    private var pendingMoveRadius = 0f
+    private var moveQueued = false
+    private fun takePendingMove(): List<PointF> = synchronized(pendingMove) {
+        moveQueued = false
+        ArrayList(pendingMove).also { pendingMove.clear() }
+    }
+    /** Last time the canvas was asked to redraw during a stroke (redraws are throttled). */
+    private var lastRetouchBump = 0L
     /** Patch's lasso points while it is being drawn (document coordinates). */
     private var patchLasso: MutableList<PointF>? = null
     private var retouchStrokeRejected = false
@@ -4215,6 +4246,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 return
             }
             if (tool == com.example.engine.RetouchTool.PATCH) { patchStartDoc = points.firstOrNull(); return }
+            if (tool == com.example.engine.RetouchTool.HEAL) {
+                // Spot Healing: the stroke is collected and healed when the finger lifts.
+                healStroke = HealStroke(layer!!, points.toMutableList(), docRadius)
+                return
+            }
             val first = points.firstOrNull() ?: return
             val paints = tool == com.example.engine.RetouchTool.FILL || tool == com.example.engine.RetouchTool.BRUSH
             if (paints && st.isFillColorPicking) {
@@ -4246,6 +4282,15 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         if (retouchStrokeRejected) return
+        val heal = healStroke
+        if (tool == com.example.engine.RetouchTool.HEAL && heal != null) {
+            heal.points.addAll(points)
+            if (phase == StrokePhase.END) {
+                healStroke = null
+                queueRetouch(RetouchEvent.Heal(heal.layer, proj.width, proj.height, heal.points.toList(), heal.docRadius))
+            }
+            return
+        }
         val grad = gradientStart
         if (tool == com.example.engine.RetouchTool.FILL && grad != null) {
             if (phase != StrokePhase.END) return
@@ -4278,8 +4323,17 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             queueRetouch(RetouchEvent.Patch(layer, proj.width, proj.height, sel, end.x - start.x, end.y - start.y))
             return
         }
-        if (phase == StrokePhase.MOVE) retouchEvents.trySend(RetouchEvent.Move(points.toList(), docRadius))
-        else retouchEvents.trySend(RetouchEvent.End(points.toList(), docRadius))
+        if (phase == StrokePhase.MOVE) {
+            // Moves are merged: while one is waiting, new points join it instead of queueing
+            // another event, so a slow brush (big image) never falls behind the finger.
+            synchronized(pendingMove) {
+                pendingMove.addAll(points)
+                pendingMoveRadius = docRadius
+                if (moveQueued) return
+                moveQueued = true
+            }
+            retouchEvents.trySend(RetouchEvent.Move(emptyList(), docRadius))
+        } else retouchEvents.trySend(RetouchEvent.End(points.toList(), docRadius))
     }
 
     /**
@@ -4386,7 +4440,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val last = points.lastOrNull()
         val off = strokeOffsetDoc
         val marker = if (last != null && off != null) PointF(last.x + off.x, last.y + off.y) else null
-        if (changed != null || marker != null) bumpRetouchRender(marker)
+        // The canvas redraws the whole image: at most ~14 times a second while painting, so
+        // each redraw can finish (the end of the stroke always redraws).
+        val now = android.os.SystemClock.uptimeMillis()
+        if ((changed != null || marker != null) && now - lastRetouchBump >= 70L) {
+            lastRetouchBump = now
+            bumpRetouchRender(marker)
+        }
     }
 
     /** Shows the live preview changes without recording history. */
@@ -4417,15 +4477,37 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 paintRetouch(session.canvas, ev.points, ev.docRadius)
             }
             is RetouchEvent.Move -> {
+                val pts = takePendingMove()
                 if (retouchStrokeFailed) return
                 val session = retouchSession ?: return
-                paintRetouch(session.canvas, ev.points, ev.docRadius)
+                if (pts.isNotEmpty()) paintRetouch(session.canvas, pts, pendingMoveRadius.takeIf { it > 0f } ?: ev.docRadius)
             }
             is RetouchEvent.End -> {
+                val pts = takePendingMove()
                 if (retouchStrokeFailed) { retouchStrokeFailed = false; return }
                 val session = retouchSession ?: return
+                if (pts.isNotEmpty()) paintRetouch(session.canvas, pts, ev.docRadius)
                 paintRetouch(session.canvas, ev.points, ev.docRadius)
                 withContext(retouchDispatcher) { session.canvas.endStroke() }
+                commitRetouch(session)
+            }
+            is RetouchEvent.Heal -> {
+                val preview = beginRetouchStep(ev.layer) ?: run { retouchPending = (retouchPending - 1).coerceAtLeast(0); return }
+                strokeLayer = ev.layer
+                strokePreview = preview
+                strokeOffsetDoc = null
+                val session = ensureRetouchSession(ev.layer)
+                prepareStrokeMapping(ev.layer, session.canvas, ev.docW, ev.docH)
+                val c = session.canvas
+                val local = toLocalPoints(ev.points)
+                val r = ev.docRadius * strokeLocalScale
+                val changed = withContext(retouchDispatcher) {
+                    c.heal(local, r)?.also { area -> c.downsampleInto(preview, area) }
+                }
+                if (changed == null) {
+                    onRetouchFailed(R.string.heal_failed)
+                    return
+                }
                 commitRetouch(session)
             }
             is RetouchEvent.Fill -> {
@@ -4514,7 +4596,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val job = viewModelScope.launch(retouchWriteDispatcher) {
             try {
                 val tmp = File(file.path + ".tmp")
-                if (ImageProcessor.saveLosslessBitmap(snapshot, tmp)) {
+                if (ImageProcessor.saveLosslessBitmap(snapshot, tmp, fast = true)) {
                     if (!tmp.renameTo(file)) { file.delete(); tmp.renameTo(file) }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {

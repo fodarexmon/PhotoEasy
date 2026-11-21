@@ -324,6 +324,72 @@ class ProToolsTest {
         assertTrue(Color.alpha(withAi.getPixel(52, 20)) < 40)
     }
 
+    @Test
+    fun `refine brush on a large image keeps far strands like the preview`() {
+        // Strand 300 px from the subject: beyond the full-resolution sample search, within reach
+        // at preview scale. Without the preview-scale reference it was lost (alpha 0) on apply.
+        val w = 3000; val h = 120
+        val red = Color.rgb(220, 30, 30); val blue = Color.rgb(30, 30, 220); val mixed = Color.rgb(125, 30, 125)
+        val img = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val row = IntArray(w) { x -> when { x < 1000 -> red; x in 1296..1311 -> mixed; else -> blue } }
+        for (y in 0 until h) img.setPixels(row, 0, w, 0, y, w, 1)
+        val mask = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
+        android.graphics.Canvas(mask).drawRect(0f, 0f, 1000f, h.toFloat(), android.graphics.Paint().apply { color = Color.BLACK })
+        val cfg = com.example.engine.RefineEdgeConfig(radiusPx = 3, smartRadius = false)
+        val area = ByteArray(w * h) { i -> if (i % w in 990..1500) 255.toByte() else 0 }
+        val res = com.example.engine.RefineEdgeEngine.refineEdges(img, mask, cfg, area).refinedMask
+        val a = Color.alpha(res.getPixel(1303, 60))
+        assertTrue("far strand alpha $a", a in 50..220)
+        assertTrue(Color.alpha(res.getPixel(1450, 60)) < 50)
+        assertTrue(Color.alpha(res.getPixel(500, 60)) > 240)
+    }
+
+    @Test
+    fun `spot healing removes a spot and keeps the skin texture`() {
+        val w = 300; val h = 300
+        val rnd = java.util.Random(5)
+        val px = IntArray(w * h) { val v = rnd.nextInt(17) - 8; Color.rgb(210 + v, 160 + v, 140 + v) }
+        val orig = px.copyOf()
+        for (y in 140..152) for (x in 140..152) if ((x - 146) * (x - 146) + (y - 146) * (y - 146) <= 36) px[y * w + x] = Color.rgb(120, 60, 55)
+        val c = com.example.engine.RetouchCanvas(w, h, px)
+        assertNotNull(c.heal(floatArrayOf(146f, 146f, 147f, 146f), 9f))
+        assertTrue(lum(px[146 * w + 146]) > 160)
+        fun std(a: IntArray, x0: Int, y0: Int, x1: Int, y1: Int): Double {
+            var s = 0.0; var q = 0.0; var n = 0
+            for (y in y0..y1) for (x in x0..x1) { val l = lum(a[y * w + x]); s += l; q += l * l; n++ }
+            val m = s / n; return kotlin.math.sqrt(q / n - m * m)
+        }
+        assertTrue("texture kept", std(px, 143, 143, 149, 149) > 0.5 * std(orig, 50, 50, 56, 56))
+        assertEquals(orig[20 * w + 20], px[20 * w + 20])
+    }
+
+    // --- Colour decontamination --------------------------------------------------------------
+
+    @Test
+    fun `decontamination restores strand colours and cleans the tinted rim`() {
+        val w = 120; val h = 60
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val alpha = ByteArray(w * h)
+        for (y in 0 until h) for (x in 0 until w) {
+            val a = when { x < 50 -> 1f; x >= 60 -> 0f; else -> 1f - (x - 49) / 11f }
+            alpha[y * w + x] = (a * 255).toInt().coerceIn(0, 255).toByte()
+            val fr = 200 + (y % 5) * 6
+            var r = (a * fr + (1 - a) * 30).toInt(); val g = (a * 40 + (1 - a) * 60).toInt(); var b = (a * 30 + (1 - a) * 220).toInt()
+            if (x in 46..49) { r -= 40; b += 60 }
+            bmp.setPixel(x, y, Color.argb(255, r, g, b.coerceAtMost(255)))
+        }
+        val out = com.example.engine.ColorDecontaminator.decontaminate(bmp, alpha, 1f)!!
+        assertTrue(Color.red(out.getPixel(58, 30)) > 150 && Color.blue(out.getPixel(58, 30)) < 90)
+        assertTrue(Color.red(out.getPixel(52, 30)) > 170 && Color.blue(out.getPixel(52, 30)) < 80)
+        assertTrue(Color.blue(out.getPixel(49, 30)) < Color.blue(bmp.getPixel(49, 30)) - 15)
+        assertEquals(bmp.getPixel(10, 30), out.getPixel(10, 30))
+        assertEquals(bmp.getPixel(100, 30), out.getPixel(100, 30))
+        assertTrue((25..34).map { Color.red(out.getPixel(53, it)) }.toSet().size > 1)
+        // Amount 0 or no soft pixels: nothing to do.
+        assertNull(com.example.engine.ColorDecontaminator.decontaminate(bmp, alpha, 0f))
+        assertNull(com.example.engine.ColorDecontaminator.decontaminate(bmp, ByteArray(w * h) { 255.toByte() }, 1f))
+    }
+
     // --- Frequency separation ---------------------------------------------------------------
 
     @Test

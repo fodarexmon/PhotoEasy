@@ -1092,4 +1092,7 @@
     <string name="refine_out_layer_mask">قناع الطبقة</string>
     <string name="refine_out_new_layer">طبقة جديدة</string>
     <string name="refine_out_new_layer_mask">طبقة جديدة بقناع</string>
+    <string name="tool_heal">معالجة موضعية</string>
+    <string name="heal_info">ارسم فوق البثرة أو البقعة أو العنصر الصغير: عند رفع إصبعك تُستبدل بنسيج من أنسب منطقة حولها مع دمج اللون بسلاسة.</string>
+    <string name="heal_failed">لا توجد منطقة مناسبة حولها للمعالجة. جرّب ضربة أصغر.</string>
 </resources>

@@ -396,18 +396,6 @@ fun CanvasView(
         }
     }
 
-    // Photoshop-style Marching Ants Animation Phase (Alternating Black and White Dotted Lines)
-    val infiniteTransition = rememberInfiniteTransition(label = "marching_ants")
-    val marchingAntsPhase by infiniteTransition.animateFloat(
-        initialValue = 0f,
-        targetValue = 20f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 800, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart
-        ),
-        label = "ants_phase"
-    )
-
     // Vector Contour boundary of the active selection mask for fast rendering
     // Every selection edit publishes a NEW mask bitmap (copy-on-write), so the mask reference alone
     // keys the contour. Tracing runs off the main thread so slider drags never wait for it.
@@ -420,6 +408,23 @@ fun CanvasView(
             null
         }
     }
+
+    // Photoshop-style Marching Ants Animation Phase (Alternating Black and White Dotted Lines).
+    // Only animated while there is a selection outline: an endless animation would redraw the
+    // whole canvas every frame for nothing (battery, and time taken from real work).
+    val infiniteTransition = rememberInfiniteTransition(label = "marching_ants")
+    val antsPhaseState: androidx.compose.runtime.State<Float> = if (selectionContourPath?.isEmpty == false) {
+        infiniteTransition.animateFloat(
+            initialValue = 0f,
+            targetValue = 20f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 800, easing = LinearEasing),
+                repeatMode = RepeatMode.Restart
+            ),
+            label = "ants_phase"
+        )
+    } else remember { mutableFloatStateOf(0f) }
+    val marchingAntsPhase by antsPhaseState
 
     // Touch points for selection gestures
     val currentPoints = remember { mutableStateListOf<PointF>() }
@@ -553,7 +558,11 @@ fun CanvasView(
         }
     }
 
-    LaunchedEffect(project.id, project.width, project.height, renderRevision, previewMaxDimension, showSelectedLayerOriginal, showGeneralOriginal, isSplitCompareActive, selectedLayerIndex, selectionMask, proEffectPreview, compareBefore) {
+    // The selection only changes the image during a Pro effect preview (limited to it), and the
+    // selected layer only in "show this layer's original": otherwise selecting never re-renders.
+    val renderSelectionKey = if (proEffectPreview != null) selectionMask else null
+    val renderLayerKey = if (showSelectedLayerOriginal) selectedLayerIndex else -1
+    LaunchedEffect(project.id, project.width, project.height, renderRevision, previewMaxDimension, showSelectedLayerOriginal, showGeneralOriginal, isSplitCompareActive, renderLayerKey, renderSelectionKey, proEffectPreview, compareBefore) {
         val gen = renderGeneration.incrementAndGet()
 
         // 1. Conflate/Debounce rapid slider micro-updates (~16ms = 1 frame window)
@@ -2022,6 +2031,12 @@ fun CanvasView(
                     path.close()
                     drawPath(path = path, color = Color.Black.copy(alpha = 0.6f), style = Stroke(width = 3.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
                     drawPath(path = path, color = CyanAccent, style = Stroke(width = 1.5.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
+                } else if (activeTool == ActiveTool.RETOUCH && retouchTool == com.example.engine.RetouchTool.HEAL) {
+                    // Spot Healing: the painted area is shown as a band of the brush size until the
+                    // finger lifts and it is healed.
+                    val bandW = with(density) { effectiveBrushSizeDp.dp.toPx() }
+                    drawPath(path = path, color = Color.White.copy(alpha = 0.35f), style = Stroke(width = bandW, cap = StrokeCap.Round, join = StrokeJoin.Round))
+                    drawPath(path = path, color = Color.Black.copy(alpha = 0.35f), style = Stroke(width = 1.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round))
                 } else if (activeTool == ActiveTool.RETOUCH) {
                     // Retouch brushes show their result live on the image: only a thin guide line
                     // (Patch: where the selection is dragged) and the brush outline at the finger.
