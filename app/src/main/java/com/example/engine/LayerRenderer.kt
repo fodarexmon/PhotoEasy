@@ -79,7 +79,30 @@ object LayerRenderer {
     }
 
     /** Drops every cached look (e.g. when a project is closed). */
-    fun clearLookCache() = synchronized(lookCache) { lookCache.clear(); lookCacheBytes = 0L }
+    fun clearLookCache() {
+        synchronized(lookCache) { lookCache.clear(); lookCacheBytes = 0L }
+        synchronized(scratchPool) { scratchPool.clear() }
+    }
+
+    // Canvas-sized scratch bitmaps of preview renders (one per layer per frame), reused instead of
+    // allocated every frame. A bitmap is either in the pool or used by exactly one render.
+    private val scratchPool = ArrayList<Bitmap>()
+
+    private fun obtainScratch(w: Int, h: Int): Bitmap {
+        val reused = synchronized(scratchPool) {
+            val i = scratchPool.indexOfFirst { !it.isRecycled && it.width == w && it.height == h }
+            if (i >= 0) scratchPool.removeAt(i) else null
+        }
+        return reused?.apply { eraseColor(Color.TRANSPARENT) } ?: Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    }
+
+    private fun releaseScratch(b: Bitmap) {
+        if (b.isRecycled) return
+        val kept = synchronized(scratchPool) {
+            if (scratchPool.size < 3 && b.isMutable) { scratchPool.add(b); true } else false
+        }
+        if (!kept) b.recycle()
+    }
 
     /** Two entries: the quick low-resolution preview pass and the sharp one. */
     private val proCache = LinkedHashMap<String, Bitmap>()
@@ -230,10 +253,13 @@ object LayerRenderer {
 
                 coroutineContext.ensureActive()
                 val maskForLayer = if (layer.id == selectedLayerId) activeSelectionMask else null
-                val layerBitmap = if (proEffectPreview != null && previewApplies(proEffectPreview, layer)) {
+                val withProEffect = proEffectPreview != null && previewApplies(proEffectPreview, layer)
+                // Preview renders draw each layer into a reused scratch bitmap (see obtainScratch).
+                val pooled = !withProEffect && maxPreviewDimension != null
+                val layerBitmap = if (withProEffect) {
                     renderLayerWithProPreview(context, layer, targetW, targetH, scaleRatio, maskForLayer, proEffectPreview, proEffectMask)
                 } else {
-                    renderSingleLayerToBitmap(context, layer, targetW, targetH, scaleRatio, maskForLayer, cacheLook = maxPreviewDimension != null)
+                    renderSingleLayerToBitmap(context, layer, targetW, targetH, scaleRatio, maskForLayer, cacheLook = pooled)
                 } ?: continue
                 try {
                     for (c in clipped) {
@@ -245,9 +271,8 @@ object LayerRenderer {
                     coroutineContext.ensureActive()
                     drawBlended(canvas, composite, layerBitmap, layer.blendMode, layer.opacity, paint)
                 } finally {
-                    if (!layerBitmap.isRecycled) {
-                        layerBitmap.recycle()
-                    }
+                    if (pooled) releaseScratch(layerBitmap)
+                    else if (!layerBitmap.isRecycled) layerBitmap.recycle()
                 }
             }
             coroutineContext.ensureActive()
@@ -507,7 +532,7 @@ object LayerRenderer {
         coroutineContext.ensureActive()
         FilterLibrary.ensureLoaded(context)
         val currentJob = coroutineContext[Job]
-        val output = Bitmap.createBitmap(canvasWidth, canvasHeight, Bitmap.Config.ARGB_8888)
+        val output = if (cacheLook) obtainScratch(canvasWidth, canvasHeight) else Bitmap.createBitmap(canvasWidth, canvasHeight, Bitmap.Config.ARGB_8888)
         try {
             val canvas = Canvas(output)
             val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)

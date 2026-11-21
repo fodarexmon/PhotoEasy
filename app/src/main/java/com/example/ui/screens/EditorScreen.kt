@@ -218,14 +218,17 @@ fun EditorScreen(
     val onToleranceChange: (Int) -> Unit = { viewModel.setMagicWandTolerance(it) }
     val onToggleMagicWandContiguous: (Boolean) -> Unit = { viewModel.setMagicWandContiguous(it) }
     val onBrushStrokeComplete: (List<PointF>, Float) -> Unit = { points, docRadius ->
-        val activeLayer = project.layers.getOrNull(uiState.selectedLayerIndex)
-        if (uiState.activeTool == ActiveTool.OBJECT_REMOVAL && uiState.isInpaintProtectMode) {
+        // The latest state when the stroke ends (not the one captured at composition): the
+        // callback then never changes, so the canvas can skip recomposing on unrelated updates.
+        val st = viewModel.uiState.value
+        val activeLayer = st.currentProject?.layers?.getOrNull(st.selectedLayerIndex)
+        if (st.activeTool == ActiveTool.OBJECT_REMOVAL && st.isInpaintProtectMode) {
             viewModel.paintProtectSegment(points, docRadius, com.example.ui.viewmodel.StrokePhase.END)
         } else if (activeLayer?.isEditingMask == true) {
             // A complete stroke in one call: end it so autosave (paused during strokes) resumes.
-            viewModel.paintOnLayerMask(points, docRadius, isReveal = !uiState.isMaskEditingBlack)
+            viewModel.paintOnLayerMask(points, docRadius, isReveal = !st.isMaskEditingBlack)
             viewModel.endMaskStroke()
-        } else if (uiState.activeSelectionTool == SelectionToolType.QUICK_SELECTION && uiState.activeTool == ActiveTool.SELECTION) {
+        } else if (st.activeSelectionTool == SelectionToolType.QUICK_SELECTION && st.activeTool == ActiveTool.SELECTION) {
             viewModel.applyQuickSelection(points, isEraser = false, docRadius = docRadius)
         } else {
             viewModel.applyBrushStroke(points, isEraser = false, docRadius = docRadius)
@@ -243,23 +246,24 @@ fun EditorScreen(
     val onUndoSelection: () -> Unit = { viewModel.undoSelection() }
     val onRedoSelection: () -> Unit = { viewModel.redoSelection() }
     val onSaveProject: () -> Unit = { viewModel.saveCurrentProject() }
-    val luts = uiState.luts
-    val customPresets = uiState.customPresets
-    val favoriteFilters = uiState.favoriteFilters
+    val luts = st.luts
+    val customPresets = st.customPresets
+    val favoriteFilters = st.favoriteFilters
     val onToggleFavoriteFilter: (String) -> Unit = { viewModel.toggleFavoriteFilter(it) }
     val onImportLut: (Uri) -> Unit = { viewModel.importLut(it) }
     val onDeleteLut: (String) -> Unit = { viewModel.deleteLut(it) }
     val onSaveLook: (String) -> Unit = { viewModel.saveCurrentLookAsPreset(it) }
     val onDeleteCustomPreset: (String) -> Unit = { viewModel.deleteCustomPreset(it) }
     val onStrokeSegment: ((List<PointF>, Float, com.example.ui.viewmodel.StrokePhase) -> Unit) = { points, radius, phase ->
-        val activeLayer = project.layers.getOrNull(uiState.selectedLayerIndex)
+        val st = viewModel.uiState.value
+        val activeLayer = st.currentProject?.layers?.getOrNull(st.selectedLayerIndex)
         when {
-            uiState.activeTool == ActiveTool.RETOUCH -> viewModel.retouchSegment(points, radius, phase)
-            uiState.activeTool == ActiveTool.OBJECT_REMOVAL && uiState.isInpaintProtectMode ->
+            st.activeTool == ActiveTool.RETOUCH -> viewModel.retouchSegment(points, radius, phase)
+            st.activeTool == ActiveTool.OBJECT_REMOVAL && st.isInpaintProtectMode ->
                 viewModel.paintProtectSegment(points, radius, phase)
-            uiState.activeTool == ActiveTool.LAYERS && activeLayer?.isEditingMask == true ->
-                viewModel.paintMaskSegment(points, radius, isReveal = !uiState.isMaskEditingBlack, phase = phase)
-            uiState.activeTool == ActiveTool.SELECTION && uiState.activeSelectionTool == SelectionToolType.QUICK_SELECTION ->
+            st.activeTool == ActiveTool.LAYERS && activeLayer?.isEditingMask == true ->
+                viewModel.paintMaskSegment(points, radius, isReveal = !st.isMaskEditingBlack, phase = phase)
+            st.activeTool == ActiveTool.SELECTION && st.activeSelectionTool == SelectionToolType.QUICK_SELECTION ->
                 viewModel.quickSelectionSegment(points, radius, phase)
             else -> viewModel.brushSelectionSegment(points, radius, phase)
         }
