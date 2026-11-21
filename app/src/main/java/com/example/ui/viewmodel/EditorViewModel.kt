@@ -607,6 +607,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         retouchPending = 0
         retouchStepOpen = false
         _uiState.value = _uiState.value.copy(compareBefore = emptyMap())
+        com.example.engine.LayerRenderer.clearLookCache()
         cloneOffsetDoc = null
         pendingTransactionSnapshot = null
         pendingTransactionWasDirty = false
@@ -728,6 +729,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         retouchPending = 0
         retouchStepOpen = false
         _uiState.value = _uiState.value.copy(compareBefore = emptyMap())
+        com.example.engine.LayerRenderer.clearLookCache()
         cloneOffsetDoc = null
         undoStack.clear()
         redoStack.clear()
@@ -3860,6 +3862,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
         val inner = radius * hardness
         val falloffSpan = (radius - inner).coerceAtLeast(0.001f)
+        val r2 = radius * radius
+        val selArr = stroke.selection
+        val selRb = stroke.selectionRowBytes
+        val cov = stroke.coverage
         fun stamp(cx: Float, cy: Float) {
             val minX = (cx - radius).toInt().coerceIn(left, right)
             val maxX = (cx + radius + 1).toInt().coerceIn(left, right)
@@ -3870,15 +3876,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 val row = y * w
                 for (x in minX..maxX) {
                     val dx = x + 0.5f - cx
-                    val d = kotlin.math.sqrt(dx * dx + dy * dy)
-                    if (d >= radius) continue
+                    val d2 = dx * dx + dy * dy
+                    if (d2 >= r2) continue
+                    val d = kotlin.math.sqrt(d2)
                     val f = if (d <= inner) 1f else {
                         val t = ((d - inner) / falloffSpan).coerceIn(0f, 1f)
                         1f - t * t * (3f - 2f * t)
                     }
-                    val sel = stroke.selection?.let { (it[y * stroke.selectionRowBytes + x].toInt() and 0xFF) / 255f } ?: 1f
+                    val sel = if (selArr != null) (selArr[y * selRb + x].toInt() and 0xFF) / 255f else 1f
                     val c = (f * opacity * sel * 255f).toInt()
-                    if (c > (stroke.coverage[row + x].toInt() and 0xFF)) stroke.coverage[row + x] = c.toByte()
+                    if (c > (cov[row + x].toInt() and 0xFF)) cov[row + x] = c.toByte()
                 }
             }
         }
@@ -3908,12 +3915,22 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
         mask.setPixels(out, 0, regionW, left, top, regionW, regionH)
-        commitProjectMutation()
+        // The canvas redraws the whole image: at most ~14 times a second while painting
+        // (endMaskStroke shows the final state).
+        val now = android.os.SystemClock.uptimeMillis()
+        if (recordHistory || now - lastMaskBump >= 70L) {
+            lastMaskBump = now
+            commitProjectMutation()
+        } else maskBumpPending = true
     }
+
+    private var lastMaskBump = 0L
+    private var maskBumpPending = false
 
     /** Ends the current mask stroke and frees its buffers. */
     fun endMaskStroke() {
         maskStroke = null
+        if (maskBumpPending) { maskBumpPending = false; commitProjectMutation() }
         if (_uiState.value.isProjectDirty) scheduleAutosave()
     }
 

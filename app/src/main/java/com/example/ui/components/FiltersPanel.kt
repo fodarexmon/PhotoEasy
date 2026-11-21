@@ -50,6 +50,7 @@ import com.example.ui.theme.StudioSurfaceVariant
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
 
 /** Categories of the preset browser. */
 enum class FilterBrowserCategory(val labelRes: Int) {
@@ -178,6 +179,8 @@ fun FiltersPanel(
             val adjusted = try { ImageProcessor.applyAdjustments(thumb, adjustments) } catch (e: Throwable) { thumb }
             fun keep(key: String, base: Bitmap, make: () -> Bitmap) {
                 try {
+                    // A newer image / look restarted the previews: stop instead of finishing ~100 thumbnails for nothing.
+                    ensureActive()
                     val out = make()
                     result[key] = if (out === base) base.copy(Bitmap.Config.ARGB_8888, false) else out
                 } catch (e: kotlinx.coroutines.CancellationException) {

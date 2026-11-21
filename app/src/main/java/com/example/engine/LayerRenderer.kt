@@ -51,6 +51,36 @@ object LayerRenderer {
     // Last Pro effect preview result: panning, zooming or moving another slider re-renders the
     // canvas, and effects like oil paint are too slow to recompute for every frame.
     private val proCacheLock = Any()
+    // --- Preview look cache -----------------------------------------------------------------
+    // A layer's pixels with its adjustments / filter / LUT applied (and decoded full-resolution
+    // sources), kept between preview renders: moving a layer, painting another one or zooming
+    // no longer recomputes every layer's look. Evicted entries are left to the GC (another
+    // render may still be drawing them).
+    private const val LOOK_CACHE_BYTES = 64L * 1024 * 1024
+    private val lookCache = object : LinkedHashMap<String, Bitmap>(16, 0.75f, true) {}
+    private var lookCacheBytes = 0L
+
+    private fun lookGet(key: String): Bitmap? = synchronized(lookCache) {
+        lookCache[key]?.takeIf { !it.isRecycled }
+    }
+
+    private fun lookPut(key: String, bmp: Bitmap) = synchronized(lookCache) {
+        val size = bmp.allocationByteCount.toLong()
+        if (size > LOOK_CACHE_BYTES / 2) return@synchronized
+        lookCache.put(key, bmp)?.let { lookCacheBytes -= it.allocationByteCount }
+        lookCacheBytes += size
+        val it = lookCache.entries.iterator()
+        while (lookCacheBytes > LOOK_CACHE_BYTES && it.hasNext()) {
+            val e = it.next()
+            if (e.value === bmp) continue
+            lookCacheBytes -= e.value.allocationByteCount
+            it.remove()
+        }
+    }
+
+    /** Drops every cached look (e.g. when a project is closed). */
+    fun clearLookCache() = synchronized(lookCache) { lookCache.clear(); lookCacheBytes = 0L }
+
     /** Two entries: the quick low-resolution preview pass and the sharp one. */
     private val proCache = LinkedHashMap<String, Bitmap>()
 
@@ -203,7 +233,7 @@ object LayerRenderer {
                 val layerBitmap = if (proEffectPreview != null && previewApplies(proEffectPreview, layer)) {
                     renderLayerWithProPreview(context, layer, targetW, targetH, scaleRatio, maskForLayer, proEffectPreview, proEffectMask)
                 } else {
-                    renderSingleLayerToBitmap(context, layer, targetW, targetH, scaleRatio, maskForLayer)
+                    renderSingleLayerToBitmap(context, layer, targetW, targetH, scaleRatio, maskForLayer, cacheLook = maxPreviewDimension != null)
                 } ?: continue
                 try {
                     for (c in clipped) {
@@ -470,7 +500,9 @@ object LayerRenderer {
         canvasHeight: Int,
         scaleRatio: Float = 1.0f,
         activeSelectionMask: Bitmap? = null,
-        proEffect: ProEffectPreview? = null
+        proEffect: ProEffectPreview? = null,
+        /** Preview renders: reuse the layer's computed look (see [lookGet]). */
+        cacheLook: Boolean = false
     ): Bitmap? {
         coroutineContext.ensureActive()
         FilterLibrary.ensureLoaded(context)
@@ -488,12 +520,22 @@ object LayerRenderer {
                     // after cropping to a small part of a photo the canvas is small but that part
                     // still needs the photo's full detail.
                     var fullResSourceBmp: Bitmap? = null
+                    var sourceFromCache = false
+                    var lookFromCache = false
                     if (scaleRatio >= 1.0f && layer.sourceAssetPath != null) {
                         val needed = sourcePixelsNeeded(layer, scaleRatio)
                         val preview = layer.bitmap?.takeIf { !it.isRecycled }
                         if (preview == null || max(preview.width, preview.height) < needed) {
-                            val srcFile = File(layer.sourceAssetPath!!)
-                            if (srcFile.exists()) fullResSourceBmp = ImageProcessor.decodeFileWithExifSampled(srcFile, needed)
+                            val path = layer.sourceAssetPath!!
+                            val srcKey = "src:$path:$needed"
+                            val cachedSrc = if (cacheLook) lookGet(srcKey) else null
+                            if (cachedSrc != null) {
+                                fullResSourceBmp = cachedSrc; sourceFromCache = true
+                            } else {
+                                val srcFile = File(path)
+                                if (srcFile.exists()) fullResSourceBmp = ImageProcessor.decodeFileWithExifSampled(srcFile, needed)
+                                if (cacheLook) fullResSourceBmp?.let { lookPut(srcKey, it); sourceFromCache = true }
+                            }
                         }
                     }
 
@@ -502,9 +544,18 @@ object LayerRenderer {
                         return null
                     }
                     var processedBmp: Bitmap = baseBmp
+                    val hasLook = !layer.adjustments.isIdentity() || layer.filter != com.example.data.model.FilterType.NONE || layer.lutId != null
+                    val downscale = scaleRatio < 1.0f && (baseBmp.width > 800 || baseBmp.height > 800)
+                    val lookKey = if (cacheLook && proEffect == null && (hasLook || downscale)) {
+                        val pw = if (downscale) (baseBmp.width * scaleRatio).toInt().coerceAtLeast(1) else baseBmp.width
+                        val ph = if (downscale) (baseBmp.height * scaleRatio).toInt().coerceAtLeast(1) else baseBmp.height
+                        "look:${System.identityHashCode(baseBmp)}:${baseBmp.generationId}:${pw}x$ph:" +
+                            "${layer.adjustments}:${layer.adjustmentKind}:${layer.filter}:${layer.filterIntensity}:${layer.lutId}"
+                    } else null
+                    lookKey?.let { k -> lookGet(k)?.let { processedBmp = it; lookFromCache = true } }
 
                     // Optimize preview rendering by downscaling first before running heavy color matrices and filters
-                    if (scaleRatio < 1.0f && (baseBmp.width > 800 || baseBmp.height > 800)) {
+                    if (!lookFromCache && downscale) {
                         coroutineContext.ensureActive()
                         val pw = (baseBmp.width * scaleRatio).toInt().coerceAtLeast(1)
                         val ph = (baseBmp.height * scaleRatio).toInt().coerceAtLeast(1)
@@ -514,7 +565,7 @@ object LayerRenderer {
                     try {
                         // Live Pro effect preview: applied to the pixels first, exactly like the real
                         // destructive effect, so the layer's adjustments and filter stay on top of it.
-                        if (proEffect != null && previewApplies(proEffect, layer)) {
+                        if (!lookFromCache && proEffect != null && previewApplies(proEffect, layer)) {
                             coroutineContext.ensureActive()
                             val isCancelledCheck: () -> Boolean = { currentJob?.isActive == false }
                             val effected = proEffectFor(processedBmp, proEffect, isCancelledCheck)
@@ -523,7 +574,7 @@ object LayerRenderer {
                         }
 
                         // Apply color adjustments if present
-                        if (!layer.adjustments.isIdentity()) {
+                        if (!lookFromCache && !layer.adjustments.isIdentity()) {
                             coroutineContext.ensureActive()
                             val isCancelledCheck: () -> Boolean = { currentJob?.isActive == false }
                             val adjusted = ImageProcessor.applyAdjustments(processedBmp, layer.adjustments, isCancelledCheck)
@@ -534,7 +585,7 @@ object LayerRenderer {
                         }
 
                         // Apply filter if present
-                        if (layer.filter != com.example.data.model.FilterType.NONE) {
+                        if (!lookFromCache && layer.filter != com.example.data.model.FilterType.NONE) {
                             coroutineContext.ensureActive()
                             val isCancelledCheck: () -> Boolean = { currentJob?.isActive == false }
                             val filtered = ImageProcessor.applyFilter(processedBmp, layer.filter, layer.filterIntensity, isCancelledCheck)
@@ -545,7 +596,7 @@ object LayerRenderer {
                         }
 
                         // Imported 3D LUT look
-                        FilterLibrary.lut(layer.lutId)?.let { lut ->
+                        if (!lookFromCache) FilterLibrary.lut(layer.lutId)?.let { lut ->
                             coroutineContext.ensureActive()
                             val isCancelledCheck: () -> Boolean = { currentJob?.isActive == false }
                             val graded = ImageProcessor.applyLut(processedBmp, lut, layer.filterIntensity, isCancelledCheck)
@@ -556,6 +607,9 @@ object LayerRenderer {
                         }
 
                         coroutineContext.ensureActive()
+                        if (lookKey != null && !lookFromCache && processedBmp !== baseBmp) {
+                            lookPut(lookKey, processedBmp); lookFromCache = true
+                        }
                         val matrix = Matrix().apply {
                             SelectionEngine.layerShapeMatrix(layer, processedBmp.width.toFloat(), processedBmp.height.toFloat())?.let { set(it) }
                             postTranslate(-processedBmp.width / 2f, -processedBmp.height / 2f)
@@ -612,10 +666,11 @@ object LayerRenderer {
                             canvas.drawBitmap(processedBmp, matrix, paint)
                         }
                     } finally {
-                        if (processedBmp !== baseBmp && !processedBmp.isRecycled) {
+                        // Cached bitmaps stay alive for the next render.
+                        if (!lookFromCache && processedBmp !== baseBmp && !processedBmp.isRecycled) {
                             processedBmp.recycle()
                         }
-                        if (fullResSourceBmp != null && !fullResSourceBmp.isRecycled) {
+                        if (!sourceFromCache && fullResSourceBmp != null && !fullResSourceBmp.isRecycled) {
                             fullResSourceBmp.recycle()
                         }
                     }

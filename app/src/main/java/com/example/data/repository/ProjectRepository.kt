@@ -293,7 +293,9 @@ class ProjectRepository(private val context: Context) {
                                 val tmpFile = File(projDir, tmpFileName)
                                 val compressFormat = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) Bitmap.CompressFormat.WEBP_LOSSLESS else Bitmap.CompressFormat.PNG
                                 FileOutputStream(tmpFile).use { out ->
-                                    if (!bmp.compress(compressFormat, 100, out)) throw java.io.IOException("Layer encoding failed")
+                                    // Lossless either way; a low effort keeps autosave quick (this file is
+                                    // the editing preview, re-encoded after every change of the layer).
+                                    if (!bmp.compress(compressFormat, if (compressFormat == Bitmap.CompressFormat.PNG) 100 else 20, out)) throw java.io.IOException("Layer encoding failed")
                                     out.flush(); out.fd.sync()
                                 }
                                 val committed = tmpFile.renameTo(preferredFile) || run { if (preferredFile.exists() && !preferredFile.delete()) false else tmpFile.renameTo(preferredFile) }
