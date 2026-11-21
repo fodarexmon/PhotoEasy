@@ -140,7 +140,7 @@
     <string name="inpaint_success">تمت إزالة الكائن بنجاح!</string>
     
     <!-- Layers Panel -->
-    <string name="layers_title">شجرة الطبقات</string>
+    <string name="layers_title">الطبقات</string>
     <string name="layer_add">إضافة طبقة</string>
     <string name="layer_add_image">طبقة صورة</string>
     <string name="layer_add_text">طبقة نص</string>
@@ -1095,4 +1095,36 @@
     <string name="tool_heal">معالجة موضعية</string>
     <string name="heal_info">ارسم فوق البثرة أو البقعة أو العنصر الصغير: عند رفع إصبعك تُستبدل بنسيج من أنسب منطقة حولها مع دمج اللون بسلاسة.</string>
     <string name="heal_failed">لا توجد منطقة مناسبة حولها للمعالجة. جرّب ضربة أصغر.</string>
+    <string name="projects_select">تحديد</string>
+    <string name="projects_selected">%1$d محدد</string>
+    <string name="projects_select_all">تحديد الكل</string>
+    <string name="projects_select_none">إلغاء تحديد الكل</string>
+    <string name="delete_projects_title">حذف %1$d من المشاريع؟</string>
+    <string name="delete_projects_message">سيتم حذف المشاريع المحددة وكل طبقاتها نهائياً. لا يمكن التراجع عن ذلك.</string>
+    <string name="cd_selected">محدد</string>
+    <string name="face_drag_hint">تلميح: اسحب العين أو الأنف أو الفم أو الفك أو حافة الوجه مباشرة على الصورة.</string>
+    <string name="face_eyes_linked">العينان معاً</string>
+    <string name="face_eyes_unlinked">كل عين وحدها</string>
+    <string name="face_eye_left">العين اليسرى (في الصورة)</string>
+    <string name="face_eye_right">العين اليمنى (في الصورة)</string>
+    <string name="layer_add_button">طبقة</string>
+    <string name="layers_panel_resize">اسحب لتغيير حجم لوحة الطبقات، والنقر المزدوج يعيدها</string>
+    <string name="layer_clipped_to">مقصوصة على «%1$s»</string>
+    <string name="layer_clip_base">أساس قص لـ %1$d</string>
+    <string name="layer_name_fs_mid">التردد المتوسط</string>
+    <string name="fs_show_mid">المتوسط</string>
+    <string name="fs_method">طريقة تنعيم الطبقة المنخفضة</string>
+    <string name="fs_method_gaussian">غاوسي</string>
+    <string name="fs_method_surface">سطحي</string>
+    <string name="fs_method_median">وسيط</string>
+    <string name="fs_method_gaussian_info">تنعيم كلاسيكي ناعم، مناسب لمعظم الصور الشخصية.</string>
+    <string name="fs_method_surface_info">يحافظ على الحواف القوية (الأنف والفك والعينين) في الطبقة المنخفضة، فلا تظهر هالات عند تنعيمها.</string>
+    <string name="fs_method_median_info">يزيل البقع الصغيرة من الطبقة المنخفضة مع الحفاظ على الحواف.</string>
+    <string name="fs_threshold">عتبة الحواف</string>
+    <string name="fs_three_band">ثلاث طبقات (منخفض، متوسط، عالٍ)</string>
+    <string name="fs_three_band_info">يفصل المتوسط التجاعيد وظلال المسام عن أدق تفاصيل الملمس.</string>
+    <string name="fs_detail_radius">نصف قطر الملمس الدقيق</string>
+    <string name="fs_smooth_selection">تنعيم المنطقة المحددة</string>
+    <string name="fs_smooth_selection_hint">حدد منطقة على الطبقة المنخفضة أولًا.</string>
+    <string name="fs_smooth_needs_selection">حدد منطقة أولًا</string>
 </resources>

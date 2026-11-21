@@ -908,6 +908,8 @@ fun EditorScreen(
                                 onOpenLiquify = { if (viewModel.canLiquifySelectedLayer()) { liquifyFaceTab = false; showLiquify = true } },
                                 onOpenFaceLiquify = { if (viewModel.canLiquifySelectedLayer()) { liquifyFaceTab = true; showLiquify = true } },
                                 onOpenFrequencySeparation = { if (viewModel.canLiquifySelectedLayer()) showFrequencySeparation = true },
+                                hasSelection = hasActiveSelectionCached,
+                                onSmoothSelection = { viewModel.smoothSelectionOnLayer() },
                                 initialTab = if (activeTool == ActiveTool.EFFECTS) com.example.ui.components.FilterPanelTab.PRO_EFFECTS else com.example.ui.components.FilterPanelTab.PRESETS,
                                 selectedFilter = layer.filter,
                                 filterIntensity = layer.filterIntensity,
@@ -1585,6 +1587,8 @@ fun EditorScreen(
                     }
                     AnimatedVisibility(visible = activeTool != ActiveTool.NONE, enter = slideInVertically { it }, exit = slideOutVertically { it }) {
                         val panelMaxHeight = when {
+                            // The layers panel sizes itself (fits its layers; the user can drag it taller).
+                            activeTool == ActiveTool.LAYERS -> screenMaxHeight * 0.75f
                             screenMaxHeight < 480.dp -> screenMaxHeight * 0.32f
                             screenMaxHeight < 600.dp -> screenMaxHeight * 0.36f
                             else -> screenMaxHeight * 0.42f
@@ -1739,7 +1743,7 @@ fun EditorScreen(
                 preview = fsPreview,
                 docPerPreview = fsLayer.intrinsicDocumentWidth() / fsPreview.width.coerceAtLeast(1),
                 onDismiss = { showFrequencySeparation = false },
-                onCreate = { r -> showFrequencySeparation = false; viewModel.createFrequencySeparation(r) }
+                onCreate = { r, m, t, three, d -> showFrequencySeparation = false; viewModel.createFrequencySeparation(r, m, t, three, d) }
             )
         }
     }

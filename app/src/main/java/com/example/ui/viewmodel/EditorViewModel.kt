@@ -780,6 +780,24 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /** Deletes several projects at once, then refreshes the list a single time. */
+    fun deleteProjects(projectIds: Collection<String>) {
+        if (projectIds.isEmpty()) return
+        viewModelScope.launch {
+            val ids = projectIds.toSet()
+            for (id in ids) repository.deleteProject(id)
+            val last = prefs.getString("last_opened_project_id", null)
+            if (_uiState.value.recoveryProjectId in ids || last in ids) {
+                prefs.edit().remove("last_opened_project_id").apply()
+                _uiState.value = _uiState.value.copy(recoveryProjectId = null)
+            }
+            if (_uiState.value.currentProject?.id in ids) {
+                _uiState.value = _uiState.value.copy(currentProject = null, currentScreen = Screen.HOME)
+            }
+            loadProjects()
+        }
+    }
+
     fun deleteProject(projectId: String) {
         viewModelScope.launch {
             repository.deleteProject(projectId)
@@ -4628,7 +4646,39 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
      * like the original, which is hidden. Retouch Low (Blur, Smudge, Clone) to even out skin tone
      * without losing texture, and High (Clone, Patch) to remove blemishes without changing colour.
      */
-    fun createFrequencySeparation(radiusDoc: Float) {
+    /** Radius (document px) of the last frequency separation: "Smooth selected area" blurs Low with it. */
+    private var lastFsRadiusDoc = 6f
+
+    /**
+     * Smooths the selected layer (normally the Low frequency layer) inside the active selection
+     * with a Gaussian blur at the separation radius: evens out colour and tone there while the
+     * High layer keeps the texture.
+     */
+    fun smoothSelectionOnLayer() {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.getOrNull(_uiState.value.selectedLayerIndex) ?: return
+        val sel = _uiState.value.selectionMask
+        if (sel == null || !SelectionEngine.hasSelection(sel)) {
+            _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.fs_smooth_needs_selection)); return
+        }
+        val bmpW = layer.bitmap?.width ?: 0
+        // applyProFilter works on the full-resolution layer: convert the radius to its pixels.
+        val fullW = layer.originalWidth.takeIf { it > 0 } ?: bmpW
+        val sigma = lastFsRadiusDoc * fullW / layer.intrinsicDocumentWidth().coerceAtLeast(1f)
+        applyProFilter(ProFilterType.GAUSSIAN_BLUR, com.example.engine.ProEffects.defaults(ProFilterType.GAUSSIAN_BLUR).copy(p1 = sigma.coerceIn(0.5f, 250f)))
+    }
+
+    fun createFrequencySeparation(radiusDoc: Float) =
+        createFrequencySeparation(radiusDoc, com.example.engine.LowPassMethod.GAUSSIAN, 20f, false, 2f)
+
+    /**
+     * Splits the selected layer into Low (blurred with [method]) and High, or with [threeBand]
+     * into Low, Mid and High where [detailRadiusDoc] divides Mid from High.
+     */
+    fun createFrequencySeparation(
+        radiusDoc: Float, method: com.example.engine.LowPassMethod, threshold: Float,
+        threeBand: Boolean, detailRadiusDoc: Float
+    ) {
         val proj = _uiState.value.currentProject ?: return
         if (_uiState.value.isProcessing) return
         val idx = _uiState.value.selectedLayerIndex
@@ -4643,15 +4693,24 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             var full: Bitmap? = null
             var looked: Bitmap? = null
             var low: Bitmap? = null
+            var mid: Bitmap? = null
             var high: Bitmap? = null
             var historySaved = false
             try {
                 full = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Image unavailable")
                 // Split what the layer shows (its adjustments / filter / LUT baked in).
                 looked = withContext(Dispatchers.Default) { com.example.engine.LayerRenderer.applyLayerLook(full!!, layer) }
-                val sigma = radiusDoc * full!!.width / layer.intrinsicDocumentWidth().coerceAtLeast(1f)
-                val parts = withContext(Dispatchers.Default) { com.example.engine.FrequencySeparation.split(looked!!, sigma) }
-                low = parts.first; high = parts.second
+                val perDoc = full!!.width / layer.intrinsicDocumentWidth().coerceAtLeast(1f)
+                val sigma = radiusDoc * perDoc
+                if (threeBand) {
+                    val parts = withContext(Dispatchers.Default) {
+                        com.example.engine.FrequencySeparation.split3(looked!!, sigma, detailRadiusDoc * perDoc, method, threshold)
+                    }
+                    low = parts.first; mid = parts.second; high = parts.third
+                } else {
+                    val parts = withContext(Dispatchers.Default) { com.example.engine.FrequencySeparation.split(looked!!, sigma, method, threshold) }
+                    low = parts.first; high = parts.second
+                }
                 fun part(name: Int, blend: BlendModeType, clipped: Boolean) = layer.copy(
                     id = java.util.UUID.randomUUID().toString(),
                     name = uniqueLayerName(tr(name), proj),
@@ -4672,20 +4731,26 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 val lowLayer = part(R.string.layer_name_fs_low, layer.blendMode, layer.isClipped)
                 // High is clipped to Low: its Linear Light texture applies to Low only.
                 val highLayer = part(R.string.layer_name_fs_high, BlendModeType.LINEAR_LIGHT, true)
+                // Mid (three-band only) sits between Low and High, also Linear Light clipped to Low.
+                val midLayer = if (mid != null) part(R.string.layer_name_fs_mid, BlendModeType.LINEAR_LIGHT, true) else null
                 val cw = layer.intrinsicDocumentWidth(); val ch = layer.intrinsicDocumentHeight()
                 if (!commitDestructiveBitmap(proj, lowLayer, low!!, cw, ch, "fs_low") ||
+                    (midLayer != null && !commitDestructiveBitmap(proj, midLayer, mid!!, cw, ch, "fs_mid")) ||
                     !commitDestructiveBitmap(proj, highLayer, high!!, cw, ch, "fs_high")) {
                     throw java.io.IOException("Save failed")
                 }
                 // Same placement and shape as the original (commit resets nothing of that).
                 lowLayer.maskAnchor = layer.maskAnchor; highLayer.maskAnchor = layer.maskAnchor
+                midLayer?.maskAnchor = layer.maskAnchor
                 saveHistoryState()
                 historySaved = true
                 layer.isVisible = false
-                proj.layers.add(idx + 1, lowLayer)
-                proj.layers.add(idx + 2, highLayer)
+                lastFsRadiusDoc = radiusDoc
+                val added = listOfNotNull(lowLayer, midLayer, highLayer)
+                added.forEachIndexed { i, l -> proj.layers.add(idx + 1 + i, l) }
                 commitProjectMutation(
-                    selectedLayerIndex = idx + 2,
+                    // Low is selected: smoothing tone and colour is the usual next step.
+                    selectedLayerIndex = idx + 1,
                     statusMessage = tr(R.string.status_frequency_separated),
                     transformState = { it.copy(isProcessing = false) }
                 )
@@ -4698,7 +4763,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_effect_failed))
             } finally {
                 // The new layers keep their own previews.
-                listOf(full, looked, low, high).distinct().forEach { b -> if (b != null && b !== layer.bitmap && !b.isRecycled) b.recycle() }
+                listOf(full, looked, low, mid, high).distinct().forEach { b -> if (b != null && b !== layer.bitmap && !b.isRecycled) b.recycle() }
             }
         }
     }

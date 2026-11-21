@@ -363,6 +363,19 @@ class ProToolsTest {
         assertEquals(orig[20 * w + 20], px[20 * w + 20])
     }
 
+    @Test
+    fun `clipping groups find their base and count`() {
+        fun l(id: String, clipped: Boolean) = Layer(id = id, name = id, type = LayerType.IMAGE, isClipped = clipped)
+        // Bottom to top: photo, curves (clipped), text (clipped), sticker.
+        val layers = listOf(l("photo", false), l("curves", true), l("text", true), l("sticker", false))
+        assertEquals(0, com.example.ui.components.clipBaseIndex(layers, 1))
+        assertEquals(0, com.example.ui.components.clipBaseIndex(layers, 2))
+        assertNull(com.example.ui.components.clipBaseIndex(layers, 3))
+        assertEquals(2, com.example.ui.components.clippedCountAbove(layers, 0))
+        assertEquals(0, com.example.ui.components.clippedCountAbove(layers, 3))
+        assertEquals(0, com.example.ui.components.clippedCountAbove(layers, 1))
+    }
+
     // --- Colour decontamination --------------------------------------------------------------
 
     @Test
@@ -405,6 +418,56 @@ class ProToolsTest {
             val a = img.getPixel(x, y); val b = rebuilt.getPixel(x, y)
             assertTrue("($x,$y)", kotlin.math.abs(Color.red(a) - Color.red(b)) <= 1 && kotlin.math.abs(Color.green(a) - Color.green(b)) <= 1 && kotlin.math.abs(Color.blue(a) - Color.blue(b)) <= 1)
         }
+    }
+
+    private fun fsImage(): Bitmap {
+        val rnd = java.util.Random(5)
+        val img = Bitmap.createBitmap(40, 30, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 30) for (x in 0 until 40) {
+            // A hard edge (for Surface / Median) plus noise.
+            val base = if (x < 20) 70 else 190
+            img.setPixel(x, y, Color.rgb(base + rnd.nextInt(30), 100 + rnd.nextInt(40), 220 - y * 3))
+        }
+        return img
+    }
+
+    private fun maxDiff(a: Bitmap, b: Bitmap): Int {
+        var m = 0
+        for (y in 0 until a.height) for (x in 0 until a.width) {
+            val p = a.getPixel(x, y); val q = b.getPixel(x, y)
+            m = maxOf(m, kotlin.math.abs(Color.red(p) - Color.red(q)), kotlin.math.abs(Color.green(p) - Color.green(q)), kotlin.math.abs(Color.blue(p) - Color.blue(q)))
+        }
+        return m
+    }
+
+    @Test
+    fun `every low pass method rebuilds the image exactly`() {
+        val img = fsImage()
+        for (m in com.example.engine.LowPassMethod.values()) {
+            val (low, high) = com.example.engine.FrequencySeparation.split(img, 3f, m, 20f)
+            val rebuilt = low.copy(Bitmap.Config.ARGB_8888, true)
+            com.example.engine.FrequencySeparation.linearLight(rebuilt, high, 1f)
+            assertTrue("$m: ${maxDiff(img, rebuilt)}", maxDiff(img, rebuilt) <= 1)
+        }
+        // Median and Surface keep the hard edge in Low far better than Gaussian.
+        fun edgeStep(m: com.example.engine.LowPassMethod): Int {
+            val low = com.example.engine.FrequencySeparation.lowPass(img, 3f, m, 20f)
+            return Color.red(low.getPixel(21, 15)) - Color.red(low.getPixel(18, 15))
+        }
+        assertTrue(edgeStep(com.example.engine.LowPassMethod.MEDIAN) > edgeStep(com.example.engine.LowPassMethod.GAUSSIAN))
+    }
+
+    @Test
+    fun `three band separation rebuilds the image`() {
+        val img = fsImage()
+        val (low, mid, high) = com.example.engine.FrequencySeparation.split3(img, 5f, 1.2f, com.example.engine.LowPassMethod.GAUSSIAN, 20f)
+        val rebuilt = low.copy(Bitmap.Config.ARGB_8888, true)
+        com.example.engine.FrequencySeparation.linearLight(rebuilt, mid, 1f)
+        com.example.engine.FrequencySeparation.linearLight(rebuilt, high, 1f)
+        assertTrue("diff ${maxDiff(img, rebuilt)}", maxDiff(img, rebuilt) <= 2)
+        // Mid carries detail: not flat grey.
+        val greys = (0 until 40).map { Color.red(mid.getPixel(it, 15)) }.toSet()
+        assertTrue(greys.size > 3)
     }
 
     @Test
@@ -451,6 +514,33 @@ class ProToolsTest {
         assertTrue(nx[102 * 200 + 108] > 0f)
         // Far from the face nothing moves.
         assertEquals(0f, nx[5 * 200 + 5], 0f)
+    }
+
+    @Test
+    fun `unlinked eyes change one eye only and the jaw follows the real outline`() {
+        val g0 = face()
+        // Only the image-right eye is enlarged when the eyes are unlinked.
+        val a = com.example.engine.FaceAdjust().unlinked().copy(eye2Size = 100f)
+        val (dx, _) = com.example.engine.FaceWarp.field(listOf(g0 to a), 200, 200)!!
+        assertTrue(dx[80 * 200 + 124] < 0f)
+        assertEquals(0f, dx[80 * 200 + 76], 1e-4f)
+        // Outline (an ellipse) known: face width moves the outline outwards on both sides.
+        val oval = (0 until 36).map { i ->
+            val t = i * 2 * Math.PI / 36
+            android.graphics.PointF((100 + 40 * kotlin.math.cos(t)).toFloat(), (95 + 55 * kotlin.math.sin(t)).toFloat())
+        }
+        val g = g0.copy(oval = oval)
+        val (wx, _) = com.example.engine.FaceWarp.field(listOf(g to com.example.engine.FaceAdjust(faceWidth = 100f)), 200, 200)!!
+        // Right edge at mouth level: samples further in (content moved out) -> negative dx.
+        assertTrue(wx[120 * 200 + 140] < 0f)
+        assertTrue(wx[120 * 200 + 60] > 0f)
+        // Far from the face nothing moves.
+        assertEquals(0f, wx[5 * 200 + 5], 0f)
+        val (jx, _) = com.example.engine.FaceWarp.field(listOf(g to com.example.engine.FaceAdjust(jawline = -100f)), 200, 200)!!
+        // Narrower jaw: below the mouth the right side samples further out (content moved in).
+        assertTrue(jx[135 * 200 + 132] > 0f)
+        // Above the eyes the jaw setting does nothing.
+        assertEquals(0f, jx[55 * 200 + 140], 1e-3f)
     }
 
     @Test
