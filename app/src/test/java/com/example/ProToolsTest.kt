@@ -324,6 +324,26 @@ class ProToolsTest {
         assertTrue(Color.alpha(withAi.getPixel(52, 20)) < 40)
     }
 
+    @Test
+    fun `refine brush on a large image keeps far strands like the preview`() {
+        // Strand 300 px from the subject: beyond the full-resolution sample search, within reach
+        // at preview scale. Without the preview-scale reference it was lost (alpha 0) on apply.
+        val w = 3000; val h = 120
+        val red = Color.rgb(220, 30, 30); val blue = Color.rgb(30, 30, 220); val mixed = Color.rgb(125, 30, 125)
+        val img = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val row = IntArray(w) { x -> when { x < 1000 -> red; x in 1296..1311 -> mixed; else -> blue } }
+        for (y in 0 until h) img.setPixels(row, 0, w, 0, y, w, 1)
+        val mask = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
+        android.graphics.Canvas(mask).drawRect(0f, 0f, 1000f, h.toFloat(), android.graphics.Paint().apply { color = Color.BLACK })
+        val cfg = com.example.engine.RefineEdgeConfig(radiusPx = 3, smartRadius = false)
+        val area = ByteArray(w * h) { i -> if (i % w in 990..1500) 255.toByte() else 0 }
+        val res = com.example.engine.RefineEdgeEngine.refineEdges(img, mask, cfg, area).refinedMask
+        val a = Color.alpha(res.getPixel(1303, 60))
+        assertTrue("far strand alpha $a", a in 50..220)
+        assertTrue(Color.alpha(res.getPixel(1450, 60)) < 50)
+        assertTrue(Color.alpha(res.getPixel(500, 60)) > 240)
+    }
+
     // --- Colour decontamination --------------------------------------------------------------
 
     @Test
