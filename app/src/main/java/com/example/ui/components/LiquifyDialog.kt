@@ -239,12 +239,12 @@ fun LiquifyDialog(
         }
     }
 
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         Surface(
             shape = RoundedCornerShape(16.dp),
             color = StudioSurface,
             border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
-            modifier = Modifier.fillMaxSize().padding(6.dp)
+            modifier = Modifier.safeDrawingPadding().fillMaxSize().padding(6.dp)
         ) {
             Column(Modifier.fillMaxSize().padding(10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {

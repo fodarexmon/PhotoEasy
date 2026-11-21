@@ -74,12 +74,13 @@ fun ExportDialog(
     LaunchedEffect(s.copy(fileName = "", destination = ExportDestination.GALLERY, shareAfter = false)) { onRequestEstimate(s) }
     fun set(n: ExportSettings) = onSettingsChange(n)
 
-    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
         Surface(
             shape = RoundedCornerShape(20.dp),
             color = StudioSurface,
             border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
             modifier = Modifier
+                .safeDrawingPadding()
                 .fillMaxWidth(0.95f)
                 .fillMaxHeight(0.92f)
                 .testTag("dialog_export")

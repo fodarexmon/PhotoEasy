@@ -116,13 +116,14 @@ fun RefineEdgeDialog(
 
     Dialog(
         onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
     ) {
         Surface(
             shape = RoundedCornerShape(20.dp),
             color = StudioSurface,
             border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
             modifier = Modifier
+                .safeDrawingPadding()
                 .fillMaxWidth(0.96f)
                 .fillMaxHeight(0.94f)
                 .padding(6.dp)
