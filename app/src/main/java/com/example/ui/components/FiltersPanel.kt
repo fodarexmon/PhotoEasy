@@ -118,6 +118,10 @@ fun FiltersPanel(
     onOpenFaceLiquify: (() -> Unit)? = null,
     /** Opens the frequency separation setup. */
     onOpenFrequencySeparation: (() -> Unit)? = null,
+    /** Whether a selection is active (enables "Smooth selected area"). */
+    hasSelection: Boolean = false,
+    /** Blurs the selected layer (normally Low of a frequency separation) inside the selection. */
+    onSmoothSelection: (() -> Unit)? = null,
     /** Number of projects whose layers use the LUT (deleting it removes their look). */
     onCountLutUsage: suspend (String) -> Int = { 0 },
     onSaveLook: (String) -> Unit = {},
@@ -607,6 +611,15 @@ fun FiltersPanel(
                         onClick = onOpenFrequencySeparation,
                         modifier = Modifier.weight(1f).heightIn(min = 44.dp).testTag("btn_open_fs")
                     ) { Text(stringResource(R.string.fs_open), fontSize = 12.sp, maxLines = 2) }
+                }
+                if (onSmoothSelection != null) {
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(
+                        onClick = onSmoothSelection,
+                        enabled = hasSelection && isImageLayer,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 40.dp).testTag("btn_fs_smooth_selection")
+                    ) { Text(stringResource(R.string.fs_smooth_selection), fontSize = 12.sp, maxLines = 2) }
+                    if (!hasSelection) Text(stringResource(R.string.fs_smooth_selection_hint), color = Color.Gray, fontSize = 10.sp)
                 }
                 Spacer(Modifier.height(8.dp))
             }

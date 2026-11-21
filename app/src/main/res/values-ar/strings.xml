@@ -1111,4 +1111,20 @@
     <string name="layers_panel_resize">اسحب لتغيير حجم لوحة الطبقات، والنقر المزدوج يعيدها</string>
     <string name="layer_clipped_to">مقصوصة على «%1$s»</string>
     <string name="layer_clip_base">أساس قص لـ %1$d</string>
+    <string name="layer_name_fs_mid">التردد المتوسط</string>
+    <string name="fs_show_mid">المتوسط</string>
+    <string name="fs_method">طريقة تنعيم الطبقة المنخفضة</string>
+    <string name="fs_method_gaussian">غاوسي</string>
+    <string name="fs_method_surface">سطحي</string>
+    <string name="fs_method_median">وسيط</string>
+    <string name="fs_method_gaussian_info">تنعيم كلاسيكي ناعم، مناسب لمعظم الصور الشخصية.</string>
+    <string name="fs_method_surface_info">يحافظ على الحواف القوية (الأنف والفك والعينين) في الطبقة المنخفضة، فلا تظهر هالات عند تنعيمها.</string>
+    <string name="fs_method_median_info">يزيل البقع الصغيرة من الطبقة المنخفضة مع الحفاظ على الحواف.</string>
+    <string name="fs_threshold">عتبة الحواف</string>
+    <string name="fs_three_band">ثلاث طبقات (منخفض، متوسط، عالٍ)</string>
+    <string name="fs_three_band_info">يفصل المتوسط التجاعيد وظلال المسام عن أدق تفاصيل الملمس.</string>
+    <string name="fs_detail_radius">نصف قطر الملمس الدقيق</string>
+    <string name="fs_smooth_selection">تنعيم المنطقة المحددة</string>
+    <string name="fs_smooth_selection_hint">حدد منطقة على الطبقة المنخفضة أولًا.</string>
+    <string name="fs_smooth_needs_selection">حدد منطقة أولًا</string>
 </resources>

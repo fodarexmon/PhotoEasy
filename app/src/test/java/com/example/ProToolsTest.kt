@@ -420,6 +420,56 @@ class ProToolsTest {
         }
     }
 
+    private fun fsImage(): Bitmap {
+        val rnd = java.util.Random(5)
+        val img = Bitmap.createBitmap(40, 30, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 30) for (x in 0 until 40) {
+            // A hard edge (for Surface / Median) plus noise.
+            val base = if (x < 20) 70 else 190
+            img.setPixel(x, y, Color.rgb(base + rnd.nextInt(30), 100 + rnd.nextInt(40), 220 - y * 3))
+        }
+        return img
+    }
+
+    private fun maxDiff(a: Bitmap, b: Bitmap): Int {
+        var m = 0
+        for (y in 0 until a.height) for (x in 0 until a.width) {
+            val p = a.getPixel(x, y); val q = b.getPixel(x, y)
+            m = maxOf(m, kotlin.math.abs(Color.red(p) - Color.red(q)), kotlin.math.abs(Color.green(p) - Color.green(q)), kotlin.math.abs(Color.blue(p) - Color.blue(q)))
+        }
+        return m
+    }
+
+    @Test
+    fun `every low pass method rebuilds the image exactly`() {
+        val img = fsImage()
+        for (m in com.example.engine.LowPassMethod.values()) {
+            val (low, high) = com.example.engine.FrequencySeparation.split(img, 3f, m, 20f)
+            val rebuilt = low.copy(Bitmap.Config.ARGB_8888, true)
+            com.example.engine.FrequencySeparation.linearLight(rebuilt, high, 1f)
+            assertTrue("$m: ${maxDiff(img, rebuilt)}", maxDiff(img, rebuilt) <= 1)
+        }
+        // Median and Surface keep the hard edge in Low far better than Gaussian.
+        fun edgeStep(m: com.example.engine.LowPassMethod): Int {
+            val low = com.example.engine.FrequencySeparation.lowPass(img, 3f, m, 20f)
+            return Color.red(low.getPixel(21, 15)) - Color.red(low.getPixel(18, 15))
+        }
+        assertTrue(edgeStep(com.example.engine.LowPassMethod.MEDIAN) > edgeStep(com.example.engine.LowPassMethod.GAUSSIAN))
+    }
+
+    @Test
+    fun `three band separation rebuilds the image`() {
+        val img = fsImage()
+        val (low, mid, high) = com.example.engine.FrequencySeparation.split3(img, 5f, 1.2f, com.example.engine.LowPassMethod.GAUSSIAN, 20f)
+        val rebuilt = low.copy(Bitmap.Config.ARGB_8888, true)
+        com.example.engine.FrequencySeparation.linearLight(rebuilt, mid, 1f)
+        com.example.engine.FrequencySeparation.linearLight(rebuilt, high, 1f)
+        assertTrue("diff ${maxDiff(img, rebuilt)}", maxDiff(img, rebuilt) <= 2)
+        // Mid carries detail: not flat grey.
+        val greys = (0 until 40).map { Color.red(mid.getPixel(it, 15)) }.toSet()
+        assertTrue(greys.size > 3)
+    }
+
     @Test
     fun `renderer composes a clipped linear light layer like the original`() {
         val img = Bitmap.createBitmap(40, 30, Bitmap.Config.ARGB_8888)

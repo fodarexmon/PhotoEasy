@@ -1107,4 +1107,20 @@
     <string name="layers_panel_resize">Drag to resize the layers panel, double tap to reset</string>
     <string name="layer_clipped_to">Clipped to “%1$s”</string>
     <string name="layer_clip_base">Clipping base for %1$d</string>
+    <string name="layer_name_fs_mid">Mid frequency</string>
+    <string name="fs_show_mid">Mid</string>
+    <string name="fs_method">Low blur method</string>
+    <string name="fs_method_gaussian">Gaussian</string>
+    <string name="fs_method_surface">Surface</string>
+    <string name="fs_method_median">Median</string>
+    <string name="fs_method_gaussian_info">Classic soft blur. Good for most portraits.</string>
+    <string name="fs_method_surface_info">Keeps strong edges (nose, jaw, eyes) in Low, so smoothing Low leaves no halos near them.</string>
+    <string name="fs_method_median_info">Removes small spots from Low while keeping edges.</string>
+    <string name="fs_threshold">Edge threshold</string>
+    <string name="fs_three_band">Three bands (Low, Mid, High)</string>
+    <string name="fs_three_band_info">Mid holds wrinkles and pore shadows apart from the finest texture.</string>
+    <string name="fs_detail_radius">Fine texture radius</string>
+    <string name="fs_smooth_selection">Smooth selected area</string>
+    <string name="fs_smooth_selection_hint">Select an area on the Low layer first.</string>
+    <string name="fs_smooth_needs_selection">Select an area first</string>
 </resources>

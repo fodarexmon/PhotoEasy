@@ -908,6 +908,8 @@ fun EditorScreen(
                                 onOpenLiquify = { if (viewModel.canLiquifySelectedLayer()) { liquifyFaceTab = false; showLiquify = true } },
                                 onOpenFaceLiquify = { if (viewModel.canLiquifySelectedLayer()) { liquifyFaceTab = true; showLiquify = true } },
                                 onOpenFrequencySeparation = { if (viewModel.canLiquifySelectedLayer()) showFrequencySeparation = true },
+                                hasSelection = hasActiveSelectionCached,
+                                onSmoothSelection = { viewModel.smoothSelectionOnLayer() },
                                 initialTab = if (activeTool == ActiveTool.EFFECTS) com.example.ui.components.FilterPanelTab.PRO_EFFECTS else com.example.ui.components.FilterPanelTab.PRESETS,
                                 selectedFilter = layer.filter,
                                 filterIntensity = layer.filterIntensity,
@@ -1741,7 +1743,7 @@ fun EditorScreen(
                 preview = fsPreview,
                 docPerPreview = fsLayer.intrinsicDocumentWidth() / fsPreview.width.coerceAtLeast(1),
                 onDismiss = { showFrequencySeparation = false },
-                onCreate = { r -> showFrequencySeparation = false; viewModel.createFrequencySeparation(r) }
+                onCreate = { r, m, t, three, d -> showFrequencySeparation = false; viewModel.createFrequencySeparation(r, m, t, three, d) }
             )
         }
     }
