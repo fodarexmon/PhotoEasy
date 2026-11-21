@@ -246,9 +246,9 @@ fun EditorScreen(
     val onUndoSelection: () -> Unit = { viewModel.undoSelection() }
     val onRedoSelection: () -> Unit = { viewModel.redoSelection() }
     val onSaveProject: () -> Unit = { viewModel.saveCurrentProject() }
-    val luts = st.luts
-    val customPresets = st.customPresets
-    val favoriteFilters = st.favoriteFilters
+    val luts = uiState.luts
+    val customPresets = uiState.customPresets
+    val favoriteFilters = uiState.favoriteFilters
     val onToggleFavoriteFilter: (String) -> Unit = { viewModel.toggleFavoriteFilter(it) }
     val onImportLut: (Uri) -> Unit = { viewModel.importLut(it) }
     val onDeleteLut: (String) -> Unit = { viewModel.deleteLut(it) }
