@@ -32,8 +32,15 @@ data class RefineEdgeConfig(
     val borderPx: Float = 0f,
     // Off by default: decontamination rewrites the layer's pixels, so it must be an explicit choice.
     val decontaminateColors: Boolean = false,
-    val decontaminateAmount: Float = 0.8f
+    val decontaminateAmount: Float = 0.8f,
+    /** Uses the on-device subject segmentation where hair and background colours are too alike. */
+    val aiAssist: Boolean = false,
+    /** Where the result goes (Photoshop's "Output To"). */
+    val output: RefineOutput = RefineOutput.SELECTION
 )
+
+/** Photoshop's Select and Mask "Output To". */
+enum class RefineOutput { SELECTION, LAYER_MASK, NEW_LAYER, NEW_LAYER_WITH_MASK }
 
 /**
  * [refinedMask] is an ALPHA_8 bitmap the size of the source (alpha = selection strength).
@@ -71,10 +78,18 @@ object RefineEdgeEngine {
     /** Wide-band candidate (Smart Radius); resolved to UNKNOWN / FG / BG by local texture. */
     private const val TRI_CANDIDATE: Byte = 3
 
+    /**
+     * [refineArea] (optional, w x h bytes): where the Refine Edge Brush was painted; those pixels
+     * are always matted, however far from the selection edge. [aiAlpha] (optional, w x h bytes):
+     * subject-segmentation confidence, used where the colour samples cannot tell hair from
+     * background.
+     */
     fun refineEdges(
         source: Bitmap,
         mask: Bitmap,
-        config: RefineEdgeConfig
+        config: RefineEdgeConfig,
+        refineArea: ByteArray? = null,
+        aiAlpha: ByteArray? = null
     ): RefineResult {
         require(source.width == mask.width && source.height == mask.height) {
             "Source and mask dimensions must match"
@@ -98,13 +113,17 @@ object RefineEdgeEngine {
         }
 
         // No edge detection: only the global refinements.
-        if (config.radiusPx <= 0) {
+        val area = refineArea?.takeIf { it.size == n }
+        val ai = aiAlpha?.takeIf { it.size == n }
+        if (config.radiusPx <= 0 && area == null) {
             return RefineResult(globalRefinements(alpha, w, h, config), null)
         }
 
         // --- 2. Trimap ---------------------------------------------------------------------------
         val radius = config.radiusPx.coerceIn(1, 64)
         val tri = buildTrimap(alpha, w, h, radius, config.smartRadius)
+        // Refine Edge Brush: painted pixels are always estimated.
+        if (area != null) for (i in 0 until n) if ((area[i].toInt() and 0xFF) >= 128) tri[i] = TRI_UNKNOWN
 
         // Bounding box of the band; nothing to refine → only the global post-processing applies.
         var minX = w; var minY = h; var maxX = -1; var maxY = -1
@@ -134,7 +153,8 @@ object RefineEdgeEngine {
         val decontaminated: Bitmap? = if (config.decontaminateColors) source.copy(Bitmap.Config.ARGB_8888, true) else null
 
         if (maxX >= 0) {
-            val maxWalk = (radius * 2 + 8).coerceIn(12, 96)
+            // Brushed areas can be wide: look further for definite foreground / background.
+            val maxWalk = if (area != null) max((radius * 2 + 8), 120).coerceAtMost(160) else (radius * 2 + 8).coerceIn(12, 96)
             val guideRadius = (radius / 2).coerceIn(2, 16)
             // Small eps keeps individual strands; larger eps gives smoother, cleaner edges.
             val eps = if (config.hairRefine) 1.5e-4f else 2e-3f
@@ -159,7 +179,7 @@ object RefineEdgeEngine {
                 refineTile(
                     px, rx0, ry0, rw, rh, cx0, cy0, cx1, cy1,
                     tri, alpha, out, w, maxWalk, guideRadius, eps,
-                    decontaminated, config.decontaminateAmount
+                    decontaminated, config.decontaminateAmount, ai
                 )
             }
         }
@@ -289,7 +309,8 @@ object RefineEdgeEngine {
         cx0: Int, cy0: Int, cx1: Int, cy1: Int,
         tri: ByteArray, inAlpha: ByteArray, out: ByteArray, w: Int,
         maxWalk: Int, guideRadius: Int, eps: Float,
-        decontaminated: Bitmap?, decontamAmount: Float
+        decontaminated: Bitmap?, decontamAmount: Float,
+        ai: ByteArray? = null
     ) {
         val rn = rw * rh
         // p = initial alpha for the guided filter; F/B colours of the chosen sample pair.
@@ -341,9 +362,11 @@ object RefineEdgeEngine {
                     }
                 }
                 val initial = (inAlpha[gi].toInt() and 0xFF) / 255f
+                val aiA = ai?.let { (it[gi].toInt() and 0xFF) / 255f }
                 if (nf == 0 || nb == 0) {
-                    // Only one side reachable: lean on it, otherwise keep the input value.
+                    // Only one side reachable: lean on it (or on the subject segmentation).
                     p[li] = when {
+                        aiA != null -> if (nf > 0) max(aiA, 0.5f * aiA + 0.4f) else if (nb > 0) min(aiA, 0.5f * aiA) else aiA
                         nf > 0 && nb == 0 -> max(initial, 0.85f)
                         nb > 0 && nf == 0 -> min(initial, 0.15f)
                         else -> initial
@@ -380,7 +403,15 @@ object RefineEdgeEngine {
                         if (cost < bestCost) { bestCost = cost; bestA = a; bestF = f; bestB = b }
                     }
                 }
-                p[li] = if (bestCost == Float.MAX_VALUE) initial else bestA
+                p[li] = when {
+                    // Colours cannot separate hair from background here: trust the segmentation.
+                    bestCost == Float.MAX_VALUE -> aiA ?: initial
+                    aiA != null -> {
+                        val amb = ((bestCost - 0.6f) / 1.5f).coerceIn(0f, 0.8f)
+                        bestA + (aiA - bestA) * amb
+                    }
+                    else -> bestA
+                }
                 fgColor[li] = bestF
                 bgColor[li] = bestB
                 estimated[li] = bestCost != Float.MAX_VALUE

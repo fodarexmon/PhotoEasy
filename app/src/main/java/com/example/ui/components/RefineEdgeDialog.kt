@@ -24,6 +24,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -51,26 +56,63 @@ import kotlin.math.round
 fun RefineEdgeDialog(
     initialConfig: RefineEdgeConfig = RefineEdgeConfig(),
     onDismiss: () -> Unit,
-    onApply: (RefineEdgeConfig) -> Unit,
+    onApply: (RefineEdgeConfig, List<com.example.ui.viewmodel.RefineStroke>) -> Unit,
     /** Live preview of the refined selection (null while computing / unavailable). */
     preview: android.graphics.Bitmap? = null,
     /** The same area before refinement (shown while Before is held). */
     previewOriginal: android.graphics.Bitmap? = null,
     previewMode: com.example.ui.viewmodel.RefinePreviewMode = com.example.ui.viewmodel.RefinePreviewMode.OVERLAY,
     onPreviewModeChange: (com.example.ui.viewmodel.RefinePreviewMode) -> Unit = {},
-    onRequestPreview: (RefineEdgeConfig) -> Unit = {},
+    onRequestPreview: (RefineEdgeConfig, List<com.example.ui.viewmodel.RefineStroke>) -> Unit = { _, _ -> },
+    /** How the preview's pixels map back to the layer (needed to paint with the refine brushes). */
+    previewGeom: com.example.ui.viewmodel.RefinePreviewGeom? = null,
     /** Longest side of the image: slider ranges scale with it. */
     documentMaxDim: Int = 2000
 ) {
     var cfg by remember { mutableStateOf(initialConfig) }
     val maxPx = max(20f, documentMaxDim / 25f)
 
+    // Refine brushes: strokes in layer-normalised coordinates; null mode = move / zoom.
+    val strokes = remember { mutableStateListOf<com.example.ui.viewmodel.RefineStroke>() }
+    var brushMode by remember { mutableStateOf<com.example.ui.viewmodel.RefineBrushMode?>(null) }
+    var brushDp by remember { mutableFloatStateOf(28f) }
+    var livePath by remember { mutableStateOf<List<Offset>?>(null) }
+    var boxSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+
     // Every change re-renders the preview (the ViewModel debounces briefly).
-    LaunchedEffect(cfg, previewMode) { onRequestPreview(cfg) }
+    LaunchedEffect(cfg, previewMode, strokes.size) { onRequestPreview(cfg, strokes.toList()) }
 
     var zoom by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
     var showBefore by remember { mutableStateOf(false) }
+    val density = androidx.compose.ui.platform.LocalDensity.current
+
+    /** Screen point in the preview box -> layer-normalised point, or null outside the image. */
+    fun toLayer(p: Offset): android.graphics.PointF? {
+        val g = previewGeom ?: return null
+        val pad = with(density) { 4.dp.toPx() }
+        val innerW = boxSize.width - 2 * pad; val innerH = boxSize.height - 2 * pad
+        if (innerW <= 0f || innerH <= 0f) return null
+        val fit = minOf(innerW / g.w, innerH / g.h)
+        val cx = boxSize.width / 2f; val cy = boxSize.height / 2f
+        // Undo the zoom / pan (graphicsLayer scales around the centre), then the Fit placement.
+        val lx = (p.x - cx - pan.x) / zoom + cx; val ly = (p.y - cy - pan.y) / zoom + cy
+        val bx = (lx - (cx - g.w * fit / 2f)) / fit; val by = (ly - (cy - g.h * fit / 2f)) / fit
+        val u = (g.crop.left + bx * g.crop.width() / g.w) / g.proxyW
+        val v = (g.crop.top + by * g.crop.height() / g.h) / g.proxyH
+        return android.graphics.PointF(u, v)
+    }
+
+    /** Brush radius (screen dp) as a fraction of the layer's longer side. */
+    fun brushRadius(): Float {
+        val g = previewGeom ?: return 0.01f
+        val pad = with(density) { 4.dp.toPx() }
+        val fit = minOf((boxSize.width - 2 * pad) / g.w, (boxSize.height - 2 * pad) / g.h).coerceAtLeast(1e-3f)
+        val px = with(density) { brushDp.dp.toPx() } / 2f
+        val previewPx = px / (fit * zoom)
+        val proxyPx = previewPx * g.crop.width() / g.w
+        return proxyPx / maxOf(g.proxyW, g.proxyH)
+    }
 
     Dialog(
         onDismissRequest = onDismiss,
@@ -116,10 +158,39 @@ fun RefineEdgeDialog(
                         .weight(0.95f)
                         .clipToBounds()
                         .background(Color.Black.copy(alpha = 0.35f), RoundedCornerShape(12.dp))
-                        .pointerInput(Unit) {
-                            detectTransformGestures { _, panChange, zoomChange, _ ->
-                                zoom = (zoom * zoomChange).coerceIn(1f, 8f)
-                                pan = if (zoom <= 1.001f) Offset.Zero else pan + panChange
+                        .onSizeChanged { boxSize = it }
+                        .pointerInput(brushMode, previewGeom) {
+                            // One finger paints with a refine brush (or moves the view); two fingers zoom.
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                val mode = brushMode
+                                val pts = mutableListOf(down.position)
+                                var multi = false
+                                while (true) {
+                                    val ev = awaitPointerEvent()
+                                    val pressed = ev.changes.filter { it.pressed }
+                                    if (pressed.isEmpty()) break
+                                    if (pressed.size > 1) {
+                                        multi = true
+                                        livePath = null
+                                        zoom = (zoom * ev.calculateZoom()).coerceIn(1f, 8f)
+                                        pan = if (zoom <= 1.001f) Offset.Zero else pan + ev.calculatePan()
+                                        ev.changes.forEach { it.consume() }
+                                    } else if (!multi && mode != null) {
+                                        pts.add(pressed[0].position)
+                                        livePath = pts.toList()
+                                        pressed[0].consume()
+                                    } else if (!multi && zoom > 1.001f) {
+                                        val c = pressed[0]
+                                        pan += c.position - c.previousPosition
+                                        c.consume()
+                                    }
+                                }
+                                if (!multi && mode != null) {
+                                    val mapped = pts.mapNotNull { toLayer(it) }
+                                    if (mapped.isNotEmpty()) strokes.add(com.example.ui.viewmodel.RefineStroke(mode, mapped, brushRadius()))
+                                }
+                                livePath = null
                             }
                         }
                         .pointerInput(Unit) {
@@ -141,6 +212,19 @@ fun RefineEdgeDialog(
                         )
                     } else {
                         CircularProgressIndicator(color = IndigoPrimary, modifier = Modifier.size(28.dp))
+                    }
+                    livePath?.let { path ->
+                        val col = when (brushMode) {
+                            com.example.ui.viewmodel.RefineBrushMode.ADD -> Color(0xFF34D399)
+                            com.example.ui.viewmodel.RefineBrushMode.SUBTRACT -> Color(0xFFF87171)
+                            else -> CyanAccent
+                        }
+                        androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+                            val pth = androidx.compose.ui.graphics.Path()
+                            path.forEachIndexed { i, o -> if (i == 0) pth.moveTo(o.x, o.y) else pth.lineTo(o.x, o.y) }
+                            drawPath(pth, col.copy(alpha = 0.45f), style = androidx.compose.ui.graphics.drawscope.Stroke(
+                                width = brushDp.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round))
+                        }
                     }
                     // Hold to compare with the selection before refinement.
                     Surface(
@@ -205,6 +289,50 @@ fun RefineEdgeDialog(
                     }
                 }
 
+                // Refine brushes (Photoshop's Refine Edge Brush, Brush to add / subtract).
+                Row(
+                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    listOf(
+                        null to R.string.refine_brush_move,
+                        com.example.ui.viewmodel.RefineBrushMode.REFINE to R.string.refine_brush_refine,
+                        com.example.ui.viewmodel.RefineBrushMode.ADD to R.string.refine_brush_add,
+                        com.example.ui.viewmodel.RefineBrushMode.SUBTRACT to R.string.refine_brush_subtract
+                    ).forEach { (m, label) ->
+                        FilterChip(
+                            selected = brushMode == m,
+                            onClick = { brushMode = m },
+                            label = { Text(stringResource(label), fontSize = 11.sp) },
+                            modifier = Modifier.heightIn(min = 36.dp).testTag("refine_brush_${m?.name?.lowercase() ?: "move"}")
+                        )
+                    }
+                    TextButton(onClick = { if (strokes.isNotEmpty()) strokes.removeAt(strokes.size - 1) }, enabled = strokes.isNotEmpty()) {
+                        Text(stringResource(R.string.refine_brush_undo), fontSize = 11.sp)
+                    }
+                    TextButton(onClick = { strokes.clear() }, enabled = strokes.isNotEmpty()) {
+                        Text(stringResource(R.string.refine_brush_clear), fontSize = 11.sp)
+                    }
+                }
+                if (brushMode != null) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(stringResource(R.string.refine_brush_size), color = Color.LightGray, fontSize = 11.sp)
+                        Slider(value = brushDp, onValueChange = { brushDp = it }, valueRange = 6f..120f, modifier = Modifier.weight(1f))
+                        Text("${brushDp.toInt()} dp", color = IndigoPrimary, fontSize = 11.sp)
+                    }
+                    Text(
+                        stringResource(
+                            when (brushMode) {
+                                com.example.ui.viewmodel.RefineBrushMode.REFINE -> R.string.refine_brush_refine_hint
+                                com.example.ui.viewmodel.RefineBrushMode.ADD -> R.string.refine_brush_add_hint
+                                else -> R.string.refine_brush_subtract_hint
+                            }
+                        ),
+                        color = Color.Gray, fontSize = 10.sp
+                    )
+                }
+
                 // Controls
                 Column(
                     modifier = Modifier
@@ -239,6 +367,13 @@ fun RefineEdgeDialog(
                             color = PinkAccent,
                             icon = true
                         ) { cfg = cfg.copy(hairRefine = it) }
+                        RefineSwitchRow(
+                            title = stringResource(R.string.refine_ai_assist),
+                            description = stringResource(R.string.refine_ai_assist_desc),
+                            checked = cfg.aiAssist,
+                            color = PinkAccent,
+                            icon = true
+                        ) { cfg = cfg.copy(aiAssist = it) }
                     }
 
                     // 2. Global refinements
@@ -292,7 +427,22 @@ fun RefineEdgeDialog(
                         )
                     }
 
-                    // 4. Decontaminate colours
+                    // 4. Output To
+                    RefineCard {
+                        Text(stringResource(R.string.refine_output_to), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            listOf(
+                                com.example.engine.RefineOutput.SELECTION to R.string.refine_out_selection,
+                                com.example.engine.RefineOutput.LAYER_MASK to R.string.refine_out_layer_mask,
+                                com.example.engine.RefineOutput.NEW_LAYER to R.string.refine_out_new_layer,
+                                com.example.engine.RefineOutput.NEW_LAYER_WITH_MASK to R.string.refine_out_new_layer_mask
+                            ).forEach { (o, label) ->
+                                FilterChip(selected = cfg.output == o, onClick = { cfg = cfg.copy(output = o) }, label = { Text(stringResource(label), fontSize = 11.sp) })
+                            }
+                        }
+                    }
+
+                    // 5. Decontaminate colours
                     RefineCard {
                         RefineSwitchRow(
                             title = stringResource(R.string.refine_decontaminate),
@@ -321,7 +471,7 @@ fun RefineEdgeDialog(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     OutlinedButton(
-                        onClick = { cfg = RefineEdgeConfig() },
+                        onClick = { cfg = RefineEdgeConfig(); strokes.clear() },
                         modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("btn_reset_refine_edge")
                     ) {
                         Text(stringResource(R.string.action_reset), fontSize = 12.sp, maxLines = 1)
@@ -333,7 +483,7 @@ fun RefineEdgeDialog(
                         Text(stringResource(R.string.action_cancel), fontSize = 12.sp, maxLines = 1)
                     }
                     Button(
-                        onClick = { onApply(cfg) },
+                        onClick = { onApply(cfg, strokes.toList()) },
                         colors = ButtonDefaults.buttonColors(containerColor = IndigoPrimary),
                         modifier = Modifier.weight(1.3f).heightIn(min = 48.dp).testTag("btn_apply_refine_edge")
                     ) {

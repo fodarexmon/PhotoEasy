@@ -208,7 +208,7 @@ fun EditorScreen(
     val isRefineEdgeDialogOpen = uiState.isRefineEdgeDialogOpen
     val onOpenRefineEdgeDialog: () -> Unit = { viewModel.openRefineEdgeDialog() }
     val onCloseRefineEdgeDialog: () -> Unit = { viewModel.closeRefineEdgeDialog() }
-    val onApplyRefineEdge: (com.example.engine.RefineEdgeConfig) -> Unit = { viewModel.applyRefineEdgeMatting(it) }
+    val onApplyRefineEdge: (com.example.engine.RefineEdgeConfig, List<com.example.ui.viewmodel.RefineStroke>) -> Unit = { cfg, strokes -> viewModel.applyRefineEdgeMatting(cfg, strokes) }
     val onSelectSubject: () -> Unit = { viewModel.autoSelectSubject() }
     val isMagneticSnap = uiState.isMagneticSnapEnabled
     val onToggleMagneticSnap: () -> Unit = { viewModel.toggleMagneticSnap() }
@@ -290,7 +290,7 @@ fun EditorScreen(
     val refinePreview = uiState.refinePreview
     val refinePreviewMode = uiState.refinePreviewMode
     val onRefinePreviewModeChange: (com.example.ui.viewmodel.RefinePreviewMode) -> Unit = { viewModel.setRefinePreviewMode(it) }
-    val onRequestRefinePreview: (com.example.engine.RefineEdgeConfig) -> Unit = { viewModel.requestRefinePreview(it) }
+    val onRequestRefinePreview: (com.example.engine.RefineEdgeConfig, List<com.example.ui.viewmodel.RefineStroke>) -> Unit = { cfg, strokes -> viewModel.requestRefinePreview(cfg, strokes) }
     val exportSuccessUri = uiState.exportSuccessUri
     val onExportResultConsumed: () -> Unit = { viewModel.consumeExportResult() }
     val onRenameProject: (String) -> Unit = { name -> viewModel.renameProject(project.id, name) }
@@ -1705,6 +1705,7 @@ fun EditorScreen(
             previewMode = refinePreviewMode,
             onPreviewModeChange = onRefinePreviewModeChange,
             onRequestPreview = onRequestRefinePreview,
+            previewGeom = uiState.refinePreviewGeom,
             documentMaxDim = maxOf(project.width, project.height)
         )
     }

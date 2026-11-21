@@ -299,6 +299,31 @@ class ProToolsTest {
         assertTrue(lum(e.output[105 * 200 + 75]) > lum(Color.rgb(122, 74, 64)) + 30)
     }
 
+    // --- Refine Edge Brush and AI assist -----------------------------------------------------
+
+    @Test
+    fun `refine edge brush mattes painted areas far from the selection edge`() {
+        val w = 80; val h = 40
+        val red = Color.rgb(220, 30, 30); val blue = Color.rgb(30, 30, 220); val mixed = Color.rgb(125, 30, 125)
+        val img = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        for (y in 0 until h) for (x in 0 until w) img.setPixel(x, y, when { x < 30 -> red; x in 50..53 -> mixed; else -> blue })
+        val mask = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
+        android.graphics.Canvas(mask).drawRect(0f, 0f, 30f, h.toFloat(), android.graphics.Paint().apply { color = Color.BLACK })
+        val cfg = com.example.engine.RefineEdgeConfig(radiusPx = 3, smartRadius = false)
+        val plain = com.example.engine.RefineEdgeEngine.refineEdges(img, mask, cfg).refinedMask
+        assertTrue(Color.alpha(plain.getPixel(51, 20)) < 20)
+        val area = ByteArray(w * h) { i -> if (i % w in 44..60) 255.toByte() else 0 }
+        val brushed = com.example.engine.RefineEdgeEngine.refineEdges(img, mask, cfg, area).refinedMask
+        val a = Color.alpha(brushed.getPixel(51, 20))
+        assertTrue("strand alpha $a", a in 60..200)
+        assertTrue(Color.alpha(brushed.getPixel(58, 20)) < 40)
+        // Where colours cannot separate (same colour both sides), the AI confidence decides.
+        val flat = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { eraseColor(red) }
+        val ai = ByteArray(w * h) { i -> if (i % w < 45) 255.toByte() else 0 }
+        val withAi = com.example.engine.RefineEdgeEngine.refineEdges(flat, mask, cfg, area, ai).refinedMask
+        assertTrue(Color.alpha(withAi.getPixel(52, 20)) < 40)
+    }
+
     // --- Frequency separation ---------------------------------------------------------------
 
     @Test
