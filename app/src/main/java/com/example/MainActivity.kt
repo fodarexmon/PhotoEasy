@@ -101,6 +101,7 @@ class MainActivity : AppCompatActivity() {
                                 },
                                 onOpenSampleProject = { viewModel.openSampleProject() },
                                 onDeleteProject = { viewModel.deleteProject(it) },
+                                onDeleteProjects = { viewModel.deleteProjects(it) },
                                 onRenameProject = { id, name -> viewModel.renameProject(id, name) },
                                 onOpenSettings = { viewModel.navigateTo(Screen.SETTINGS) }
                             )

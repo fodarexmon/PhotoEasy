@@ -1095,4 +1095,11 @@
     <string name="tool_heal">معالجة موضعية</string>
     <string name="heal_info">ارسم فوق البثرة أو البقعة أو العنصر الصغير: عند رفع إصبعك تُستبدل بنسيج من أنسب منطقة حولها مع دمج اللون بسلاسة.</string>
     <string name="heal_failed">لا توجد منطقة مناسبة حولها للمعالجة. جرّب ضربة أصغر.</string>
+    <string name="projects_select">تحديد</string>
+    <string name="projects_selected">%1$d محدد</string>
+    <string name="projects_select_all">تحديد الكل</string>
+    <string name="projects_select_none">إلغاء تحديد الكل</string>
+    <string name="delete_projects_title">حذف %1$d من المشاريع؟</string>
+    <string name="delete_projects_message">سيتم حذف المشاريع المحددة وكل طبقاتها نهائياً. لا يمكن التراجع عن ذلك.</string>
+    <string name="cd_selected">محدد</string>
 </resources>

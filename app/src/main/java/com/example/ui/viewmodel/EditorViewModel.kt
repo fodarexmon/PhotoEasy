@@ -780,6 +780,24 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /** Deletes several projects at once, then refreshes the list a single time. */
+    fun deleteProjects(projectIds: Collection<String>) {
+        if (projectIds.isEmpty()) return
+        viewModelScope.launch {
+            val ids = projectIds.toSet()
+            for (id in ids) repository.deleteProject(id)
+            val last = prefs.getString("last_opened_project_id", null)
+            if (_uiState.value.recoveryProjectId in ids || last in ids) {
+                prefs.edit().remove("last_opened_project_id").apply()
+                _uiState.value = _uiState.value.copy(recoveryProjectId = null)
+            }
+            if (_uiState.value.currentProject?.id in ids) {
+                _uiState.value = _uiState.value.copy(currentProject = null, currentScreen = Screen.HOME)
+            }
+            loadProjects()
+        }
+    }
+
     fun deleteProject(projectId: String) {
         viewModelScope.launch {
             repository.deleteProject(projectId)

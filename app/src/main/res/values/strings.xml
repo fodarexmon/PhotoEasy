@@ -1091,4 +1091,11 @@
     <string name="tool_heal">Spot Healing</string>
     <string name="heal_info">Paint over a blemish, spot or small object: when you lift your finger it is replaced by texture from the best matching area around it, with the colour blended in.</string>
     <string name="heal_failed">No suitable area around to heal from. Try a smaller stroke.</string>
+    <string name="projects_select">Select</string>
+    <string name="projects_selected">%1$d selected</string>
+    <string name="projects_select_all">Select all</string>
+    <string name="projects_select_none">Deselect all</string>
+    <string name="delete_projects_title">Delete %1$d projects?</string>
+    <string name="delete_projects_message">The selected projects and all their layers will be permanently deleted. This cannot be undone.</string>
+    <string name="cd_selected">Selected</string>
 </resources>

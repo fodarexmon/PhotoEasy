@@ -6,6 +6,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -113,12 +116,25 @@ fun HomeScreen(
     onImportImageUri: (Uri) -> Unit,
     onOpenSampleProject: () -> Unit = {},
     onDeleteProject: (String) -> Unit,
+    /** Deletes several projects at once (multi-selection). */
+    onDeleteProjects: (Set<String>) -> Unit = { ids -> ids.forEach(onDeleteProject) },
     onRenameProject: (id: String, newName: String) -> Unit = { _, _ -> },
     onOpenSettings: () -> Unit
 ) {
     var pendingRenameProject by remember { mutableStateOf<ProjectSummary?>(null) }
     var showNewCanvasDialog by remember { mutableStateOf(false) }
     var pendingDeleteProject by remember { mutableStateOf<ProjectSummary?>(null) }
+    // Multi-selection: a long press on a project starts it; then taps select / deselect.
+    var selectedIds by remember { mutableStateOf(emptySet<String>()) }
+    var selectionMode by remember { mutableStateOf(false) }
+    var confirmDeleteSelected by remember { mutableStateOf(false) }
+    // Projects deleted elsewhere drop out of the selection.
+    LaunchedEffect(projects) {
+        val ids = projects.map { it.id }.toSet()
+        selectedIds = selectedIds.intersect(ids)
+        if (projects.isEmpty()) selectionMode = false
+    }
+    androidx.activity.compose.BackHandler(enabled = selectionMode) { selectionMode = false; selectedIds = emptySet() }
     val snackbarHostState = remember { SnackbarHostState() }
 
     // Results (e.g. "import failed") are shown here; progress text is shown by the overlay below.
@@ -313,12 +329,49 @@ fun HomeScreen(
 
                 Spacer(modifier = Modifier.height(24.dp))
 
-                Text(
-                    text = stringResource(R.string.recent_projects),
-                    style = MaterialTheme.typography.titleMedium,
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold
-                )
+                if (selectionMode) {
+                    // Selection bar: count, select all, delete, cancel.
+                    Row(
+                        modifier = Modifier.fillMaxWidth().testTag("project_selection_bar"),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = { selectionMode = false; selectedIds = emptySet() }) {
+                            Icon(Icons.Default.Close, contentDescription = stringResource(R.string.action_cancel), tint = Color.White)
+                        }
+                        Text(
+                            text = stringResource(R.string.projects_selected, selectedIds.size),
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.weight(1f)
+                        )
+                        val all = selectedIds.size == projects.size && projects.isNotEmpty()
+                        TextButton(onClick = { selectedIds = if (all) emptySet() else projects.map { it.id }.toSet() }) {
+                            Text(stringResource(if (all) R.string.projects_select_none else R.string.projects_select_all), color = IndigoPrimary)
+                        }
+                        IconButton(
+                            onClick = { if (selectedIds.isNotEmpty()) confirmDeleteSelected = true },
+                            enabled = selectedIds.isNotEmpty(),
+                            modifier = Modifier.testTag("btn_delete_selected")
+                        ) {
+                            Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.action_delete), tint = if (selectedIds.isNotEmpty()) Color(0xFFF87171) else Color.Gray)
+                        }
+                    }
+                } else {
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = stringResource(R.string.recent_projects),
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (projects.isNotEmpty()) {
+                            TextButton(onClick = { selectionMode = true }, modifier = Modifier.testTag("btn_select_projects")) {
+                                Text(stringResource(R.string.projects_select), color = IndigoPrimary)
+                            }
+                        }
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(12.dp))
 
@@ -377,9 +430,19 @@ fun HomeScreen(
                         modifier = Modifier.weight(1f)
                     ) {
                         items(projects, key = { it.id }) { proj ->
+                            val selected = proj.id in selectedIds
                             ProjectCard(
                                 project = proj,
-                                onClick = { onOpenProject(proj) },
+                                onClick = {
+                                    if (selectionMode) selectedIds = if (selected) selectedIds - proj.id else selectedIds + proj.id
+                                    else onOpenProject(proj)
+                                },
+                                onLongClick = {
+                                    if (!selectionMode) { selectionMode = true; selectedIds = setOf(proj.id) }
+                                    else selectedIds = if (selected) selectedIds - proj.id else selectedIds + proj.id
+                                },
+                                selectionMode = selectionMode,
+                                selected = selected,
                                 onDeleteClick = { pendingDeleteProject = proj },
                                 onRenameClick = { pendingRenameProject = proj }
                             )
@@ -442,6 +505,30 @@ fun HomeScreen(
         )
     }
 
+    if (confirmDeleteSelected) {
+        AlertDialog(
+            onDismissRequest = { confirmDeleteSelected = false },
+            title = { Text(stringResource(R.string.delete_projects_title, selectedIds.size)) },
+            text = { Text(stringResource(R.string.delete_projects_message)) },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val ids = selectedIds
+                        confirmDeleteSelected = false
+                        selectionMode = false
+                        selectedIds = emptySet()
+                        onDeleteProjects(ids)
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                    modifier = Modifier.testTag("btn_confirm_delete_selected")
+                ) { Text(stringResource(R.string.delete_project_confirm)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDeleteSelected = false }) { Text(stringResource(R.string.action_cancel)) }
+            }
+        )
+    }
+
     if (showNewCanvasDialog) {
         NewCanvasDialog(
             onDismiss = { showNewCanvasDialog = false },
@@ -453,21 +540,26 @@ fun HomeScreen(
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun ProjectCard(
     project: ProjectSummary,
     onClick: () -> Unit,
     onDeleteClick: () -> Unit,
-    onRenameClick: () -> Unit = {}
+    onRenameClick: () -> Unit = {},
+    onLongClick: () -> Unit = {},
+    selectionMode: Boolean = false,
+    selected: Boolean = false
 ) {
     var showMenu by remember { mutableStateOf(false) }
 
     Card(
         shape = RoundedCornerShape(12.dp),
         colors = CardDefaults.cardColors(containerColor = StudioSurface),
+        border = if (selected) androidx.compose.foundation.BorderStroke(2.dp, IndigoPrimary) else null,
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onClick() }
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .testTag("project_card_${project.id}")
     ) {
         Column {
@@ -503,6 +595,20 @@ private fun ProjectCard(
                         modifier = Modifier.size(36.dp)
                     )
                 }
+                if (selectionMode) {
+                    // Check mark in the corner: filled when selected.
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp)
+                            .size(26.dp)
+                            .background(if (selected) IndigoPrimary else Color.Black.copy(alpha = 0.45f), androidx.compose.foundation.shape.CircleShape)
+                            .border(2.dp, Color.White, androidx.compose.foundation.shape.CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (selected) Icon(Icons.Default.Check, contentDescription = stringResource(R.string.cd_selected), tint = Color.White, modifier = Modifier.size(16.dp))
+                    }
+                }
             }
 
             Row(
@@ -527,7 +633,7 @@ private fun ProjectCard(
                     )
                 }
 
-                Box {
+                if (!selectionMode) Box {
                     IconButton(onClick = { showMenu = true }, modifier = Modifier.size(48.dp)) {
                         Icon(Icons.Default.MoreVert, contentDescription = stringResource(R.string.cd_more), tint = Color.Gray)
                     }
