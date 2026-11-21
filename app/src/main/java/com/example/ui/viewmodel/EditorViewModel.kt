@@ -4107,6 +4107,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private class GradientDrag(val layer: Layer, val start: PointF, val selection: Bitmap?)
     /** Fill in gradient mode: where the drag started. */
     private var gradientStart: GradientDrag? = null
+    /** Stroke points not painted yet (merged moves), see [retouchSegment]. */
+    private val pendingMove = ArrayList<PointF>()
+    private var pendingMoveRadius = 0f
+    private var moveQueued = false
+    private fun takePendingMove(): List<PointF> = synchronized(pendingMove) {
+        moveQueued = false
+        ArrayList(pendingMove).also { pendingMove.clear() }
+    }
+    /** Last time the canvas was asked to redraw during a stroke (redraws are throttled). */
+    private var lastRetouchBump = 0L
     /** Patch's lasso points while it is being drawn (document coordinates). */
     private var patchLasso: MutableList<PointF>? = null
     private var retouchStrokeRejected = false
@@ -4278,8 +4288,17 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             queueRetouch(RetouchEvent.Patch(layer, proj.width, proj.height, sel, end.x - start.x, end.y - start.y))
             return
         }
-        if (phase == StrokePhase.MOVE) retouchEvents.trySend(RetouchEvent.Move(points.toList(), docRadius))
-        else retouchEvents.trySend(RetouchEvent.End(points.toList(), docRadius))
+        if (phase == StrokePhase.MOVE) {
+            // Moves are merged: while one is waiting, new points join it instead of queueing
+            // another event, so a slow brush (big image) never falls behind the finger.
+            synchronized(pendingMove) {
+                pendingMove.addAll(points)
+                pendingMoveRadius = docRadius
+                if (moveQueued) return
+                moveQueued = true
+            }
+            retouchEvents.trySend(RetouchEvent.Move(emptyList(), docRadius))
+        } else retouchEvents.trySend(RetouchEvent.End(points.toList(), docRadius))
     }
 
     /**
@@ -4386,7 +4405,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val last = points.lastOrNull()
         val off = strokeOffsetDoc
         val marker = if (last != null && off != null) PointF(last.x + off.x, last.y + off.y) else null
-        if (changed != null || marker != null) bumpRetouchRender(marker)
+        // The canvas redraws the whole image: at most ~14 times a second while painting, so
+        // each redraw can finish (the end of the stroke always redraws).
+        val now = android.os.SystemClock.uptimeMillis()
+        if ((changed != null || marker != null) && now - lastRetouchBump >= 70L) {
+            lastRetouchBump = now
+            bumpRetouchRender(marker)
+        }
     }
 
     /** Shows the live preview changes without recording history. */
@@ -4417,13 +4442,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 paintRetouch(session.canvas, ev.points, ev.docRadius)
             }
             is RetouchEvent.Move -> {
+                val pts = takePendingMove()
                 if (retouchStrokeFailed) return
                 val session = retouchSession ?: return
-                paintRetouch(session.canvas, ev.points, ev.docRadius)
+                if (pts.isNotEmpty()) paintRetouch(session.canvas, pts, pendingMoveRadius.takeIf { it > 0f } ?: ev.docRadius)
             }
             is RetouchEvent.End -> {
+                val pts = takePendingMove()
                 if (retouchStrokeFailed) { retouchStrokeFailed = false; return }
                 val session = retouchSession ?: return
+                if (pts.isNotEmpty()) paintRetouch(session.canvas, pts, ev.docRadius)
                 paintRetouch(session.canvas, ev.points, ev.docRadius)
                 withContext(retouchDispatcher) { session.canvas.endStroke() }
                 commitRetouch(session)
@@ -4514,7 +4542,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val job = viewModelScope.launch(retouchWriteDispatcher) {
             try {
                 val tmp = File(file.path + ".tmp")
-                if (ImageProcessor.saveLosslessBitmap(snapshot, tmp)) {
+                if (ImageProcessor.saveLosslessBitmap(snapshot, tmp, fast = true)) {
                     if (!tmp.renameTo(file)) { file.delete(); tmp.renameTo(file) }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {

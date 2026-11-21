@@ -309,10 +309,16 @@ object ImageProcessor {
         return Bitmap.createScaledBitmap(source, (source.width*r).toInt().coerceAtLeast(1), (source.height*r).toInt().coerceAtLeast(1), true)
     }
 
-    fun saveLosslessBitmap(bitmap: Bitmap, file: File): Boolean = try {
+    /**
+     * Saves without any loss. [fast]: much quicker encoding for frequent saves (e.g. after every
+     * brush stroke) at the cost of a somewhat larger file; the pixels are identical either way.
+     */
+    fun saveLosslessBitmap(bitmap: Bitmap, file: File, fast: Boolean = false): Boolean = try {
         file.parentFile?.mkdirs()
         FileOutputStream(file).use { out ->
-            val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) bitmap.compress(Bitmap.CompressFormat.WEBP_LOSSLESS, 100, out) else bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+            // For lossless WebP / PNG the "quality" is only the compression effort.
+            val effort = if (fast) 10 else 100
+            val ok = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) bitmap.compress(Bitmap.CompressFormat.WEBP_LOSSLESS, effort, out) else bitmap.compress(Bitmap.CompressFormat.PNG, effort, out)
             out.flush(); out.fd.sync(); ok
         }
     } catch (e: Exception) { Log.e("ImageProcessor", "lossless save failed", e); false }

@@ -114,6 +114,7 @@ fun RefineEdgeDialog(
         return proxyPx / maxOf(g.proxyW, g.proxyH)
     }
 
+    val barsPadding = hostSystemBarsPadding()
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)
@@ -123,7 +124,7 @@ fun RefineEdgeDialog(
             color = StudioSurface,
             border = BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)),
             modifier = Modifier
-                .safeDrawingPadding()
+                .padding(barsPadding)
                 .fillMaxWidth(0.96f)
                 .fillMaxHeight(0.94f)
                 .padding(6.dp)
