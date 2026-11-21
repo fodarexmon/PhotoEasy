@@ -140,6 +140,8 @@ fun LiquifyDialog(
     var faces by remember { mutableStateOf<List<com.example.engine.FaceGeometry>?>(null) }
     val faceAdjust = remember { mutableStateListOf<com.example.engine.FaceAdjust>() }
     var selectedFace by remember { mutableIntStateOf(0) }
+    /** The feature being dragged on the image (highlighted). */
+    var hoverRegion by remember { mutableStateOf<FaceDrag?>(null) }
     val faceSeq = remember { java.util.concurrent.atomic.AtomicInteger(0) }
     fun pushFaces() {
         val list = faces ?: return
@@ -275,8 +277,23 @@ fun LiquifyDialog(
                                 val down = awaitFirstDown()
                                 var viewMode = false
                                 var last = down.position
-                                // On the Face tab one finger does nothing (sliders only); two fingers still zoom.
+                                // On the Face tab one finger drags a feature of the selected face (like
+                                // Photoshop's on-image handles); two fingers still zoom.
                                 var viewOnly = faceTab
+                                val faceList = faces
+                                var drag: FaceDrag? = null
+                                var dragStart: com.example.engine.FaceAdjust? = null
+                                var dragFace = -1
+                                if (faceTab && faceList != null && faceList.isNotEmpty()) {
+                                    val ip = toImage(down.position)
+                                    // A touch inside another face's box selects that face.
+                                    val hitFace = faceList.indices.firstOrNull { i -> faceList[i].box.contains(ip.x, ip.y) && i != selectedFace }
+                                    if (hitFace != null && !faceList[selectedFace.coerceIn(0, faceList.size - 1)].box.contains(ip.x, ip.y)) selectedFace = hitFace
+                                    dragFace = selectedFace.coerceIn(0, faceList.size - 1)
+                                    drag = faceRegion(faceList[dragFace], ip.x, ip.y)
+                                    dragStart = faceAdjust.getOrNull(dragFace)
+                                    hoverRegion = drag
+                                }
                                 if (!viewOnly) {
                                     cursor = last
                                     events.trySend(LiquifyEvent.Begin)
@@ -296,6 +313,17 @@ fun LiquifyDialog(
                                         viewScale = (viewScale * zoom).coerceIn(1f, 12f)
                                         viewOffset += pan
                                         ev.changes.forEach { it.consume() }
+                                    } else if (!viewMode && viewOnly && drag != null && dragStart != null && faceList != null) {
+                                        // Feature drag: the finger's movement in the face's own axes.
+                                        val g = faceList[dragFace]
+                                        val a0 = toImage(down.position); val a1 = toImage(pressed[0].position)
+                                        val dx = a1.x - a0.x; val dy = a1.y - a0.y
+                                        val dlx = dx * g.ax.x + dy * g.ax.y; val dly = dx * g.ay.x + dy * g.ay.y
+                                        if (dragFace in faceAdjust.indices) {
+                                            faceAdjust[dragFace] = applyFaceDrag(dragStart!!, drag!!, g, a0.x, a0.y, dlx, dly)
+                                            pushFaces()
+                                        }
+                                        pressed[0].consume()
                                     } else if (!viewMode && !viewOnly) {
                                         val pos = pressed[0].position
                                         val a = toImage(last); val b = toImage(pos)
@@ -317,6 +345,7 @@ fun LiquifyDialog(
                                 }
                                 holding = false
                                 cursor = null
+                                hoverRegion = null
                             }
                         }
                 ) {
@@ -355,8 +384,25 @@ fun LiquifyDialog(
                                 fun sp(p: android.graphics.PointF) = Offset(o.x + p.x * s, o.y + p.y * s)
                                 drawRect(col, Offset(o.x + g.box.left * s, o.y + g.box.top * s),
                                     androidx.compose.ui.geometry.Size(g.box.width() * s, g.box.height() * s), style = Stroke(if (sel) 2f else 1f))
-                                if (sel) listOf(g.eye1, g.eye2, g.noseBase, g.mouthLeft, g.mouthRight, g.chin, g.forehead).forEach {
-                                    drawCircle(Color.Black.copy(alpha = 0.6f), 5f, sp(it)); drawCircle(col, 3.5f, sp(it))
+                                if (sel) {
+                                    // Feature outlines (the areas that can be dragged).
+                                    val hi = hoverRegion
+                                    fun stroke(region: FaceDrag) = if (hi == region) Color(0xFF22D3EE) else Color.White.copy(alpha = 0.55f)
+                                    g.oval?.let { pts ->
+                                        val path = androidx.compose.ui.graphics.Path()
+                                        pts.forEachIndexed { i, q -> val o2 = sp(q); if (i == 0) path.moveTo(o2.x, o2.y) else path.lineTo(o2.x, o2.y) }
+                                        path.close()
+                                        drawPath(path, Color.Black.copy(alpha = 0.4f), style = Stroke(3f))
+                                        drawPath(path, if (hi == FaceDrag.JAW || hi == FaceDrag.FACE_WIDTH) Color(0xFF22D3EE) else Color.White.copy(alpha = 0.55f), style = Stroke(1.5f))
+                                    }
+                                    listOf(g.eye1 to FaceDrag.EYE_LEFT, g.eye2 to FaceDrag.EYE_RIGHT).forEach { (e, r) ->
+                                        drawCircle(stroke(r), g.eyeW * 0.6f * s, sp(e), style = Stroke(1.5f))
+                                    }
+                                    drawCircle(stroke(FaceDrag.NOSE), g.noseW * 0.6f * s, sp(g.noseBase), style = Stroke(1.5f))
+                                    drawLine(stroke(FaceDrag.MOUTH), sp(g.mouthLeft), sp(g.mouthRight), 2f)
+                                    listOf(g.eye1, g.eye2, g.noseBase, g.mouthLeft, g.mouthRight, g.chin, g.forehead).forEach {
+                                        drawCircle(Color.Black.copy(alpha = 0.6f), 5f, sp(it)); drawCircle(col, 3.5f, sp(it))
+                                    }
                                 }
                             }
                         }
@@ -467,11 +513,32 @@ private fun FaceAwarePanel(
                     if (faces.size > 1) TextButton(onClick = onResetAll) { Text(stringResource(R.string.face_reset_all), color = AmberAccent, fontSize = 12.sp) }
                 }
                 FaceSection(R.string.face_sec_eyes)
-                FaceSlider(R.string.face_eye_size, a.eyeSize) { set(a.copy(eyeSize = it)) }
-                FaceSlider(R.string.face_eye_height, a.eyeHeight) { set(a.copy(eyeHeight = it)) }
-                FaceSlider(R.string.face_eye_width, a.eyeWidth) { set(a.copy(eyeWidth = it)) }
-                FaceSlider(R.string.face_eye_tilt, a.eyeTilt) { set(a.copy(eyeTilt = it)) }
-                FaceSlider(R.string.face_eye_distance, a.eyeDistance) { set(a.copy(eyeDistance = it)) }
+                Text(stringResource(R.string.face_drag_hint), color = Color.Gray, fontSize = 10.sp)
+                // Photoshop's eye link: both eyes together, or each one on its own.
+                var eyeIdx by remember { mutableIntStateOf(0) }
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.horizontalScroll(rememberScrollState())) {
+                    FilterChip(
+                        selected = a.eyesLinked,
+                        onClick = { set(if (a.eyesLinked) a.unlinked() else a.copy(eyesLinked = true)) },
+                        label = { Text(stringResource(if (a.eyesLinked) R.string.face_eyes_linked else R.string.face_eyes_unlinked), fontSize = 12.sp) },
+                        leadingIcon = { Icon(if (a.eyesLinked) Icons.Default.Link else Icons.Default.LinkOff, contentDescription = null, modifier = Modifier.size(16.dp)) },
+                        modifier = Modifier.testTag("face_eye_link")
+                    )
+                    if (!a.eyesLinked) {
+                        Spacer(Modifier.width(6.dp))
+                        FilterChip(selected = eyeIdx == 0, onClick = { eyeIdx = 0 }, label = { Text(stringResource(R.string.face_eye_left), fontSize = 12.sp) })
+                        Spacer(Modifier.width(6.dp))
+                        FilterChip(selected = eyeIdx == 1, onClick = { eyeIdx = 1 }, label = { Text(stringResource(R.string.face_eye_right), fontSize = 12.sp) })
+                    }
+                }
+                val e = if (a.eyesLinked) 0 else eyeIdx
+                val ev = a.eye(e)
+                fun setEye(slot: Int, v: Float) = set(withEyeValue(a, e, slot, v))
+                FaceSlider(R.string.face_eye_size, ev[0]) { setEye(0, it) }
+                FaceSlider(R.string.face_eye_height, ev[1]) { setEye(1, it) }
+                FaceSlider(R.string.face_eye_width, ev[2]) { setEye(2, it) }
+                FaceSlider(R.string.face_eye_tilt, ev[3]) { setEye(3, it) }
+                FaceSlider(R.string.face_eye_distance, ev[4]) { setEye(4, it) }
                 FaceSlider(R.string.face_eye_brightness, a.eyeBrightness, 0f..100f) { set(a.copy(eyeBrightness = it)) }
                 FaceSection(R.string.face_sec_nose)
                 FaceSlider(R.string.face_nose_height, a.noseHeight) { set(a.copy(noseHeight = it)) }
@@ -508,5 +575,69 @@ private fun FaceSlider(label: Int, value: Float, range: ClosedFloatingPointRange
         Text(stringResource(label), color = Color.LightGray, fontSize = 12.sp, modifier = Modifier.width(96.dp))
         Slider(value = value.coerceIn(range.start, range.endInclusive), onValueChange = { onValue(kotlin.math.round(it)) }, valueRange = range, modifier = Modifier.weight(1f))
         Text("${value.roundToInt()}", color = IndigoPrimary, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(36.dp))
+    }
+}
+
+
+/** Features of a face that can be dragged on the image (Photoshop's on-image face handles). */
+enum class FaceDrag { EYE_LEFT, EYE_RIGHT, NOSE, MOUTH, MOUTH_CORNER, FOREHEAD, CHIN, JAW, FACE_WIDTH }
+
+/** [a] with eye value [slot] (0 size, 1 height, 2 width, 3 tilt, 4 distance) of eye [eye] set to [v]. */
+internal fun withEyeValue(a: com.example.engine.FaceAdjust, eye: Int, slot: Int, v: Float): com.example.engine.FaceAdjust =
+    if (a.eyesLinked || eye == 0) when (slot) {
+        0 -> a.copy(eyeSize = v); 1 -> a.copy(eyeHeight = v); 2 -> a.copy(eyeWidth = v); 3 -> a.copy(eyeTilt = v); else -> a.copy(eyeDistance = v)
+    } else when (slot) {
+        0 -> a.copy(eye2Size = v); 1 -> a.copy(eye2Height = v); 2 -> a.copy(eye2Width = v); 3 -> a.copy(eye2Tilt = v); else -> a.copy(eye2Distance = v)
+    }
+
+/** Which feature of [g] a touch at image point (x, y) grabs, or null when it is not on the face. */
+internal fun faceRegion(g: com.example.engine.FaceGeometry, x: Float, y: Float): FaceDrag? {
+    fun d(p: android.graphics.PointF) = kotlin.math.hypot(x - p.x, y - p.y)
+    fun along(p: android.graphics.PointF, v: android.graphics.PointF) = (p.x - g.center.x) * v.x + (p.y - g.center.y) * v.y
+    val here = android.graphics.PointF(x, y)
+    val lx = along(here, g.ax); val ly = along(here, g.ay)
+    if (kotlin.math.abs(lx) > g.width * 0.75f || ly < -g.height * 0.75f || ly > g.height * 0.7f) return null
+    val mouthW = kotlin.math.hypot(g.mouthRight.x - g.mouthLeft.x, g.mouthRight.y - g.mouthLeft.y)
+    return when {
+        d(g.eye1) < g.eyeW * 0.9f -> FaceDrag.EYE_LEFT
+        d(g.eye2) < g.eyeW * 0.9f -> FaceDrag.EYE_RIGHT
+        d(g.mouthLeft) < mouthW * 0.22f || d(g.mouthRight) < mouthW * 0.22f -> FaceDrag.MOUTH_CORNER
+        d(g.mouthCenter) < mouthW * 0.6f -> FaceDrag.MOUTH
+        d(g.noseBase) < g.noseW * 0.9f -> FaceDrag.NOSE
+        ly < along(g.eye1, g.ay) - g.eyeH * 2.5f -> FaceDrag.FOREHEAD
+        ly > along(g.mouthCenter, g.ay) + g.mouthH && kotlin.math.abs(lx) < g.width * 0.22f -> FaceDrag.CHIN
+        ly > along(g.noseBase, g.ay) -> FaceDrag.JAW
+        else -> FaceDrag.FACE_WIDTH
+    }
+}
+
+/**
+ * [start] changed by a drag of (dlx, dly) image pixels in the face's own axes on [region] (touch
+ * started at x0, y0). About 30 % of the face width covers the whole -100..100 range.
+ */
+internal fun applyFaceDrag(
+    start: com.example.engine.FaceAdjust, region: FaceDrag, g: com.example.engine.FaceGeometry,
+    x0: Float, y0: Float, dlx: Float, dly: Float
+): com.example.engine.FaceAdjust {
+    val unit = (g.width * 0.003f).coerceAtLeast(0.5f)
+    fun v(base: Float, delta: Float) = (base + delta / unit).coerceIn(-100f, 100f).let { kotlin.math.round(it) }
+    // Outward (away from the face's centre line) is positive for sideways drags.
+    val side = if ((x0 - g.center.x) * g.ax.x + (y0 - g.center.y) * g.ax.y < 0f) -1f else 1f
+    val out = dlx * side
+    val vertical = kotlin.math.abs(dly) >= kotlin.math.abs(dlx)
+    return when (region) {
+        FaceDrag.EYE_LEFT, FaceDrag.EYE_RIGHT -> {
+            val e = if (region == FaceDrag.EYE_LEFT) 0 else 1
+            val ev = start.eye(e)
+            if (vertical) withEyeValue(start, e, 0, v(ev[0], -dly)) else withEyeValue(start, e, 4, v(ev[4], out))
+        }
+        FaceDrag.NOSE -> if (vertical) start.copy(noseHeight = v(start.noseHeight, dly)) else start.copy(noseWidth = v(start.noseWidth, out))
+        FaceDrag.MOUTH_CORNER -> if (vertical) start.copy(smile = v(start.smile, -dly)) else start.copy(mouthWidth = v(start.mouthWidth, out))
+        FaceDrag.MOUTH -> if (vertical) start.copy(mouthHeight = v(start.mouthHeight, kotlin.math.abs(dly) * (if ((y0 - g.mouthCenter.y) * g.ay.y + (x0 - g.mouthCenter.x) * g.ay.x < 0f) -kotlin.math.sign(dly) else kotlin.math.sign(dly))))
+            else start.copy(mouthWidth = v(start.mouthWidth, out))
+        FaceDrag.FOREHEAD -> start.copy(forehead = v(start.forehead, -dly))
+        FaceDrag.CHIN -> start.copy(chinHeight = v(start.chinHeight, dly))
+        FaceDrag.JAW -> start.copy(jawline = v(start.jawline, out))
+        FaceDrag.FACE_WIDTH -> start.copy(faceWidth = v(start.faceWidth, out))
     }
 }

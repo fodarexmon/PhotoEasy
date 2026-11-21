@@ -454,6 +454,33 @@ class ProToolsTest {
     }
 
     @Test
+    fun `unlinked eyes change one eye only and the jaw follows the real outline`() {
+        val g0 = face()
+        // Only the image-right eye is enlarged when the eyes are unlinked.
+        val a = com.example.engine.FaceAdjust().unlinked().copy(eye2Size = 100f)
+        val (dx, _) = com.example.engine.FaceWarp.field(listOf(g0 to a), 200, 200)!!
+        assertTrue(dx[80 * 200 + 124] < 0f)
+        assertEquals(0f, dx[80 * 200 + 76], 1e-4f)
+        // Outline (an ellipse) known: face width moves the outline outwards on both sides.
+        val oval = (0 until 36).map { i ->
+            val t = i * 2 * Math.PI / 36
+            android.graphics.PointF((100 + 40 * kotlin.math.cos(t)).toFloat(), (95 + 55 * kotlin.math.sin(t)).toFloat())
+        }
+        val g = g0.copy(oval = oval)
+        val (wx, _) = com.example.engine.FaceWarp.field(listOf(g to com.example.engine.FaceAdjust(faceWidth = 100f)), 200, 200)!!
+        // Right edge at mouth level: samples further in (content moved out) -> negative dx.
+        assertTrue(wx[120 * 200 + 140] < 0f)
+        assertTrue(wx[120 * 200 + 60] > 0f)
+        // Far from the face nothing moves.
+        assertEquals(0f, wx[5 * 200 + 5], 0f)
+        val (jx, _) = com.example.engine.FaceWarp.field(listOf(g to com.example.engine.FaceAdjust(jawline = -100f)), 200, 200)!!
+        // Narrower jaw: below the mouth the right side samples further out (content moved in).
+        assertTrue(jx[135 * 200 + 132] > 0f)
+        // Above the eyes the jaw setting does nothing.
+        assertEquals(0f, jx[55 * 200 + 140], 1e-3f)
+    }
+
+    @Test
     fun `eye brightness lifts the eyes only and liquify applies the face field`() {
         val g = face()
         val bright = com.example.engine.FaceWarp.eyeBrightener(listOf(g to com.example.engine.FaceAdjust(eyeBrightness = 100f)))!!

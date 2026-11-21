@@ -1102,4 +1102,9 @@
     <string name="delete_projects_title">حذف %1$d من المشاريع؟</string>
     <string name="delete_projects_message">سيتم حذف المشاريع المحددة وكل طبقاتها نهائياً. لا يمكن التراجع عن ذلك.</string>
     <string name="cd_selected">محدد</string>
+    <string name="face_drag_hint">تلميح: اسحب العين أو الأنف أو الفم أو الفك أو حافة الوجه مباشرة على الصورة.</string>
+    <string name="face_eyes_linked">العينان معاً</string>
+    <string name="face_eyes_unlinked">كل عين وحدها</string>
+    <string name="face_eye_left">العين اليسرى (في الصورة)</string>
+    <string name="face_eye_right">العين اليمنى (في الصورة)</string>
 </resources>

@@ -1098,4 +1098,9 @@
     <string name="delete_projects_title">Delete %1$d projects?</string>
     <string name="delete_projects_message">The selected projects and all their layers will be permanently deleted. This cannot be undone.</string>
     <string name="cd_selected">Selected</string>
+    <string name="face_drag_hint">Tip: drag an eye, the nose, the mouth, the jaw or the face edge directly on the image.</string>
+    <string name="face_eyes_linked">Both eyes</string>
+    <string name="face_eyes_unlinked">Each eye separately</string>
+    <string name="face_eye_left">Left eye (in image)</string>
+    <string name="face_eye_right">Right eye (in image)</string>
 </resources>
