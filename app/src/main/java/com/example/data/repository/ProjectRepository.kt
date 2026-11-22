@@ -34,6 +34,17 @@ import com.example.data.model.ProjectSummary
 
 class ProjectRepository(private val context: Context) {
 
+    companion object {
+        /** Before/After images: before_<layerId>_<w>_<h>.<ext>. */
+        const val BEFORE_PREFIX = "before_"
+        /** Marker in protected file names: keep the Before image of this layer id. */
+        const val BEFORE_KEEP_PREFIX = "keep-before:"
+        fun beforeLayerId(fileName: String): String? =
+            if (!fileName.startsWith(BEFORE_PREFIX)) null
+            else fileName.removePrefix(BEFORE_PREFIX).substringBefore('_').takeIf { it.isNotEmpty() }
+    }
+
+
     val projectsDir: File
         get() = File(context.filesDir, "projects").apply { if (!exists()) mkdirs() }
 
@@ -398,8 +409,15 @@ class ProjectRepository(private val context: Context) {
 
             // CRITICAL: Cleanup orphaned files ONLY AFTER new manifest has been successfully committed
             val now = System.currentTimeMillis()
+            val liveLayerIds = project.layers.map { it.id }.toSet()
             projDir.listFiles()?.forEach { file ->
                 val name = file.name
+                // Before images of layers that no longer exist (and that history cannot bring back).
+                if (name.startsWith(BEFORE_PREFIX) && !name.endsWith(".tmp")) {
+                    val id = beforeLayerId(name)
+                    if (id != null && id !in liveLayerIds && (BEFORE_KEEP_PREFIX + id) !in protectedFileNames) file.delete()
+                    return@forEach
+                }
                 val isLayerAsset = (name.startsWith("layer_") || name.startsWith("mask_") || name.startsWith("source_")) && !name.endsWith(".tmp")
                 if (isLayerAsset && name !in activeLayerFiles && name !in protectedFileNames) {
                     // Source assets may be written by an in-flight destructive edit that is not yet
@@ -416,6 +434,52 @@ class ProjectRepository(private val context: Context) {
             e.printStackTrace()
             false
         }
+    }
+
+    /**
+     * Saves a layer's pixels from before its first pixel edit (Before/After) next to the project
+     * as before_<layerId>_<contentW bits>_<contentH bits>.webp|png, replacing an older one.
+     */
+    suspend fun saveBeforeImage(projectId: String, layerId: String, before: com.example.data.model.LayerBefore): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val dir = getProjectDir(projectId)
+            if (!dir.exists()) return@withContext false
+            if (before.bitmap.isRecycled) return@withContext false
+            val ext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) "webp" else "png"
+            val name = "$BEFORE_PREFIX${layerId}_${Integer.toHexString(before.contentWidth.toRawBits())}_${Integer.toHexString(before.contentHeight.toRawBits())}.$ext"
+            val file = File(dir, name)
+            val tmp = File(dir, "$name.tmp")
+            if (!com.example.engine.ImageProcessor.saveLosslessBitmap(before.bitmap, tmp)) { tmp.delete(); return@withContext false }
+            dir.listFiles()?.forEach { f -> if (f.name != name && f.name.startsWith("$BEFORE_PREFIX${layerId}_") && !f.name.endsWith(".tmp")) f.delete() }
+            if (file.exists()) file.delete()
+            tmp.renameTo(file)
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** The saved Before images of [layerIds] (see [saveBeforeImage]). */
+    suspend fun loadBeforeImages(projectId: String, layerIds: Set<String>): Map<String, com.example.data.model.LayerBefore> = withContext(Dispatchers.IO) {
+        val out = HashMap<String, com.example.data.model.LayerBefore>()
+        try {
+            getProjectDir(projectId).listFiles()?.forEach { f ->
+                val name = f.name
+                if (!name.startsWith(BEFORE_PREFIX) || name.endsWith(".tmp")) return@forEach
+                val id = beforeLayerId(name) ?: return@forEach
+                if (id !in layerIds) return@forEach
+                val parts = name.removePrefix(BEFORE_PREFIX).substringBeforeLast('.').split('_')
+                if (parts.size != 3) return@forEach
+                val cw = java.lang.Float.intBitsToFloat(java.lang.Long.parseLong(parts[1], 16).toInt())
+                val ch = java.lang.Float.intBitsToFloat(java.lang.Long.parseLong(parts[2], 16).toInt())
+                val bmp = try {
+                    BitmapFactory.decodeFile(f.absolutePath, BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 })
+                } catch (e: OutOfMemoryError) { null } ?: return@forEach
+                out[id] = com.example.data.model.LayerBefore(bmp, cw, ch)
+            }
+        } catch (e: Exception) {
+            // Before/After of earlier sessions is a convenience: missing files are fine.
+        }
+        out
     }
 
     /**

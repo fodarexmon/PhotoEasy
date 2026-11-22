@@ -761,6 +761,15 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             val saved = repository.loadSelection(project.id, project.width, project.height) ?: return@launch
             if (_uiState.value.currentProject?.id == project.id) publishSelection(saved)
         }
+        // Before/After of pixel edits made in earlier sessions.
+        viewModelScope.launch {
+            val ids = project.layers.map { it.id }.toSet()
+            val loaded = repository.loadBeforeImages(project.id, ids)
+            if (loaded.isEmpty()) return@launch
+            if (_uiState.value.currentProject?.id != project.id) { loaded.values.forEach { it.bitmap.recycle() }; return@launch }
+            // Edits made meanwhile in this session keep their own "before".
+            _uiState.value = _uiState.value.copy(compareBefore = loaded + _uiState.value.compareBefore)
+        }
     }
 
     fun saveCurrentProject() {
@@ -1138,7 +1147,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private fun historyProtectedFileNames(): Set<String> {
         val names = mutableSetOf<String>()
         fun collect(snapshot: ProjectSnapshot?) {
-            snapshot?.layers?.forEach { l -> l.sourceAssetPath?.let { names.add(File(it).name) } }
+            snapshot?.layers?.forEach { l ->
+                l.sourceAssetPath?.let { names.add(File(it).name) }
+                // A layer that undo / redo can bring back keeps its saved Before image.
+                names.add(com.example.data.repository.ProjectRepository.BEFORE_KEEP_PREFIX + l.id)
+            }
         }
         undoStack.forEach { collect(it) }
         redoStack.forEach { collect(it) }
@@ -4518,9 +4531,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (known != null && !known.bitmap.isRecycled &&
             known.contentWidth == layer.contentWidth && known.contentHeight == layer.contentHeight) return
         val copy = try { current.copy(Bitmap.Config.ARGB_8888, false) } catch (e: OutOfMemoryError) { null } ?: return
-        _uiState.value = _uiState.value.copy(
-            compareBefore = _uiState.value.compareBefore + (layer.id to com.example.data.model.LayerBefore(copy, layer.contentWidth, layer.contentHeight))
-        )
+        val before = com.example.data.model.LayerBefore(copy, layer.contentWidth, layer.contentHeight)
+        _uiState.value = _uiState.value.copy(compareBefore = _uiState.value.compareBefore + (layer.id to before))
+        // Saved with the project, so Before/After still works after the app is closed.
+        val projectId = _uiState.value.currentProject?.id ?: return
+        viewModelScope.launch { repository.saveBeforeImage(projectId, layer.id, before) }
     }
 
     private fun onRetouchFailed(@StringRes msg: Int) {

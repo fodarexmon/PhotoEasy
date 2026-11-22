@@ -84,6 +84,26 @@ class ProToolsTest {
         assertEquals(p, loaded.adjustmentParams)
     }
 
+    @Test
+    fun `before images survive closing the app and go with their layer`() {
+        val repo = ProjectRepository(context)
+        val proj = Project(id = "before_proj", name = "B", width = 20, height = 20)
+        proj.layers.add(Layer(id = "img-1", name = "Img", type = LayerType.IMAGE, bitmap = solid(20, 20, Color.BLUE), contentWidth = 20f, contentHeight = 20f))
+        runBlocking { assertTrue(repo.saveProject(proj)) }
+        val before = com.example.data.model.LayerBefore(solid(20, 20, Color.RED), 20f, 13.5f)
+        runBlocking { assertTrue(repo.saveBeforeImage("before_proj", "img-1", before)) }
+        val loaded = runBlocking { repo.loadBeforeImages("before_proj", setOf("img-1")) }
+        val b = loaded["img-1"]!!
+        assertEquals(Color.RED, b.bitmap.getPixel(5, 5))
+        assertEquals(20f, b.contentWidth, 0f); assertEquals(13.5f, b.contentHeight, 0f)
+        // Kept while undo can bring the layer back, removed once it is really gone.
+        proj.layers.clear()
+        runBlocking { assertTrue(repo.saveProject(proj, setOf(ProjectRepository.BEFORE_KEEP_PREFIX + "img-1"))) }
+        assertEquals(1, runBlocking { repo.loadBeforeImages("before_proj", setOf("img-1")) }.size)
+        runBlocking { assertTrue(repo.saveProject(proj)) }
+        assertTrue(runBlocking { repo.loadBeforeImages("before_proj", setOf("img-1")) }.isEmpty())
+    }
+
     // --- Text effects -----------------------------------------------------------------------
 
     @Test
