@@ -1283,4 +1283,6 @@
     <string name="status_solo_off">Other layers shown again</string>
     <string name="effect_none">No effect</string>
     <string name="effect_choose_hint">Choose an effect to see it on the image.</string>
+    <string name="mask_controls_hide">Hide mask controls</string>
+    <string name="mask_controls_show">Show mask controls</string>
 </resources>
