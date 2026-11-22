@@ -61,6 +61,28 @@ class MaskRenderTest {
     }
 
     @Test
+    fun probe() {
+        val vm = vmWith(image("a", 200, 150, Color.RED), w = 200, h = 150)
+        vm.selectLayer(0)
+        vm.addLayerMask(fromSelection = false)
+        vm.invertLayerMask()
+        val l = vm.uiState.value.currentProject!!.layers[0]
+        val eff = LayerRenderer.renderEffectiveMask(l, 200, 150)
+        val single = runBlocking { LayerRenderer.renderSingleLayerToBitmap(app, l.previewSnapshot(), 200, 150, 1f) }
+        val singlePooled = runBlocking { LayerRenderer.renderSingleLayerToBitmap(app, l.previewSnapshot(), 200, 150, 1f, cacheLook = true) }
+        // Raw Android: DST_IN with this mask.
+        val raw = Bitmap.createBitmap(200, 150, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) }
+        android.graphics.Canvas(raw).drawBitmap(l.maskBitmap!!, 0f, 0f, android.graphics.Paint().apply {
+            xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_IN) })
+        val a8 = Bitmap.createBitmap(200, 150, Bitmap.Config.ALPHA_8)
+        android.graphics.Canvas(a8).drawBitmap(l.maskBitmap!!, 0f, 0f, android.graphics.Paint())
+        val msg = "eff=${eff?.let { "${it.config} a=${it.getPixel(100, 75) ushr 24}" }} single=${single?.let { Integer.toHexString(it.getPixel(100, 75)) }} " +
+            "pooled=${singlePooled?.let { Integer.toHexString(it.getPixel(100, 75)) }} raw=${Integer.toHexString(raw.getPixel(100, 75))} a8copy=${a8.getPixel(100, 75) ushr 24} " +
+            "maskHasAlpha=${l.maskBitmap!!.hasAlpha()} premul=${l.maskBitmap!!.isPremultiplied}"
+        throw AssertionError("PROBE $msg")
+    }
+
+    @Test
     fun invertedMaskHidesImageLayerSmallDoc() {
         val vm = vmWith(image("a", 200, 150, Color.RED), w = 200, h = 150)
         vm.selectLayer(0)
