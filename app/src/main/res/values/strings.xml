@@ -1196,4 +1196,9 @@
     <string name="blend_if_underlying">Underlying layer</string>
     <string name="blend_if_hint">Drag a handle to hide darker or lighter tones. Long press a handle to split it for a soft fade (or join it again).</string>
     <string name="status_smart_auto_noisy">Smart Auto applied • The photo is noisy: sharpening was skipped, try Noise reduction in Effects</string>
+    <string name="adj_noise_reduction">Noise reduction</string>
+    <string name="adj_grain_amount">Grain</string>
+    <string name="adj_grain_size">Grain size</string>
+    <string name="adj_grain_roughness">Grain roughness</string>
+    <string name="levels_channel_rgb">RGB</string>
 </resources>

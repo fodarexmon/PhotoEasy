@@ -179,7 +179,8 @@ fun AdjustmentsPanel(
                         brightness = 0f, contrast = 0f, saturation = 0f,
                         temperature = 0f, tint = 0f, exposure = 0f,
                         highlights = 0f, shadows = 0f, sharpness = 0f, vignette = 0f,
-                        whites = 0f, blacks = 0f, vibrance = 0f, clarity = 0f, dehaze = 0f
+                        whites = 0f, blacks = 0f, vibrance = 0f, clarity = 0f, dehaze = 0f,
+                        noiseReduction = 0f, grainAmount = 0f
                     )
                 )
             } else {
@@ -301,9 +302,16 @@ fun AdjustmentsPanel(
                 AdjustmentSlider(stringResource(R.string.adj_clarity), adjustments.clarity, onValueChange = { set { copy(clarity = it) } }, onValueChangeFinished = onAdjustmentsCommit)
                 AdjustmentSlider(stringResource(R.string.adj_dehaze), adjustments.dehaze, onValueChange = { set { copy(dehaze = it) } }, onValueChangeFinished = onAdjustmentsCommit)
                 AdjustmentSlider(stringResource(R.string.adj_sharpness), adjustments.sharpness, 0f..100f, onValueChange = { set { copy(sharpness = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                AdjustmentSlider(stringResource(R.string.adj_noise_reduction), adjustments.noiseReduction, 0f..100f, onValueChange = { set { copy(noiseReduction = it) } }, onValueChangeFinished = onAdjustmentsCommit)
 
                 AdjustmentGroupTitle(stringResource(R.string.adj_group_effects))
                 AdjustmentSlider(stringResource(R.string.adj_vignette), adjustments.vignette, onValueChange = { set { copy(vignette = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                // Grain (Camera Raw): amount, then its size and roughness.
+                AdjustmentSlider(stringResource(R.string.adj_grain_amount), adjustments.grainAmount, 0f..100f, onValueChange = { set { copy(grainAmount = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                if (adjustments.grainAmount > 0f) {
+                    AdjustmentSlider(stringResource(R.string.adj_grain_size), adjustments.grainSize, 0f..100f, onValueChange = { set { copy(grainSize = it) } }, onValueChangeFinished = onAdjustmentsCommit, defaultValue = 25f)
+                    AdjustmentSlider(stringResource(R.string.adj_grain_roughness), adjustments.grainRoughness, 0f..100f, onValueChange = { set { copy(grainRoughness = it) } }, onValueChangeFinished = onAdjustmentsCommit, defaultValue = 50f)
+                }
                 Text(
                     stringResource(R.string.adj_double_tap_reset_hint),
                     color = Color.Gray,

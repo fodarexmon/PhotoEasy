@@ -195,6 +195,10 @@ object AdjustmentsJson {
         put("replaceTargetSaturation", a.replaceTargetSaturation.toDouble()); put("replaceTargetLightness", a.replaceTargetLightness.toDouble())
         put("whites", a.whites.toDouble()); put("blacks", a.blacks.toDouble()); put("vibrance", a.vibrance.toDouble())
         put("clarity", a.clarity.toDouble()); put("dehaze", a.dehaze.toDouble())
+        if (a.noiseReduction != 0f) put("noiseReduction", a.noiseReduction.toDouble())
+        if (a.grainAmount != 0f) {
+            put("grainAmount", a.grainAmount.toDouble()); put("grainSize", a.grainSize.toDouble()); put("grainRoughness", a.grainRoughness.toDouble())
+        }
         put("colorizeEnabled", a.colorizeEnabled); put("colorizeHue", a.colorizeHue.toDouble())
         put("colorizeSaturation", a.colorizeSaturation.toDouble()); put("colorizeLightness", a.colorizeLightness.toDouble())
         put("colorReplacements", JSONArray().apply {
@@ -232,6 +236,9 @@ object AdjustmentsJson {
             replaceTargetSaturation = f("replaceTargetSaturation", 0f), replaceTargetLightness = f("replaceTargetLightness", 0f),
             whites = f("whites", 0f), blacks = f("blacks", 0f), vibrance = f("vibrance", 0f),
             clarity = f("clarity", 0f), dehaze = f("dehaze", 0f),
+            noiseReduction = f("noiseReduction", 0f).coerceIn(0f, 100f),
+            grainAmount = f("grainAmount", 0f).coerceIn(0f, 100f), grainSize = f("grainSize", 25f).coerceIn(0f, 100f),
+            grainRoughness = f("grainRoughness", 50f).coerceIn(0f, 100f),
             colorizeEnabled = o.optBoolean("colorizeEnabled", false),
             colorizeHue = f("colorizeHue", 30f), colorizeSaturation = f("colorizeSaturation", 35f),
             colorizeLightness = f("colorizeLightness", 0f),

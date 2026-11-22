@@ -361,6 +361,8 @@ object ImageProcessor {
         fun checkCancel() {
             if (isCancelled?.invoke() == true) throw CancellationException("Color adjustments cancelled")
         }
+        // 0. Noise reduction works on the pixels as they came from the camera.
+        if (adj.noiseReduction > 0f) NoiseAndGrain.reduceNoise(px, w, h, adj.noiseReduction, ::checkCancel)
 
         // 1. Per-channel tone curves (white balance, exposure, white/black points, contrast,
         //    brightness), built once as float LUTs so nothing is clipped to 8 bits between steps.
@@ -649,6 +651,8 @@ object ImageProcessor {
 
         if (adj.sharpness > 0f) sharpenLuminance(px, w, h, adj.sharpness, ::checkCancel)
         if (adj.vignette != 0f) applyVignettePixels(px, w, h, adj.vignette, ::checkCancel)
+        // Grain last, on top of everything, as on film.
+        if (adj.grainAmount > 0f) NoiseAndGrain.addGrain(px, w, h, adj.grainAmount, adj.grainSize, adj.grainRoughness)
 
         val output = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         output.setPixels(px, 0, w, 0, 0, w, h)

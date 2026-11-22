@@ -6,6 +6,7 @@ import android.graphics.Color
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.model.AdjustmentKind
 import com.example.data.model.AdjustmentLayerParams
+import com.example.data.model.ColorAdjustments
 import com.example.data.model.Layer
 import com.example.data.model.LayerType
 import com.example.data.model.Project
@@ -231,6 +232,72 @@ class ProToolsTest {
         assertEquals(0f, res.delta.sharpness, 0f)
         val clean = scene { _, _, v -> grey(v) }
         assertTrue(com.example.engine.SmartAuto.noiseSigma(clean) < 3.2f)
+    }
+
+    // --- Levels per channel, noise reduction, grain -------------------------------------------
+
+    @Test
+    fun `levels per channel change only their channel and survive json`() {
+        val p = AdjustmentLayerParams(levelsRed = com.example.data.model.LevelsChannel(inWhite = 200f), levelsBlue = com.example.data.model.LevelsChannel(outWhite = 128f))
+        assertFalse(AdjustmentLayerEngine.isIdentity(AdjustmentKind.LEVELS, p))
+        val src = solid(2, 2, Color.rgb(200, 200, 200))
+        val out = AdjustmentLayerEngine.apply(src, AdjustmentKind.LEVELS, p).getPixel(0, 0)
+        assertEquals(255, Color.red(out))
+        assertEquals(200, Color.green(out))
+        assertEquals(100, Color.blue(out))
+        // Channel first, then RGB.
+        val both = AdjustmentLayerEngine.levelsLut(com.example.data.model.LevelsChannel(inWhite = 200f), com.example.data.model.LevelsChannel(outWhite = 100f))
+        assertEquals(100, both[200])
+        assertEquals(p, AdjustmentLayerEngine.fromJson(JSONObject(AdjustmentLayerEngine.toJson(p).toString())))
+        assertTrue(AdjustmentLayerEngine.isIdentity(AdjustmentKind.LEVELS, AdjustmentLayerParams()))
+    }
+
+    @Test
+    fun `noise reduction smooths noise but keeps edges`() {
+        val w = 120; val h = 80; val rnd = java.util.Random(4)
+        val px = IntArray(w * h) { i ->
+            val v = if (i % w < 60) 60 else 190
+            val n = (rnd.nextGaussian() * 10).toInt(); val cn = (rnd.nextGaussian() * 12).toInt()
+            Color.rgb((v + n + cn).coerceIn(0, 255), (v + n).coerceIn(0, 255), (v + n - cn).coerceIn(0, 255))
+        }
+        fun std(a: IntArray): Double {
+            val l = (10 until 70).flatMap { y -> (10 until 50).map { x -> Color.green(a[y * w + x]) } }
+            val m = l.average(); return kotlin.math.sqrt(l.sumOf { (it - m) * (it - m) } / l.size)
+        }
+        val q = px.copyOf()
+        com.example.engine.NoiseAndGrain.reduceNoise(q, w, h, 60f)
+        assertTrue("less noise", std(q) < std(px) * 0.6)
+        // The edge between the halves stays sharp.
+        assertTrue(Color.green(q[40 * w + 57]) < 90 && Color.green(q[40 * w + 62]) > 160)
+        // As an adjustment.
+        assertFalse(ColorAdjustments(noiseReduction = 20f).isIdentity())
+    }
+
+    @Test
+    fun `grain adds a fixed pattern that scales with the image`() {
+        fun grained(size: Int): IntArray {
+            val a = IntArray(size * size) { Color.rgb(128, 128, 128) }
+            com.example.engine.NoiseAndGrain.addGrain(a, size, size, 60f, 40f, 50f)
+            return a
+        }
+        val a = grained(200); val b = grained(200)
+        assertTrue("same every time", a.contentEquals(b))
+        val vals = a.map { Color.red(it) }
+        val m = vals.average(); val sd = kotlin.math.sqrt(vals.sumOf { (it - m) * (it - m) } / vals.size)
+        assertTrue("visible grain: $sd", sd > 4)
+        assertTrue("monochrome", a.all { Color.red(it) == Color.green(it) && Color.green(it) == Color.blue(it) })
+        // Half the resolution: the same pattern at half the size (compare a pixel and its double).
+        val big = grained(1000); val small = grained(500)
+        var close = 0; var total = 0
+        for (y in 0 until 500 step 23) for (x in 0 until 500 step 23) {
+            total++
+            if (kotlin.math.abs(Color.red(small[y * 500 + x]) - Color.red(big[(y * 2) * 1000 + x * 2])) <= 3) close++
+        }
+        assertTrue("pattern lines up across resolutions: $close / $total", close >= total * 0.9)
+        assertFalse(ColorAdjustments(grainAmount = 10f).isIdentity())
+        // Saved with the adjustments.
+        val adj = ColorAdjustments(noiseReduction = 35f, grainAmount = 20f, grainSize = 60f, grainRoughness = 10f)
+        assertEquals(adj, com.example.engine.AdjustmentsJson.fromJson(JSONObject(com.example.engine.AdjustmentsJson.toJson(adj).toString())))
     }
 
     // --- Blend If -----------------------------------------------------------------------------

@@ -110,6 +110,17 @@ enum class AdjustmentKind(val labelRes: Int) {
 }
 
 /** Settings of the adjustment kinds that are not plain [ColorAdjustments]. Immutable. */
+/** Levels of one colour channel: input black / gamma / white and output black / white (0..255). */
+data class LevelsChannel(
+    val inBlack: Float = 0f,
+    val inWhite: Float = 255f,
+    val gamma: Float = 1f,
+    val outBlack: Float = 0f,
+    val outWhite: Float = 255f
+) {
+    fun isIdentity(): Boolean = inBlack <= 0f && inWhite >= 255f && gamma == 1f && outBlack <= 0f && outWhite >= 255f
+}
+
 data class AdjustmentLayerParams(
     // Levels (0..255 input / output, gamma 0.1..9.99)
     val levelsInBlack: Float = 0f,
@@ -141,7 +152,11 @@ data class AdjustmentLayerParams(
     val gradientReverse: Boolean = false,
     // Posterize levels 2..255, threshold level 1..255
     val posterizeLevels: Int = 4,
-    val thresholdLevel: Int = 128
+    val thresholdLevel: Int = 128,
+    // Levels per channel (applied before the RGB levels above, as in Photoshop).
+    val levelsRed: LevelsChannel = LevelsChannel(),
+    val levelsGreen: LevelsChannel = LevelsChannel(),
+    val levelsBlue: LevelsChannel = LevelsChannel()
 ) {
     // FloatArray fields: compare by content (used to skip redundant renders and undo steps).
     override fun equals(other: Any?): Boolean {
@@ -156,7 +171,8 @@ data class AdjustmentLayerParams(
             bwTintSaturation == other.bwTintSaturation && photoFilterColor == other.photoFilterColor &&
             photoFilterDensity == other.photoFilterDensity && photoFilterPreserveLuminosity == other.photoFilterPreserveLuminosity &&
             gradientStart == other.gradientStart && gradientEnd == other.gradientEnd && gradientReverse == other.gradientReverse &&
-            posterizeLevels == other.posterizeLevels && thresholdLevel == other.thresholdLevel
+            posterizeLevels == other.posterizeLevels && thresholdLevel == other.thresholdLevel &&
+            levelsRed == other.levelsRed && levelsGreen == other.levelsGreen && levelsBlue == other.levelsBlue
     }
 
     override fun hashCode(): Int =
@@ -320,6 +336,12 @@ data class ColorAdjustments(
     val vibrance: Float = 0f,      // -100 to 100 (saturation that protects skin and saturated colours)
     val clarity: Float = 0f,       // -100 to 100 (local mid-tone contrast)
     val dehaze: Float = 0f,        // -100 to 100
+    /** Noise reduction 0..100 (luminance, edge preserving, and colour noise). */
+    val noiseReduction: Float = 0f,
+    /** Film grain (Camera Raw): amount 0..100, size 0..100, roughness 0..100. */
+    val grainAmount: Float = 0f,
+    val grainSize: Float = 25f,
+    val grainRoughness: Float = 50f,
     // Curves (control points in [0..255] range)
     val curvesRgb: List<PointF> = listOf(PointF(0f, 0f), PointF(255f, 255f)),
     val curvesRed: List<PointF> = listOf(PointF(0f, 0f), PointF(255f, 255f)),
@@ -361,6 +383,7 @@ data class ColorAdjustments(
                 temperature == 0f && tint == 0f && exposure == 0f &&
                 highlights == 0f && shadows == 0f && sharpness == 0f && vignette == 0f &&
                 whites == 0f && blacks == 0f && vibrance == 0f && clarity == 0f && dehaze == 0f &&
+                noiseReduction == 0f && grainAmount == 0f &&
                 !hasCurves() && !hasHsl() && effectiveReplacements().none { it.enabled } && !replacePreviewMask && !colorizeEnabled
 
     fun hasHsl(): Boolean = effectiveHslBands().values.any { !it.isIdentity() } || colorizeEnabled

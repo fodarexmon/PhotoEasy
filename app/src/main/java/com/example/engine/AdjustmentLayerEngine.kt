@@ -3,6 +3,7 @@ package com.example.engine
 import android.graphics.Bitmap
 import com.example.data.model.AdjustmentKind
 import com.example.data.model.AdjustmentLayerParams
+import com.example.data.model.LevelsChannel
 import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
@@ -28,13 +29,26 @@ object AdjustmentLayerEngine {
     /** True when [kind] with [p] leaves every pixel unchanged. */
     fun isIdentity(kind: AdjustmentKind, p: AdjustmentLayerParams): Boolean = when (kind) {
         AdjustmentKind.LEVELS -> p.levelsInBlack <= 0f && p.levelsInWhite >= 255f && p.levelsGamma == 1f &&
-            p.levelsOutBlack <= 0f && p.levelsOutWhite >= 255f
+            p.levelsOutBlack <= 0f && p.levelsOutWhite >= 255f &&
+            p.levelsRed.isIdentity() && p.levelsGreen.isIdentity() && p.levelsBlue.isIdentity()
         AdjustmentKind.EXPOSURE -> p.exposureEv == 0f && p.exposureOffset == 0f && p.exposureGamma == 1f
         AdjustmentKind.COLOR_BALANCE -> (p.balanceShadows + p.balanceMidtones + p.balanceHighlights).all { it == 0f }
         AdjustmentKind.PHOTO_FILTER -> p.photoFilterDensity <= 0f
         AdjustmentKind.BLACK_WHITE, AdjustmentKind.GRADIENT_MAP, AdjustmentKind.INVERT,
         AdjustmentKind.POSTERIZE, AdjustmentKind.THRESHOLD -> false
         else -> true
+    }
+
+    /** One channel's levels table: [channel] first, then [rgb]. */
+    fun levelsLut(channel: LevelsChannel, rgb: LevelsChannel): IntArray {
+        fun one(l: LevelsChannel, v: Float): Float {
+            val inB = l.inBlack.coerceIn(0f, 253f)
+            val inW = l.inWhite.coerceIn(inB + 2f, 255f)
+            val gamma = l.gamma.coerceIn(0.1f, 9.99f)
+            val t = ((v - inB) / (inW - inB)).coerceIn(0f, 1f).pow(1f / gamma)
+            return l.outBlack + (l.outWhite - l.outBlack) * t
+        }
+        return IntArray(256) { v -> one(rgb, one(channel, v.toFloat())).roundToInt().coerceIn(0, 255) }
     }
 
     /** Applies [kind] to [source]; returns a new bitmap, or [source] when nothing changes. */
@@ -81,15 +95,10 @@ object AdjustmentLayerEngine {
     /** A per-pixel function (input and output 0xRRGGBB in the low bits) for [kind]. */
     private fun pixelOp(kind: AdjustmentKind, p: AdjustmentLayerParams): (Int) -> Int = when (kind) {
         AdjustmentKind.LEVELS -> {
-            val lut = IntArray(256)
-            val inB = p.levelsInBlack.coerceIn(0f, 253f)
-            val inW = p.levelsInWhite.coerceIn(inB + 2f, 255f)
-            val gamma = p.levelsGamma.coerceIn(0.1f, 9.99f)
-            for (v in 0..255) {
-                val t = ((v - inB) / (inW - inB)).coerceIn(0f, 1f).pow(1f / gamma)
-                lut[v] = (p.levelsOutBlack + (p.levelsOutWhite - p.levelsOutBlack) * t).roundToInt().coerceIn(0, 255)
-            }
-            ({ c: Int -> (lut[(c shr 16) and 255] shl 16) or (lut[(c shr 8) and 255] shl 8) or lut[c and 255] })
+            // Each channel's own levels, then the RGB levels on top.
+            val rgb = LevelsChannel(p.levelsInBlack, p.levelsInWhite, p.levelsGamma, p.levelsOutBlack, p.levelsOutWhite)
+            val lr = levelsLut(p.levelsRed, rgb); val lg = levelsLut(p.levelsGreen, rgb); val lb = levelsLut(p.levelsBlue, rgb)
+            ({ c: Int -> (lr[(c shr 16) and 255] shl 16) or (lg[(c shr 8) and 255] shl 8) or lb[c and 255] })
         }
         AdjustmentKind.EXPOSURE -> {
             // In linear light, like Photoshop: exposure scales, offset shifts the shadows, gamma bends.
@@ -217,6 +226,10 @@ object AdjustmentLayerEngine {
         put("levelsInBlack", p.levelsInBlack.toDouble()); put("levelsInWhite", p.levelsInWhite.toDouble())
         put("levelsGamma", p.levelsGamma.toDouble()); put("levelsOutBlack", p.levelsOutBlack.toDouble())
         put("levelsOutWhite", p.levelsOutWhite.toDouble())
+        fun ch(l: LevelsChannel) = JSONArray().put(l.inBlack.toDouble()).put(l.inWhite.toDouble()).put(l.gamma.toDouble()).put(l.outBlack.toDouble()).put(l.outWhite.toDouble())
+        if (!p.levelsRed.isIdentity()) put("levelsRed", ch(p.levelsRed))
+        if (!p.levelsGreen.isIdentity()) put("levelsGreen", ch(p.levelsGreen))
+        if (!p.levelsBlue.isIdentity()) put("levelsBlue", ch(p.levelsBlue))
         put("exposureEv", p.exposureEv.toDouble()); put("exposureOffset", p.exposureOffset.toDouble())
         put("exposureGamma", p.exposureGamma.toDouble())
         put("balanceShadows", arr(p.balanceShadows)); put("balanceMidtones", arr(p.balanceMidtones))
@@ -233,10 +246,18 @@ object AdjustmentLayerEngine {
         val d = AdjustmentLayerParams()
         if (o == null) return d
         fun f(k: String, v: Float) = o.optDouble(k, v.toDouble()).toFloat()
+        fun chFrom(a: JSONArray?): LevelsChannel {
+            if (a == null || a.length() < 5) return LevelsChannel()
+            fun g(i: Int, def: Float) = a.optDouble(i, def.toDouble()).toFloat()
+            return LevelsChannel(g(0, 0f).coerceIn(0f, 253f), g(1, 255f).coerceIn(2f, 255f), g(2, 1f).coerceIn(0.1f, 9.99f),
+                g(3, 0f).coerceIn(0f, 255f), g(4, 255f).coerceIn(0f, 255f))
+        }
         return AdjustmentLayerParams(
             levelsInBlack = f("levelsInBlack", d.levelsInBlack), levelsInWhite = f("levelsInWhite", d.levelsInWhite),
             levelsGamma = f("levelsGamma", d.levelsGamma), levelsOutBlack = f("levelsOutBlack", d.levelsOutBlack),
             levelsOutWhite = f("levelsOutWhite", d.levelsOutWhite),
+            levelsRed = chFrom(o.optJSONArray("levelsRed")), levelsGreen = chFrom(o.optJSONArray("levelsGreen")),
+            levelsBlue = chFrom(o.optJSONArray("levelsBlue")),
             exposureEv = f("exposureEv", d.exposureEv), exposureOffset = f("exposureOffset", d.exposureOffset),
             exposureGamma = f("exposureGamma", d.exposureGamma),
             balanceShadows = arr(o, "balanceShadows", d.balanceShadows), balanceMidtones = arr(o, "balanceMidtones", d.balanceMidtones),
