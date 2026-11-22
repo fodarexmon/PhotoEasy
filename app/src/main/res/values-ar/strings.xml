@@ -1230,4 +1230,22 @@
     <string name="smart_filter_edit_short">تعديل الفلتر</string>
     <string name="smart_filter_blending">خيارات المزج</string>
     <string name="smart_filter_move_up">تحريك لأعلى</string>
+    <string name="ai_colorize_open">تلوين ذكي (AI)</string>
+    <string name="ai_colorize_title">التلوين الذكي</string>
+    <string name="ai_colorize_needs_model">يحوّل التلوين الذكي الصور الأبيض والأسود إلى ملونة على هاتفك. يحتاج تنزيل نموذجه مرة واحدة فقط، وبعدها يعمل بدون إنترنت.</string>
+    <string name="ai_model_size">حجم التنزيل: نحو %d ميجابايت</string>
+    <string name="ai_model_size_unknown">جارٍ معرفة حجم التنزيل…</string>
+    <string name="ai_model_download">تنزيل</string>
+    <string name="ai_model_retry">إعادة المحاولة</string>
+    <string name="ai_model_download_failed">فشل التنزيل. تأكد من الاتصال وأعد المحاولة (يكمل من حيث توقف).</string>
+    <string name="ai_colorize_info">تُخمَّن الألوان من محتوى الصورة: السماء والنبات والبشرة غالبًا صحيحة، والملابس والأشياء قد تحتاج تصحيحًا. النتيجة في طبقة جديدة.</string>
+    <string name="ai_colorize_intensity">قوة الألوان</string>
+    <string name="ai_colorize_run">تلوين</string>
+    <string name="ai_model_delete">حذف النموذج المنزَّل</string>
+    <string name="ai_model_deleted">حُذف النموذج</string>
+    <string name="ai_colorize_credit">النموذج: Zhang وآخرون، SIGGRAPH 2017 (رخصة BSD)</string>
+    <string name="status_ai_colorizing">جارٍ التلوين…</string>
+    <string name="status_ai_colorized">لُوّنت الصورة في طبقة جديدة</string>
+    <string name="status_ai_colorize_failed">فشل التلوين</string>
+    <string name="layer_name_ai_colorized">تلوين ذكي</string>
 </resources>

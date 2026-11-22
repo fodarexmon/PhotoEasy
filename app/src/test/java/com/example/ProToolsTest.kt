@@ -273,6 +273,43 @@ class ProToolsTest {
     }
 
     @Test
+    fun `ai colorize keeps the lightness and uses the predicted colour`() {
+        val c = com.example.engine.ai.AiColorizer
+        // Lab round trip of greys.
+        for (v in listOf(0, 40, 128, 200, 255)) {
+            val l = c.lightness(Color.rgb(v, v, v))
+            val back = c.labToRgb(l, 0f, 0f)
+            assertTrue("grey $v -> ${Integer.toHexString(back)}", kotlin.math.abs(((back shr 8) and 255) - v) <= 1)
+        }
+        // A grey photo with a "predicted" warm colour: red above blue, lightness kept.
+        val src = Bitmap.createBitmap(30, 20, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 20) for (x in 0 until 30) src.setPixel(x, y, Color.rgb(60 + x * 4, 60 + x * 4, 60 + x * 4))
+        var seen = 0
+        val out = c.colorizeWith(src, 16, 1f) { l -> seen = l.size; FloatArray(2 * l.size) { if (it < l.size) 30f else 20f } }
+        assertEquals(16 * 16, seen)
+        val p = out.getPixel(15, 10)
+        assertTrue(Color.red(p) > Color.blue(p) + 20)
+        assertEquals(c.lightness(src.getPixel(15, 10)), c.lightness(p), 1.5f)
+        // Intensity 0: back to grey.
+        val grey = c.colorizeWith(src, 16, 0f) { l -> FloatArray(2 * l.size) { 30f } }.getPixel(15, 10)
+        assertTrue(kotlin.math.abs(Color.red(grey) - Color.blue(grey)) <= 1)
+        // Transparent pixels stay transparent.
+        src.setPixel(0, 0, Color.TRANSPARENT)
+        assertEquals(0, Color.alpha(c.colorizeWith(src, 16, 1f) { l -> FloatArray(2 * l.size) { 30f } }.getPixel(0, 0)))
+    }
+
+    @Test
+    fun `model manifest and checksum`() {
+        val m = com.example.engine.ai.ModelStore.parseManifest(
+            "{\"name\":\"colorize-v1\",\"file\":\"colorize-v1.tflite\",\"size\":3,\"sha256\":\"BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD\",\"inputSize\":256,\"layout\":\"NHWC\"}")
+        assertEquals(3L, m.size); assertEquals(256, m.inputSize)
+        val f = java.io.File.createTempFile("m", ".bin").apply { writeText("abc") }
+        assertEquals(m.sha256, com.example.engine.ai.ModelStore.sha256(f))
+        // Not installed yet.
+        assertNull(com.example.engine.ai.ModelStore.installed(context, "nothing-here"))
+    }
+
+    @Test
     fun `colorize gives one hue and keeps lightness`() {
         val p = AdjustmentLayerParams(colorize = true, colorizeHue = 0f, colorizeSaturation = 100f)
         val px = intArrayOf(Color.rgb(128, 128, 128), Color.rgb(20, 200, 60), Color.WHITE, Color.BLACK)

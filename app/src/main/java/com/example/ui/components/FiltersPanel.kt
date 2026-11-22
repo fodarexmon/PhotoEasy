@@ -116,6 +116,8 @@ fun FiltersPanel(
     onOpenLiquify: (() -> Unit)? = null,
     /** Opens Liquify on its Face-Aware tab. */
     onOpenFaceLiquify: (() -> Unit)? = null,
+    /** Opens AI Colorize (model downloaded on first use). */
+    onOpenAiColorize: (() -> Unit)? = null,
     /** Opens the frequency separation setup. */
     onOpenFrequencySeparation: (() -> Unit)? = null,
     /** Whether a selection is active (enables "Smooth selected area"). */
@@ -590,6 +592,18 @@ fun FiltersPanel(
             }
         } else {
             // PRO BLUR & EFFECTS
+            if (onOpenAiColorize != null) {
+                OutlinedButton(
+                    onClick = onOpenAiColorize,
+                    enabled = isImageLayer,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp).testTag("btn_open_ai_colorize")
+                ) {
+                    Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(stringResource(R.string.ai_colorize_open), fontSize = 12.sp)
+                }
+                Spacer(Modifier.height(6.dp))
+            }
             if (onOpenLiquify != null) {
                 OutlinedButton(
                     onClick = onOpenLiquify,

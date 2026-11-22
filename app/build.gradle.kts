@@ -51,6 +51,26 @@ android {
       // AI Studio.
       signingConfig = signingConfigs.getByName("debugConfig")
     }
+    // What CI publishes: the debug signing key (so updates install over earlier versions), with
+    // R8 code / resource shrinking and no debug overhead.
+    create("dist") {
+      initWith(getByName("debug"))
+      isDebuggable = false
+      isMinifyEnabled = true
+      isShrinkResources = true
+      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+      signingConfig = signingConfigs.getByName("debugConfig")
+      matchingFallbacks += listOf("debug")
+    }
+  }
+  // One APK per processor type (smaller downloads), plus a universal one.
+  splits {
+    abi {
+      isEnable = true
+      reset()
+      include("arm64-v8a", "armeabi-v7a", "x86_64")
+      isUniversalApk = true
+    }
   }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
@@ -98,6 +118,8 @@ dependencies {
   // its built-in saliency method when it is unavailable).
   implementation(libs.mlkit.subject.segmentation)
   implementation(libs.mlkit.face.detection)
+  // AI Colorize runtime (the model itself is downloaded on first use).
+  implementation(libs.litert)
   // implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)
   // Uncomment to use Firestore:

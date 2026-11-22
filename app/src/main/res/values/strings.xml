@@ -1226,4 +1226,22 @@
     <string name="smart_filter_edit_short">Edit filter</string>
     <string name="smart_filter_blending">Blending options</string>
     <string name="smart_filter_move_up">Move up</string>
+    <string name="ai_colorize_open">AI Colorize</string>
+    <string name="ai_colorize_title">AI Colorize</string>
+    <string name="ai_colorize_needs_model">AI Colorize turns black-and-white photos into colour on your phone. It needs a one-time download of its model; after that it works offline.</string>
+    <string name="ai_model_size">Download size: about %d MB</string>
+    <string name="ai_model_size_unknown">Checking the download size…</string>
+    <string name="ai_model_download">Download</string>
+    <string name="ai_model_retry">Try again</string>
+    <string name="ai_model_download_failed">Download failed. Check the connection and try again (it resumes where it stopped).</string>
+    <string name="ai_colorize_info">The colours are guessed from the scene: skies, plants and skin are usually right; clothes and objects may need touching up. The result goes to a new layer.</string>
+    <string name="ai_colorize_intensity">Colour intensity</string>
+    <string name="ai_colorize_run">Colorize</string>
+    <string name="ai_model_delete">Delete the downloaded model</string>
+    <string name="ai_model_deleted">AI model deleted</string>
+    <string name="ai_colorize_credit">Model: Zhang et al., SIGGRAPH 2017 (BSD licence)</string>
+    <string name="status_ai_colorizing">Colorizing…</string>
+    <string name="status_ai_colorized">Colorized into a new layer</string>
+    <string name="status_ai_colorize_failed">Colorizing failed</string>
+    <string name="layer_name_ai_colorized">AI colour</string>
 </resources>

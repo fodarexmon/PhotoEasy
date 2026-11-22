@@ -1,0 +1,50 @@
+name: Build AI colorize model
+
+# One-off (manual) job: converts the SIGGRAPH 2017 automatic colorization network by Zhang et al.
+# (github.com/richzhang/colorization, BSD 2-Clause) to TensorFlow Lite with 8-bit weights and
+# publishes it, with a manifest (size + SHA-256), as assets of the "models-v1" release. The app
+# downloads it from there on first use.
+
+on:
+  workflow_dispatch:
+  # Also when the converter changes (manual runs need this file on the default branch).
+  push:
+    paths:
+      - 'tools/colorize_model/**'
+      - '.github/workflows/colorize-model.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install converters
+        run: |
+          pip install --quiet torch==2.3.1 --index-url https://download.pytorch.org/whl/cpu
+          pip install --quiet tensorflow==2.16.1 tf_keras==2.16.0 onnx==1.16.1 onnxruntime==1.18.1 \
+            onnx2tf==1.22.3 onnx_graphsurgeon==0.5.2 sng4onnx==1.0.4 onnxsim==0.4.36 psutil pillow numpy==1.26.4
+
+      - name: Get the network
+        run: git clone --depth 1 https://github.com/richzhang/colorization rz
+
+      - name: Convert and check
+        run: python tools/colorize_model/convert.py --repo rz --out out
+
+      - name: Publish to the models-v1 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view models-v1 --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 || \
+            gh release create models-v1 --repo "$GITHUB_REPOSITORY" --title "AI models v1" \
+              --notes "Models the app downloads on first use. Colorization: Zhang et al., Real-Time User-Guided Image Colorization with Learned Deep Priors (SIGGRAPH 2017), BSD 2-Clause." \
+              --prerelease
+          gh release upload models-v1 out/colorize-v1.tflite out/colorize-v1.json --clobber --repo "$GITHUB_REPOSITORY"

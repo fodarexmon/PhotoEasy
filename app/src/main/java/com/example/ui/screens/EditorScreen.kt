@@ -953,6 +953,7 @@ fun EditorScreen(
                             FiltersPanel(
                                 onOpenLiquify = { if (viewModel.canLiquifySelectedLayer() && viewModel.requireRasterized { liquifyFaceTab = false; showLiquify = true }) { liquifyFaceTab = false; showLiquify = true } },
                                 onOpenFaceLiquify = { if (viewModel.canLiquifySelectedLayer() && viewModel.requireRasterized { liquifyFaceTab = true; showLiquify = true }) { liquifyFaceTab = true; showLiquify = true } },
+                                onOpenAiColorize = { viewModel.openAiColorize() },
                                 onOpenFrequencySeparation = { if (viewModel.canLiquifySelectedLayer() && viewModel.requireRasterized { showFrequencySeparation = true }) showFrequencySeparation = true },
                                 hasSelection = hasActiveSelectionCached,
                                 onSmoothSelection = { viewModel.smoothSelectionOnLayer() },
@@ -1768,6 +1769,15 @@ fun EditorScreen(
         )
     }
 
+    uiState.aiColorize?.let { st ->
+        com.example.ui.components.AiColorizeDialog(
+            state = st,
+            onDownload = { viewModel.downloadAiModel() },
+            onColorize = { viewModel.runAiColorize(it) },
+            onDeleteModel = { viewModel.deleteAiModel() },
+            onDismiss = { viewModel.closeAiColorize() }
+        )
+    }
     if (uiState.askRasterize) {
         AlertDialog(
             onDismissRequest = { viewModel.answerRasterize(false) },

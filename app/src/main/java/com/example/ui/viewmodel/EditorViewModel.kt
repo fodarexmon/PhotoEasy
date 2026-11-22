@@ -210,7 +210,9 @@ data class EditorUiState(
     val isLayerMultiSelect: Boolean = false,
     val selectedLayerIds: Set<String> = emptySet(),
     /** A pixel tool was used on a Smart Object: ask to rasterize it (true = dialog shown). */
-    val askRasterize: Boolean = false
+    val askRasterize: Boolean = false,
+    /** AI Colorize dialog, or null when closed. */
+    val aiColorize: EditorViewModel.AiColorizeState? = null
 )
 
 data class EditableShape(
@@ -5486,6 +5488,128 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 val p = layer.bitmap
                 out?.let { if (it !== p && !it.isRecycled) it.recycle() }
                 src?.let { if (it !== p && !it.isRecycled) it.recycle() }
+            }
+        }
+    }
+
+    // --- AI colorize (model downloaded on first use) --------------------------------------
+
+    /** The AI Colorize dialog: model state and download progress. */
+    data class AiColorizeState(
+        val installed: Boolean,
+        /** Download size in bytes, once known. */
+        val size: Long? = null,
+        val downloading: Boolean = false,
+        val progress: Float = 0f,
+        val error: Boolean = false
+    )
+
+    private var aiDownloadJob: Job? = null
+
+    fun openAiColorize() {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.getOrNull(_uiState.value.selectedLayerIndex) ?: return
+        if (layer.type != LayerType.IMAGE || layer.bitmap == null) {
+            _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.effect_needs_image_layer)); return
+        }
+        val ctx = getApplication<Application>()
+        val installed = com.example.engine.ai.ModelStore.installed(ctx, com.example.engine.ai.AiColorizer.MODEL) != null
+        _uiState.value = _uiState.value.copy(aiColorize = AiColorizeState(installed))
+        if (!installed) viewModelScope.launch {
+            // The size to show before downloading.
+            val size = try { com.example.engine.ai.ModelStore.fetchManifest(com.example.engine.ai.AiColorizer.MODEL).size } catch (e: Exception) { null }
+            _uiState.value.aiColorize?.let { s -> if (!s.installed) _uiState.value = _uiState.value.copy(aiColorize = s.copy(size = size)) }
+        }
+    }
+
+    fun closeAiColorize() {
+        aiDownloadJob?.cancel()
+        aiDownloadJob = null
+        _uiState.value = _uiState.value.copy(aiColorize = null)
+    }
+
+    fun downloadAiModel() {
+        if (aiDownloadJob?.isActive == true) return
+        val ctx = getApplication<Application>()
+        _uiState.value.aiColorize?.let { _uiState.value = _uiState.value.copy(aiColorize = it.copy(downloading = true, error = false, progress = 0f)) }
+        aiDownloadJob = viewModelScope.launch {
+            try {
+                val m = com.example.engine.ai.ModelStore.download(ctx, com.example.engine.ai.AiColorizer.MODEL) { done, total ->
+                    viewModelScope.launch(Dispatchers.Main) {
+                        _uiState.value.aiColorize?.let { s ->
+                            _uiState.value = _uiState.value.copy(aiColorize = s.copy(size = total, progress = if (total > 0) done.toFloat() / total else 0f))
+                        }
+                    }
+                }
+                _uiState.value.aiColorize?.let { _uiState.value = _uiState.value.copy(aiColorize = it.copy(installed = true, downloading = false, progress = 1f, size = m.size)) }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _uiState.value.aiColorize?.let { _uiState.value = _uiState.value.copy(aiColorize = it.copy(downloading = false, error = true)) }
+            }
+        }
+    }
+
+    /** Removes the downloaded model (frees its space; it is downloaded again when needed). */
+    fun deleteAiModel() {
+        com.example.engine.ai.ModelStore.delete(getApplication(), com.example.engine.ai.AiColorizer.MODEL)
+        _uiState.value = _uiState.value.copy(aiColorize = _uiState.value.aiColorize?.copy(installed = false, progress = 0f), statusMessage = tr(R.string.ai_model_deleted))
+    }
+
+    /**
+     * Colorizes the selected image layer (as it looks) into a new layer above it, at full
+     * resolution. [intensity] scales the predicted colour.
+     */
+    fun runAiColorize(intensity: Float) {
+        val proj = _uiState.value.currentProject ?: return
+        if (_uiState.value.isProcessing) return
+        val idx = _uiState.value.selectedLayerIndex
+        val layer = proj.layers.getOrNull(idx) ?: return
+        if (layer.type != LayerType.IMAGE || layer.bitmap == null) return
+        val ctx = getApplication<Application>()
+        _uiState.value = _uiState.value.copy(aiColorize = null)
+        if (pendingTransactionSnapshot != null) saveHistoryState()
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_ai_colorizing))
+            var full: Bitmap? = null
+            var looked: Bitmap? = null
+            var colored: Bitmap? = null
+            var historySaved = false
+            try {
+                full = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Image unavailable")
+                looked = withContext(Dispatchers.Default) { com.example.engine.LayerRenderer.applyLayerLook(full!!, layer) }
+                colored = withContext(Dispatchers.Default) { com.example.engine.ai.AiColorizer.colorize(ctx, looked!!, intensity) }
+                val n = layer.copy(
+                    id = java.util.UUID.randomUUID().toString(),
+                    name = uniqueLayerName(tr(R.string.layer_name_ai_colorized), proj),
+                    bitmap = null, sourceAssetPath = null,
+                    filter = FilterType.NONE, filterIntensity = 1f, lutId = null, adjustments = ColorAdjustments(),
+                    isVisible = true, isLocked = false, isEditingMask = false,
+                    isSmartObject = false, smartFilters = emptyList(), smartFilterMask = null,
+                    textConfig = layer.textConfig.copy(), distort = layer.distort?.copyOf()
+                )
+                if (!commitDestructiveBitmap(proj, n, colored!!, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "colorize")) {
+                    throw java.io.IOException("Save failed")
+                }
+                n.maskAnchor = layer.maskAnchor
+                saveHistoryState()
+                historySaved = true
+                proj.layers.add(idx + 1, n)
+                commitProjectMutation(selectedLayerIndex = idx + 1, statusMessage = tr(R.string.status_ai_colorized),
+                    transformState = { it.copy(isProcessing = false) })
+            } catch (e: OutOfMemoryError) {
+                if (historySaved) rollbackToLastHistoryState()
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_processing_failed_memory))
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                if (historySaved) rollbackToLastHistoryState()
+                _uiState.value = _uiState.value.copy(isProcessing = false)
+                throw e
+            } catch (e: Throwable) {
+                if (historySaved) rollbackToLastHistoryState()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_ai_colorize_failed))
+            } finally {
+                listOf(full, looked, colored).distinct().forEach { b -> b?.let { if (it !== layer.bitmap && !it.isRecycled) it.recycle() } }
             }
         }
     }
