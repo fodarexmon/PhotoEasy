@@ -345,6 +345,34 @@ class PhotoEasyRobolectricTest {
     private fun ids(vm: com.example.ui.viewmodel.EditorViewModel) = vm.uiState.value.currentProject!!.layers.map { it.id }
 
     @Test
+    fun `smart object keeps effects as editable smart filters and asks before pixel tools`() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val vm = com.example.ui.viewmodel.EditorViewModel(app)
+        val bmp = Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888).apply { eraseColor(android.graphics.Color.RED) }
+        val project = Project(name = "Smart", width = 20, height = 20)
+        project.layers.add(Layer(id = "s", name = "S", type = LayerType.IMAGE, bitmap = bmp, contentWidth = 20f, contentHeight = 20f))
+        vm.openProject(project)
+        vm.convertToSmartObject()
+        val layer = vm.uiState.value.currentProject!!.layers[0]
+        assertTrue(layer.isSmartObject)
+        val before = layer.bitmap
+        vm.applyProFilter(com.example.data.model.ProFilterType.GAUSSIAN_BLUR, com.example.engine.ProEffects.defaults(com.example.data.model.ProFilterType.GAUSSIAN_BLUR))
+        assertEquals(1, layer.smartFilters.size)
+        assertTrue("pixels untouched", layer.bitmap === before)
+        assertFalse(vm.uiState.value.isProcessing)
+        // Undo removes the filter.
+        vm.undo()
+        assertTrue(vm.uiState.value.currentProject!!.layers[0].smartFilters.isEmpty())
+        // A painting tool asks to rasterize first.
+        vm.selectTool(com.example.ui.viewmodel.ActiveTool.RETOUCH)
+        assertTrue(vm.uiState.value.askRasterize)
+        assertFalse(vm.uiState.value.activeTool == com.example.ui.viewmodel.ActiveTool.RETOUCH)
+        vm.answerRasterize(false)
+        assertFalse(vm.uiState.value.askRasterize)
+        assertTrue(vm.uiState.value.currentProject!!.layers[0].isSmartObject)
+    }
+
+    @Test
     fun `grouping picked layers keeps them together under a group and ungroup restores them`() {
         val (vm, _) = groupVm()
         vm.selectLayer(0)

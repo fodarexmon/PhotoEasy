@@ -208,7 +208,9 @@ data class EditorUiState(
     val compareBefore: Map<String, com.example.data.model.LayerBefore> = emptyMap(),
     /** Layers panel in multi-select mode, and the layers picked there. */
     val isLayerMultiSelect: Boolean = false,
-    val selectedLayerIds: Set<String> = emptySet()
+    val selectedLayerIds: Set<String> = emptySet(),
+    /** A pixel tool was used on a Smart Object: ask to rasterize it (true = dialog shown). */
+    val askRasterize: Boolean = false
 )
 
 data class EditableShape(
@@ -837,6 +839,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun selectTool(tool: ActiveTool) {
+        // Painting tools change pixels: a Smart Object is rasterized first (after asking).
+        if ((tool == ActiveTool.RETOUCH || tool == ActiveTool.OBJECT_REMOVAL) && _uiState.value.activeTool != tool &&
+            !requireRasterized { selectTool(tool) }) return
         val previous = _uiState.value.activeTool
         // Leaving the retouch brushes frees the full-resolution pixels they keep.
         if (previous == ActiveTool.RETOUCH && tool != ActiveTool.RETOUCH && !retouchStrokeActive) retouchSession = null
@@ -5324,6 +5329,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     ) {
         val proj = _uiState.value.currentProject ?: return
         if (_uiState.value.isProcessing) return
+        if (!requireRasterized { createFrequencySeparation(radiusDoc, method, threshold, threeBand, detailRadiusDoc) }) return
         val idx = _uiState.value.selectedLayerIndex
         val layer = proj.layers.getOrNull(idx) ?: return
         if (layer.isLocked) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_layer_locked)); return }
@@ -5484,6 +5490,162 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    // --- Smart Objects ------------------------------------------------------------------------
+
+    /** Action waiting for the user to agree to rasterize the selected Smart Object. */
+    private var afterRasterize: (() -> Unit)? = null
+
+    /**
+     * Pixel tools on a Smart Object: ask to rasterize it first (as Photoshop does). Returns true
+     * when [action] may run now; otherwise it runs after the user agrees.
+     */
+    fun requireRasterized(action: () -> Unit): Boolean {
+        val layer = _uiState.value.currentProject?.layers?.getOrNull(_uiState.value.selectedLayerIndex)
+        if (layer == null || !layer.isSmartObject) return true
+        afterRasterize = action
+        _uiState.value = _uiState.value.copy(askRasterize = true)
+        return false
+    }
+
+    fun answerRasterize(rasterize: Boolean) {
+        val then = afterRasterize
+        afterRasterize = null
+        _uiState.value = _uiState.value.copy(askRasterize = false)
+        if (rasterize) rasterizeSmartObject(then)
+    }
+
+    /** Convert to Smart Object: effects applied from now on stay editable. */
+    fun convertToSmartObject() {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.getOrNull(_uiState.value.selectedLayerIndex) ?: return
+        if (layer.type != LayerType.IMAGE) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.effect_needs_image_layer)); return }
+        if (layer.isSmartObject) return
+        saveHistoryState()
+        layer.isSmartObject = true
+        commitProjectMutation(statusMessage = tr(R.string.status_smart_object_created))
+    }
+
+    private fun updateSmartLayer(layerId: String, transient: Boolean = false, change: (Layer) -> Unit) {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.firstOrNull { it.id == layerId && it.isSmartObject } ?: return
+        if (layer.isLocked) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_layer_locked)); return }
+        if (transient) {
+            if (pendingTransactionSnapshot == null) beginHistoryTransaction()
+            change(layer)
+            proj.markDirty()
+            _uiState.value = _uiState.value.copy(currentProject = proj.copy(layers = ArrayList(proj.layers)), renderRevision = proj.renderRevision)
+        } else {
+            if (pendingTransactionSnapshot != null) commitPendingHistory() else saveHistoryState()
+            change(layer)
+            commitProjectMutation()
+        }
+    }
+
+    /** A Pro effect on a Smart Object becomes a Smart Filter (on the selection: with a filter mask from it). */
+    private fun addSmartFilter(effect: ProFilterType, params: com.example.engine.ProEffectParams) {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.getOrNull(_uiState.value.selectedLayerIndex) ?: return
+        val sel = _uiState.value.selectionMask?.takeIf { !it.isRecycled && SelectionEngine.hasSelection(it) }
+        val mask = if (sel != null && layer.smartFilterMask == null) try {
+            SelectionEngine.mapDocumentMaskToLayerLocal(sel, layer, proj.width, proj.height)
+        } catch (e: Throwable) { null } else null
+        saveHistoryState()
+        layer.smartFilters = layer.smartFilters + com.example.data.model.SmartFilter(effect = effect, params = params)
+        layer.smartFiltersVisible = true
+        if (mask != null) layer.smartFilterMask = mask
+        commitProjectMutation(statusMessage = tr(R.string.status_smart_filter_added))
+    }
+
+    /** Changes one Smart Filter; [transient] for live slider changes (commit with commitPendingHistory). */
+    fun setSmartFilter(layerId: String, filterId: String, transient: Boolean, change: (com.example.data.model.SmartFilter) -> com.example.data.model.SmartFilter) =
+        updateSmartLayer(layerId, transient) { l -> l.smartFilters = l.smartFilters.map { if (it.id == filterId) change(it) else it } }
+
+    fun removeSmartFilter(layerId: String, filterId: String) =
+        updateSmartLayer(layerId) { l ->
+            l.smartFilters = l.smartFilters.filter { it.id != filterId }
+            if (l.smartFilters.isEmpty()) l.smartFilterMask = null
+        }
+
+    /** Moves a filter one step up (later, on top) or down (earlier) in the order. */
+    fun moveSmartFilter(layerId: String, filterId: String, up: Boolean) =
+        updateSmartLayer(layerId) { l ->
+            val list = l.smartFilters.toMutableList()
+            val i = list.indexOfFirst { it.id == filterId }
+            val j = if (up) i + 1 else i - 1
+            if (i >= 0 && j in list.indices) { val t = list[i]; list[i] = list[j]; list[j] = t; l.smartFilters = list }
+        }
+
+    fun setSmartFiltersVisible(layerId: String, visible: Boolean) = updateSmartLayer(layerId) { it.smartFiltersVisible = visible }
+
+    /** Filter mask from the selection: the filters show only there. */
+    fun smartFilterMaskFromSelection(layerId: String) {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.firstOrNull { it.id == layerId } ?: return
+        val sel = _uiState.value.selectionMask?.takeIf { !it.isRecycled && SelectionEngine.hasSelection(it) }
+            ?: run { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_nothing_selected)); return }
+        val m = try { SelectionEngine.mapDocumentMaskToLayerLocal(sel, layer, proj.width, proj.height) } catch (e: Throwable) { return }
+        updateSmartLayer(layerId) { it.smartFilterMask = m }
+    }
+
+    fun invertSmartFilterMask(layerId: String) {
+        val layer = _uiState.value.currentProject?.layers?.firstOrNull { it.id == layerId } ?: return
+        val m = layer.smartFilterMask?.takeIf { !it.isRecycled } ?: return
+        val w = m.width; val h = m.height
+        val (bytes, stride) = SelectionEngine.readAlphaBytes(m)
+        val px = IntArray(w * h) { i -> (255 - (bytes[(i / w) * stride + i % w].toInt() and 255)) shl 24 }
+        val inv = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8).also { it.setPixels(px, 0, w, 0, 0, w, h) }
+        updateSmartLayer(layerId) { it.smartFilterMask = inv }
+    }
+
+    fun clearSmartFilterMask(layerId: String) = updateSmartLayer(layerId) { it.smartFilterMask = null }
+
+    /**
+     * Rasterize: the Smart Filters are applied to the full-resolution pixels and the layer
+     * becomes an ordinary image layer; then [then] runs.
+     */
+    fun rasterizeSmartObject(then: (() -> Unit)? = null) {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.getOrNull(_uiState.value.selectedLayerIndex) ?: return
+        if (!layer.isSmartObject || _uiState.value.isProcessing) return
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_processing))
+            var src: Bitmap? = null
+            var out: Bitmap? = null
+            var historySaved = false
+            try {
+                val active = layer.smartFiltersVisible && layer.smartFilters.any { it.enabled }
+                if (active) {
+                    src = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Image unavailable")
+                    out = withContext(Dispatchers.Default) { LayerRenderer.applySmartFilters(src!!, layer, 0) }
+                }
+                saveHistoryState()
+                historySaved = true
+                if (out != null && !commitDestructiveBitmap(proj, layer, out!!, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "raster", keepBefore = true)) {
+                    throw java.io.IOException("Save failed")
+                }
+                layer.isSmartObject = false
+                layer.smartFilters = emptyList()
+                layer.smartFilterMask = null
+                commitProjectMutation(statusMessage = tr(R.string.status_rasterized), transformState = { it.copy(isProcessing = false) })
+                then?.invoke()
+            } catch (e: OutOfMemoryError) {
+                if (historySaved) rollbackToLastHistoryState()
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_processing_failed_memory))
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                if (historySaved) rollbackToLastHistoryState()
+                _uiState.value = _uiState.value.copy(isProcessing = false)
+                throw e
+            } catch (e: Exception) {
+                if (historySaved) rollbackToLastHistoryState()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_effect_failed))
+            } finally {
+                src?.let { if (it !== layer.bitmap && !it.isRecycled) it.recycle() }
+                out?.let { if (it !== layer.bitmap && !it.isRecycled) it.recycle() }
+            }
+        }
+    }
+
     fun applyProFilter(effect: ProFilterType, params: com.example.engine.ProEffectParams) {
         val proj = _uiState.value.currentProject ?: return
         val idx = _uiState.value.selectedLayerIndex
@@ -5497,6 +5659,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         if (proEffectJob?.isActive == true) return
+        if (layer.isSmartObject) { addSmartFilter(effect, params); return }
 
         proEffectJob = viewModelScope.launch {
             _uiState.value = _uiState.value.copy(
@@ -6186,6 +6349,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (layer.type != LayerType.IMAGE || layer.bitmap == null) {
             _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.effect_needs_image_layer)); return
         }
+        if (!requireRasterized { selectionPixelEdit(prefix, done, edit) }) return
         if (pendingTransactionSnapshot != null) saveHistoryState()
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_processing))
@@ -6252,6 +6416,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_nothing_selected))
             return
         }
+        if (cut && !requireRasterized { selectionToNewLayer(cut, status) }) return
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_copying_selection))
             var src: Bitmap? = null

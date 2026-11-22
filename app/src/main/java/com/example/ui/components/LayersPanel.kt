@@ -99,7 +99,20 @@ class LayerPanelActions(
     /** Opens Blend If for the selected layer. */
     val onBlendIf: () -> Unit = {},
     /** Opens the settings of the adjustment layer at this index. */
-    val onEditAdjustment: (Int) -> Unit = {}
+    val onEditAdjustment: (Int) -> Unit = {},
+    // Smart Objects: convert / rasterize, and the Smart Filters (layer id, filter id).
+    val onConvertToSmartObject: () -> Unit = {},
+    val onRasterize: () -> Unit = {},
+    val onEditSmartFilter: (String, String) -> Unit = { _, _ -> },
+    val onToggleSmartFilter: (String, String) -> Unit = { _, _ -> },
+    val onRemoveSmartFilter: (String, String) -> Unit = { _, _ -> },
+    val onSetSmartFiltersVisible: (String, Boolean) -> Unit = { _, _ -> },
+    val onSmartMaskFromSelection: (String) -> Unit = {},
+    val onInvertSmartMask: (String) -> Unit = {},
+    val onClearSmartMask: (String) -> Unit = {},
+    /** Opens the Effects panel (to add a Smart Filter). */
+    val onOpenEffects: () -> Unit = {},
+    val onMoveSmartFilterUp: (String, String) -> Unit = { _, _ -> }
 )
 
 /** Align / distribute choices, in [LayerPanelActions.onAlign] order. */
@@ -473,6 +486,19 @@ fun LayersPanel(
                             enabled = selectedIndex > 0,
                             onClick = { showActionsMenu = false; onMergeDown() }
                         )
+                        if (selectedLayer.type == LayerType.IMAGE) {
+                            if (!selectedLayer.isSmartObject) DropdownMenuItem(
+                                text = { Text(stringResource(R.string.smart_object_convert)) },
+                                leadingIcon = { Icon(Icons.Default.AutoAwesomeMotion, null) },
+                                onClick = { showActionsMenu = false; actions.onConvertToSmartObject() },
+                                modifier = Modifier.testTag("menu_smart_object")
+                            ) else DropdownMenuItem(
+                                text = { Text(stringResource(R.string.smart_object_rasterize)) },
+                                leadingIcon = { Icon(Icons.Default.GridOn, null) },
+                                onClick = { showActionsMenu = false; actions.onRasterize() },
+                                modifier = Modifier.testTag("menu_rasterize")
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text(stringResource(R.string.blend_if_menu)) },
                             leadingIcon = { Icon(Icons.Default.Gradient, null) },
@@ -693,6 +719,15 @@ fun LayersPanel(
                         contentAlignment = Alignment.Center
                     ) {
                         LayerThumbnailContent(layer, documentWidth, documentHeight)
+                        if (layer.isSmartObject) {
+                            // Smart Object badge (bottom corner of the thumbnail).
+                            Icon(
+                                Icons.Default.AutoAwesomeMotion, contentDescription = stringResource(R.string.smart_object),
+                                tint = Color.White,
+                                modifier = Modifier.align(Alignment.BottomEnd).padding(2.dp).size(14.dp)
+                                    .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(3.dp)).padding(1.dp)
+                            )
+                        }
                     }
                     if (layer.type == LayerType.ADJUSTMENT && !actions.multiSelect) {
                         // Reopen the adjustment's controls at any time.
@@ -818,6 +853,10 @@ fun LayersPanel(
                             modifier = Modifier.size(18.dp)
                         )
                     }
+                }
+                // Smart Filters under a Smart Object (Photoshop shows them as sub-rows).
+                if (layer.isSmartObject && layer.smartFilters.isNotEmpty() && !actions.multiSelect) {
+                    SmartFilterRows(layer, depth, actions)
                 }
             }
         }
@@ -1270,5 +1309,71 @@ private fun MultiSelectBar(layers: List<Layer>, actions: LayerPanelActions) {
         }
         Action(R.string.layer_delete, Icons.Default.Delete, "btn_layers_delete", on = enabled && n < layers.size,
             tint = MaterialTheme.colorScheme.error) { confirmDelete = true }
+    }
+}
+
+
+/** The Smart Filters of [layer]: a header (show all, filter mask) and one row per filter. */
+@Composable
+private fun SmartFilterRows(layer: Layer, depth: Int, actions: LayerPanelActions) {
+    var maskMenu by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().padding(start = (depth * 16 + 40).dp, end = 4.dp, bottom = 4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = { actions.onSetSmartFiltersVisible(layer.id, !layer.smartFiltersVisible) }, modifier = Modifier.size(32.dp)) {
+                Icon(if (layer.smartFiltersVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff, stringResource(R.string.layer_visibility),
+                    tint = Color.LightGray, modifier = Modifier.size(16.dp))
+            }
+            Text(stringResource(R.string.smart_filters), color = Color.LightGray, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            // Filter mask: from the selection, inverted or removed.
+            Box {
+                TextButton(onClick = { maskMenu = true }, contentPadding = PaddingValues(horizontal = 6.dp), modifier = Modifier.height(30.dp).testTag("btn_smart_mask")) {
+                    Icon(Icons.Default.Gradient, null, modifier = Modifier.size(14.dp), tint = if (layer.smartFilterMask != null) IndigoPrimary else Color.Gray)
+                    Spacer(Modifier.width(4.dp))
+                    Text(stringResource(if (layer.smartFilterMask != null) R.string.smart_filter_mask_on else R.string.smart_filter_mask), fontSize = 11.sp,
+                        color = if (layer.smartFilterMask != null) IndigoPrimary else Color.Gray)
+                }
+                DropdownMenu(expanded = maskMenu, onDismissRequest = { maskMenu = false }) {
+                    DropdownMenuItem(text = { Text(stringResource(R.string.smart_filter_mask_from_selection)) }, onClick = { maskMenu = false; actions.onSmartMaskFromSelection(layer.id) })
+                    if (layer.smartFilterMask != null) {
+                        DropdownMenuItem(text = { Text(stringResource(R.string.smart_filter_mask_invert)) }, onClick = { maskMenu = false; actions.onInvertSmartMask(layer.id) })
+                        DropdownMenuItem(text = { Text(stringResource(R.string.smart_filter_mask_remove)) }, onClick = { maskMenu = false; actions.onClearSmartMask(layer.id) })
+                    }
+                }
+            }
+            IconButton(onClick = actions.onOpenEffects, modifier = Modifier.size(32.dp).testTag("btn_add_smart_filter")) {
+                Icon(Icons.Default.Add, stringResource(R.string.smart_filter_add), tint = IndigoPrimary, modifier = Modifier.size(18.dp))
+            }
+        }
+        // Top of the list = applied last, as in Photoshop.
+        val last = layer.smartFilters.lastOrNull()?.id
+        layer.smartFilters.asReversed().forEach { f ->
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp))
+                    .clickable { actions.onEditSmartFilter(layer.id, f.id) }.padding(start = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = { actions.onToggleSmartFilter(layer.id, f.id) }, modifier = Modifier.size(32.dp)) {
+                    Icon(if (f.enabled) Icons.Default.Visibility else Icons.Default.VisibilityOff, stringResource(R.string.layer_visibility),
+                        tint = if (f.enabled) Color.LightGray else Color.Gray, modifier = Modifier.size(16.dp))
+                }
+                Text(
+                    proEffectLabel(f.effect) + if (f.opacity < 0.995f || f.blendMode != com.example.data.model.BlendModeType.NORMAL)
+                        " · ${(f.opacity * 100).roundToInt()}%" else "",
+                    color = if (f.enabled) Color.White else Color.Gray, fontSize = 12.sp, modifier = Modifier.weight(1f), maxLines = 1
+                )
+                if (layer.smartFilters.size > 1 && f.id != last) {
+                    // Move up the list: applied later.
+                    IconButton(onClick = { actions.onMoveSmartFilterUp(layer.id, f.id) }, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.ArrowUpward, stringResource(R.string.smart_filter_move_up), tint = Color.Gray, modifier = Modifier.size(16.dp))
+                    }
+                }
+                IconButton(onClick = { actions.onEditSmartFilter(layer.id, f.id) }, modifier = Modifier.size(32.dp).testTag("btn_edit_smart_filter")) {
+                    Icon(Icons.Default.Tune, stringResource(R.string.smart_filter_edit_short), tint = IndigoPrimary, modifier = Modifier.size(16.dp))
+                }
+                IconButton(onClick = { actions.onRemoveSmartFilter(layer.id, f.id) }, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.Close, stringResource(R.string.layer_delete), tint = Color.Gray, modifier = Modifier.size(16.dp))
+                }
+            }
+        }
     }
 }

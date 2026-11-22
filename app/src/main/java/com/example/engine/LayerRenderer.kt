@@ -25,6 +25,7 @@ import com.example.data.model.TextLayerConfig
 import java.io.File
 import kotlin.coroutines.coroutineContext
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -147,6 +148,57 @@ object LayerRenderer {
             }
         }
         return result
+    }
+
+    /**
+     * [input] (the layer's pixels, possibly a reduced copy of a layer whose full size is
+     * [fullResMax] on its long side) with the layer's Smart Filters applied in order, each with
+     * its opacity and blend mode, shown through the filter mask. Returns a new bitmap.
+     */
+    suspend fun applySmartFilters(input: Bitmap, layer: Layer, fullResMax: Int, isCancelled: () -> Boolean = { false }): Bitmap {
+        val ratio = if (fullResMax > 0) (max(input.width, input.height).toFloat() / fullResMax).coerceAtMost(1f) else 1f
+        var cur = input.copy(Bitmap.Config.ARGB_8888, true)
+        for (f in layer.smartFilters) {
+            if (!f.enabled) continue
+            coroutineContext.ensureActive()
+            val params = ProEffects.scaleForPreview(f.effect, f.params, ratio)
+            val out = ProEffects.apply(cur, f.effect, params, isCancelled)
+            if (out === cur) continue
+            if (f.opacity >= 0.999f && f.blendMode == BlendModeType.NORMAL) {
+                cur.recycle(); cur = out
+            } else {
+                // Filter blending options: the result over what came before.
+                val base = cur
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+                drawBlendedPlain(Canvas(base), base, out, f.blendMode, f.opacity, paint)
+                out.recycle()
+                cur = base
+            }
+        }
+        // Filter mask: the unfiltered pixels where the mask is dark.
+        val mask = layer.smartFilterMask?.takeIf { !it.isRecycled }
+        if (mask != null) {
+            val w = cur.width; val h = cur.height
+            val m = Bitmap.createScaledBitmap(mask, w, h, true)
+            val (mb, stride) = SelectionEngine.readAlphaBytes(m)
+            if (m !== mask) m.recycle()
+            val orig = IntArray(w * h); input.getPixels(orig, 0, w, 0, 0, minOf(w, input.width), minOf(h, input.height))
+            val px = IntArray(w * h); cur.getPixels(px, 0, w, 0, 0, w, h)
+            for (y in 0 until h) for (x in 0 until w) {
+                val k = (mb[y * stride + x].toInt() and 255)
+                if (k == 255) continue
+                val i = y * w + x
+                px[i] = mixArgb(orig[i], px[i], k / 255f)
+            }
+            cur.setPixels(px, 0, w, 0, 0, w, h)
+        }
+        return cur
+    }
+
+    /** [a] to [b] by [t] (unpremultiplied ARGB, all channels). */
+    private fun mixArgb(a: Int, b: Int, t: Float): Int {
+        fun ch(sh: Int) = ((((a shr sh) and 255) * (1f - t) + ((b shr sh) and 255) * t) + 0.5f).toInt().coerceIn(0, 255)
+        return (ch(24) shl 24) or (ch(16) shl 16) or (ch(8) shl 8) or ch(0)
     }
 
     /** True when [preview] targets [layer] and still matches its current pixels. */
@@ -617,13 +669,15 @@ object LayerRenderer {
                         return null
                     }
                     var processedBmp: Bitmap = baseBmp
-                    val hasLook = !layer.adjustments.isIdentity() || layer.filter != com.example.data.model.FilterType.NONE || layer.lutId != null
+                    val smart = layer.isSmartObject && layer.smartFiltersVisible && layer.smartFilters.any { it.enabled }
+                    val hasLook = smart || !layer.adjustments.isIdentity() || layer.filter != com.example.data.model.FilterType.NONE || layer.lutId != null
                     val downscale = scaleRatio < 1.0f && (baseBmp.width > 800 || baseBmp.height > 800)
                     val lookKey = if (cacheLook && proEffect == null && (hasLook || downscale)) {
                         val pw = if (downscale) (baseBmp.width * scaleRatio).toInt().coerceAtLeast(1) else baseBmp.width
                         val ph = if (downscale) (baseBmp.height * scaleRatio).toInt().coerceAtLeast(1) else baseBmp.height
                         "look:${System.identityHashCode(baseBmp)}:${baseBmp.generationId}:${pw}x$ph:" +
-                            "${layer.adjustments}:${layer.adjustmentKind}:${layer.filter}:${layer.filterIntensity}:${layer.lutId}"
+                            "${layer.adjustments}:${layer.adjustmentKind}:${layer.filter}:${layer.filterIntensity}:${layer.lutId}" +
+                            (if (smart) ":sf:${layer.smartFilters}:${System.identityHashCode(layer.smartFilterMask)}" else "")
                     } else null
                     lookKey?.let { k -> lookGet(k)?.let { processedBmp = it; lookFromCache = true } }
 
@@ -644,6 +698,19 @@ object LayerRenderer {
                             val effected = proEffectFor(processedBmp, proEffect, isCancelledCheck)
                             if (processedBmp !== baseBmp && !processedBmp.isRecycled) processedBmp.recycle()
                             processedBmp = effected
+                        }
+
+                        // Smart Filters: the Smart Object's effects, in order, on its own pixels.
+                        if (!lookFromCache && smart) {
+                            coroutineContext.ensureActive()
+                            val fullMax = run {
+                                val original = max(layer.originalWidth, layer.originalHeight)
+                                val intrinsic = max(layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight()).toInt().coerceIn(64, 4096)
+                                if (original > 0) min(intrinsic, original) else intrinsic
+                            }
+                            val filtered = applySmartFilters(processedBmp, layer, fullMax) { currentJob?.isActive == false }
+                            if (processedBmp !== baseBmp && processedBmp !== filtered && !processedBmp.isRecycled) processedBmp.recycle()
+                            processedBmp = filtered
                         }
 
                         // Apply color adjustments if present

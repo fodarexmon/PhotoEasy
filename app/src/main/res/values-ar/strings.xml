@@ -1210,4 +1210,24 @@
     <string name="adj_colorize_hue">اللون</string>
     <string name="adj_colorize_saturation">التشبع</string>
     <string name="adj_colorize_lightness">الإضاءة</string>
+    <string name="rasterize_title">تحويل الـ Smart Object إلى طبقة عادية؟</string>
+    <string name="rasterize_message">هذه الأداة تغيّر البكسلات مباشرة. ستُطبَّق الفلاتر الذكية على الطبقة ولن تعود قابلة للتعديل.</string>
+    <string name="rasterize_ok">تحويل</string>
+    <string name="smart_object">Smart Object</string>
+    <string name="smart_object_convert">تحويل إلى Smart Object</string>
+    <string name="smart_object_rasterize">تحويل إلى طبقة عادية</string>
+    <string name="status_smart_object_created">Smart Object: التأثيرات ستبقى قابلة للتعديل</string>
+    <string name="status_smart_filter_added">أُضيف فلتر ذكي</string>
+    <string name="status_rasterized">حُوّلت إلى طبقة عادية</string>
+    <string name="smart_filters">الفلاتر الذكية</string>
+    <string name="smart_filter_mask">قناع</string>
+    <string name="smart_filter_mask_on">قناع ✓</string>
+    <string name="smart_filter_mask_from_selection">قناع الفلاتر من التحديد</string>
+    <string name="smart_filter_mask_invert">عكس قناع الفلاتر</string>
+    <string name="smart_filter_mask_remove">إزالة قناع الفلاتر</string>
+    <string name="smart_filter_add">إضافة فلتر ذكي</string>
+    <string name="smart_filter_edit">تعديل: %s</string>
+    <string name="smart_filter_edit_short">تعديل الفلتر</string>
+    <string name="smart_filter_blending">خيارات المزج</string>
+    <string name="smart_filter_move_up">تحريك لأعلى</string>
 </resources>

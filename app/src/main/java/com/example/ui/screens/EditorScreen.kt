@@ -382,6 +382,8 @@ fun EditorScreen(
     val maskBrushOpacity = uiState.maskBrushOpacity
     // Blend If dialog for the selected layer.
     var showBlendIf by remember { mutableStateOf(false) }
+    // Smart filter being edited: (layer id, filter id).
+    var editingSmartFilter by remember { mutableStateOf<Pair<String, String>?>(null) }
     val layerActions = com.example.ui.components.LayerPanelActions(
         onToggleVisibilityAt = { viewModel.toggleLayerVisibilityAt(it) },
         onToggleLockAt = { viewModel.toggleLayerLockAt(it) },
@@ -410,7 +412,18 @@ fun EditorScreen(
         onFlatten = { viewModel.flattenImage() },
         onAlign = { viewModel.alignLayers(com.example.ui.viewmodel.EditorViewModel.LayerAlign.values()[it]) },
         onBlendIf = { showBlendIf = true },
-        onEditAdjustment = { idx -> viewModel.selectLayer(idx); onToolSelect(ActiveTool.ADJUST) }
+        onEditAdjustment = { idx -> viewModel.selectLayer(idx); onToolSelect(ActiveTool.ADJUST) },
+        onConvertToSmartObject = { viewModel.convertToSmartObject() },
+        onRasterize = { viewModel.rasterizeSmartObject() },
+        onEditSmartFilter = { layerId, filterId -> editingSmartFilter = layerId to filterId },
+        onToggleSmartFilter = { layerId, filterId -> viewModel.setSmartFilter(layerId, filterId, transient = false) { it.copy(enabled = !it.enabled) } },
+        onRemoveSmartFilter = { layerId, filterId -> viewModel.removeSmartFilter(layerId, filterId) },
+        onSetSmartFiltersVisible = { layerId, v -> viewModel.setSmartFiltersVisible(layerId, v) },
+        onSmartMaskFromSelection = { viewModel.smartFilterMaskFromSelection(it) },
+        onInvertSmartMask = { viewModel.invertSmartFilterMask(it) },
+        onClearSmartMask = { viewModel.clearSmartFilterMask(it) },
+        onOpenEffects = { onToolSelect(ActiveTool.EFFECTS) },
+        onMoveSmartFilterUp = { layerId, filterId -> viewModel.moveSmartFilter(layerId, filterId, up = true) }
     )
     var currentCropRect by remember { mutableStateOf<android.graphics.RectF?>(null) }
     var showExportDialog by remember { mutableStateOf(false) }
@@ -938,9 +951,9 @@ fun EditorScreen(
                                 }
                             }
                             FiltersPanel(
-                                onOpenLiquify = { if (viewModel.canLiquifySelectedLayer()) { liquifyFaceTab = false; showLiquify = true } },
-                                onOpenFaceLiquify = { if (viewModel.canLiquifySelectedLayer()) { liquifyFaceTab = true; showLiquify = true } },
-                                onOpenFrequencySeparation = { if (viewModel.canLiquifySelectedLayer()) showFrequencySeparation = true },
+                                onOpenLiquify = { if (viewModel.canLiquifySelectedLayer() && viewModel.requireRasterized { liquifyFaceTab = false; showLiquify = true }) { liquifyFaceTab = false; showLiquify = true } },
+                                onOpenFaceLiquify = { if (viewModel.canLiquifySelectedLayer() && viewModel.requireRasterized { liquifyFaceTab = true; showLiquify = true }) { liquifyFaceTab = true; showLiquify = true } },
+                                onOpenFrequencySeparation = { if (viewModel.canLiquifySelectedLayer() && viewModel.requireRasterized { showFrequencySeparation = true }) showFrequencySeparation = true },
                                 hasSelection = hasActiveSelectionCached,
                                 onSmoothSelection = { viewModel.smoothSelectionOnLayer() },
                                 initialTab = if (activeTool == ActiveTool.EFFECTS) com.example.ui.components.FilterPanelTab.PRO_EFFECTS else com.example.ui.components.FilterPanelTab.PRESETS,
@@ -1753,6 +1766,27 @@ fun EditorScreen(
             previewGeom = uiState.refinePreviewGeom,
             documentMaxDim = maxOf(project.width, project.height)
         )
+    }
+
+    if (uiState.askRasterize) {
+        AlertDialog(
+            onDismissRequest = { viewModel.answerRasterize(false) },
+            title = { Text(stringResource(R.string.rasterize_title)) },
+            text = { Text(stringResource(R.string.rasterize_message)) },
+            confirmButton = { TextButton(onClick = { viewModel.answerRasterize(true) }, modifier = Modifier.testTag("btn_rasterize_ok")) { Text(stringResource(R.string.rasterize_ok)) } },
+            dismissButton = { TextButton(onClick = { viewModel.answerRasterize(false) }) { Text(stringResource(R.string.action_cancel)) } }
+        )
+    }
+    editingSmartFilter?.let { (layerId, filterId) ->
+        val f = project.layers.firstOrNull { it.id == layerId }?.smartFilters?.firstOrNull { it.id == filterId }
+        if (f == null) editingSmartFilter = null else {
+            com.example.ui.components.SmartFilterDialog(
+                filter = f,
+                onChange = { nf -> viewModel.setSmartFilter(layerId, filterId, transient = true) { nf } },
+                onDone = { editingSmartFilter = null; onCommitHistoryState() },
+                onCancel = { editingSmartFilter = null; onCancelHistoryState() }
+            )
+        }
     }
 
     if (showBlendIf) {

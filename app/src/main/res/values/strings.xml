@@ -1206,4 +1206,24 @@
     <string name="adj_colorize_hue">Hue</string>
     <string name="adj_colorize_saturation">Saturation</string>
     <string name="adj_colorize_lightness">Lightness</string>
+    <string name="rasterize_title">Rasterize Smart Object?</string>
+    <string name="rasterize_message">This tool changes pixels directly. The Smart Filters will be applied to the layer and stop being editable.</string>
+    <string name="rasterize_ok">Rasterize</string>
+    <string name="smart_object">Smart Object</string>
+    <string name="smart_object_convert">Convert to Smart Object</string>
+    <string name="smart_object_rasterize">Rasterize layer</string>
+    <string name="status_smart_object_created">Smart Object: effects stay editable</string>
+    <string name="status_smart_filter_added">Smart Filter added</string>
+    <string name="status_rasterized">Layer rasterized</string>
+    <string name="smart_filters">Smart Filters</string>
+    <string name="smart_filter_mask">Mask</string>
+    <string name="smart_filter_mask_on">Mask ✓</string>
+    <string name="smart_filter_mask_from_selection">Filter mask from selection</string>
+    <string name="smart_filter_mask_invert">Invert filter mask</string>
+    <string name="smart_filter_mask_remove">Remove filter mask</string>
+    <string name="smart_filter_add">Add Smart Filter</string>
+    <string name="smart_filter_edit">Edit: %s</string>
+    <string name="smart_filter_edit_short">Edit filter</string>
+    <string name="smart_filter_blending">Blending options</string>
+    <string name="smart_filter_move_up">Move up</string>
 </resources>

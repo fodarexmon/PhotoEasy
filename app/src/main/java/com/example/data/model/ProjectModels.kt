@@ -110,6 +110,16 @@ enum class AdjustmentKind(val labelRes: Int) {
 }
 
 /** Settings of the adjustment kinds that are not plain [ColorAdjustments]. Immutable. */
+/** One Smart Filter: a Pro effect with its settings, shown or hidden, with its own opacity and blend mode. */
+data class SmartFilter(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val effect: ProFilterType,
+    val params: com.example.engine.ProEffectParams,
+    val enabled: Boolean = true,
+    val opacity: Float = 1f,
+    val blendMode: BlendModeType = BlendModeType.NORMAL
+)
+
 /** Levels of one colour channel: input black / gamma / white and output black / white (0..255). */
 data class LevelsChannel(
     val inBlack: Float = 0f,
@@ -545,7 +555,16 @@ data class Layer(
     /** Groups: members hidden in the layers panel. */
     var isCollapsed: Boolean = false,
     /** Photoshop's Blend If (Layer Style > Blending Options). */
-    var blendIf: BlendIf = BlendIf()
+    var blendIf: BlendIf = BlendIf(),
+    /**
+     * Smart Object: pixel effects become [smartFilters] (editable, drawn on every render)
+     * instead of changing the pixels, and pixel tools ask to rasterize first.
+     */
+    var isSmartObject: Boolean = false,
+    var smartFilters: List<SmartFilter> = emptyList(),
+    var smartFiltersVisible: Boolean = true,
+    /** Where the smart filters show (ALPHA_8 over the layer's own pixels, any size), or null = everywhere. */
+    var smartFilterMask: Bitmap? = null
 ) {
     fun currentMaskAnchor(): MaskAnchor = MaskAnchor(positionX, positionY, scaleX, scaleY, rotation)
 

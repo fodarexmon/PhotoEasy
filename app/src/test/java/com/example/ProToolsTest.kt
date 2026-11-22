@@ -237,6 +237,42 @@ class ProToolsTest {
     // --- Levels per channel, noise reduction, grain -------------------------------------------
 
     @Test
+    fun `smart filters render in order with opacity and mask and are saved`() {
+        // Left half black, right half white: a blur softens the edge.
+        val w = 40; val h = 10
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        for (y in 0 until h) for (x in 0 until w) bmp.setPixel(x, y, if (x < 20) Color.BLACK else Color.WHITE)
+        val blur = com.example.data.model.SmartFilter(effect = com.example.data.model.ProFilterType.GAUSSIAN_BLUR,
+            params = com.example.engine.ProEffects.defaults(com.example.data.model.ProFilterType.GAUSSIAN_BLUR).copy(p1 = 4f))
+        val layer = Layer(id = "so", name = "SO", type = LayerType.IMAGE, bitmap = bmp, contentWidth = w.toFloat(), contentHeight = h.toFloat(),
+            isSmartObject = true, smartFilters = listOf(blur))
+        val out = runBlocking { com.example.engine.LayerRenderer.applySmartFilters(bmp, layer, 0) }
+        assertTrue("blurred edge", Color.red(out.getPixel(19, 5)) > 20 && Color.red(out.getPixel(20, 5)) < 235)
+        // Disabled: nothing changes.
+        layer.smartFilters = listOf(blur.copy(enabled = false))
+        val off = runBlocking { com.example.engine.LayerRenderer.applySmartFilters(bmp, layer, 0) }
+        assertEquals(Color.BLACK, off.getPixel(19, 5))
+        // Half opacity: between the two.
+        layer.smartFilters = listOf(blur.copy(opacity = 0.5f))
+        val half = runBlocking { com.example.engine.LayerRenderer.applySmartFilters(bmp, layer, 0) }
+        assertTrue(Color.red(half.getPixel(19, 5)) in 1 until Color.red(out.getPixel(19, 5)))
+        // Filter mask hiding the edge area: the original shows there.
+        layer.smartFilters = listOf(blur)
+        layer.smartFilterMask = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
+        val masked = runBlocking { com.example.engine.LayerRenderer.applySmartFilters(bmp, layer, 0) }
+        assertEquals(Color.BLACK, masked.getPixel(19, 5))
+        // Saved with the project.
+        layer.smartFilterMask = null
+        val repo = ProjectRepository(context)
+        val proj = Project(id = "smart_proj", name = "SP", width = w, height = h)
+        proj.layers.add(layer)
+        runBlocking { assertTrue(repo.saveProject(proj)) }
+        val back = runBlocking { repo.getProjectById("smart_proj") }!!.layers.first { it.id == "so" }
+        assertTrue(back.isSmartObject)
+        assertEquals(listOf(blur), back.smartFilters)
+    }
+
+    @Test
     fun `colorize gives one hue and keeps lightness`() {
         val p = AdjustmentLayerParams(colorize = true, colorizeHue = 0f, colorizeSaturation = 100f)
         val px = intArrayOf(Color.rgb(128, 128, 128), Color.rgb(20, 200, 60), Color.WHITE, Color.BLACK)

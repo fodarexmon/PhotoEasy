@@ -665,67 +665,7 @@ fun FiltersPanel(
             )
             Spacer(Modifier.height(8.dp))
 
-            val p = proParams
-            fun upd(change: (com.example.engine.ProEffectParams) -> com.example.engine.ProEffectParams) { proParams = change(proParams) }
-            when (selectedProEffect) {
-                ProFilterType.GAUSSIAN_BLUR -> {
-                    ProEffectSlider(stringResource(R.string.effect_radius), p.p1, 0.3f..100f, "px") { v -> upd { it.copy(p1 = v) } }
-                }
-                ProFilterType.SURFACE_BLUR -> {
-                    ProEffectSlider(stringResource(R.string.effect_radius), p.p1, 1f..50f, "px") { v -> upd { it.copy(p1 = v) } }
-                    ProEffectSlider(stringResource(R.string.effect_threshold), p.p2, 2f..100f, "") { v -> upd { it.copy(p2 = v) } }
-                }
-                ProFilterType.OIL_PAINT -> {
-                    ProEffectSlider(stringResource(R.string.effect_brush_size), p.p1, 1f..12f, "", step = 1f) { v -> upd { it.copy(p1 = v) } }
-                    ProEffectSlider(stringResource(R.string.effect_texture), p.p2, 0f..100f, "%") { v -> upd { it.copy(p2 = v) } }
-                }
-                ProFilterType.SHARPEN -> {
-                    ProEffectSlider(stringResource(R.string.effect_amount), p.p1, 0f..500f, "%") { v -> upd { it.copy(p1 = v) } }
-                    ProEffectSlider(stringResource(R.string.effect_radius), p.p2, 0.1f..10f, "px") { v -> upd { it.copy(p2 = v) } }
-                    ProEffectSlider(stringResource(R.string.effect_threshold), p.p3, 0f..50f, "") { v -> upd { it.copy(p3 = v) } }
-                }
-                ProFilterType.NOISE_REDUCTION -> {
-                    ProEffectSlider(stringResource(R.string.effect_luminance_noise), p.p1, 0f..100f, "%") { v -> upd { it.copy(p1 = v) } }
-                    ProEffectSlider(stringResource(R.string.effect_color_noise), p.p2, 0f..100f, "%") { v -> upd { it.copy(p2 = v) } }
-                    ProEffectSlider(stringResource(R.string.effect_detail), p.p3, 0f..100f, "%") { v -> upd { it.copy(p3 = v) } }
-                }
-                ProFilterType.MOTION_BLUR -> {
-                    ProEffectSlider(stringResource(R.string.effect_distance), p.p1, 1f..200f, "px") { v -> upd { it.copy(p1 = v) } }
-                    ProEffectSlider(stringResource(R.string.effect_angle), p.p2, 0f..360f, "°", step = 1f) { v -> upd { it.copy(p2 = v) } }
-                }
-                ProFilterType.RADIAL_BLUR -> {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(horizontal = 4.dp)) {
-                        FilterChip(
-                            selected = p.mode == 0,
-                            onClick = { upd { it.copy(mode = 0) } },
-                            label = { Text(stringResource(R.string.effect_zoom), fontSize = 12.sp) },
-                            modifier = Modifier.heightIn(min = 38.dp).testTag("chip_radial_zoom")
-                        )
-                        FilterChip(
-                            selected = p.mode == 1,
-                            onClick = { upd { it.copy(mode = 1) } },
-                            label = { Text(stringResource(R.string.effect_spin), fontSize = 12.sp) },
-                            modifier = Modifier.heightIn(min = 38.dp).testTag("chip_radial_spin")
-                        )
-                    }
-                    ProEffectSlider(stringResource(R.string.effect_amount), p.p1, 1f..100f, "%") { v -> upd { it.copy(p1 = v) } }
-                }
-                ProFilterType.LENS_BLUR -> {
-                    ProEffectSlider(stringResource(R.string.effect_radius), p.p1, 1f..60f, "px") { v -> upd { it.copy(p1 = v) } }
-                    ProEffectSlider(stringResource(R.string.effect_highlights), p.p2, 0f..100f, "%") { v -> upd { it.copy(p2 = v) } }
-                }
-                ProFilterType.TILT_SHIFT -> {
-                    ProEffectSlider(stringResource(R.string.effect_radius), p.p1, 1f..60f, "px") { v -> upd { it.copy(p1 = v) } }
-                    ProEffectSlider(stringResource(R.string.effect_focus_size), p.p2, 2f..90f, "%") { v -> upd { it.copy(p2 = v) } }
-                    ProEffectSlider(stringResource(R.string.effect_transition), p.p3, 2f..80f, "%") { v -> upd { it.copy(p3 = v) } }
-                    ProEffectSlider(stringResource(R.string.effect_angle), p.angle, -90f..90f, "°", step = 1f) { v -> upd { it.copy(angle = v) } }
-                }
-                ProFilterType.HIGH_PASS -> {
-                    ProEffectSlider(stringResource(R.string.effect_radius), p.p1, 0.3f..50f, "px") { v -> upd { it.copy(p1 = v) } }
-                }
-            }
-            // Every effect can be faded into the original.
-            ProEffectSlider(stringResource(R.string.effect_fade), p.fade, 0f..100f, "%", step = 1f) { v -> upd { it.copy(fade = v) } }
+            ProEffectControls(selectedProEffect, proParams) { proParams = it }
 
             Spacer(Modifier.height(12.dp))
 
@@ -822,4 +762,71 @@ private fun tileThumbnail(src: Bitmap, maxDim: Int): Bitmap {
         android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
     )
     return out
+}
+
+
+/** The settings of Pro effect [effect] ([params]), plus Fade; also used to edit a Smart Filter. */
+@Composable
+fun ProEffectControls(effect: ProFilterType, params: com.example.engine.ProEffectParams, onChange: (com.example.engine.ProEffectParams) -> Unit) {
+    val p = params
+    fun upd(change: (com.example.engine.ProEffectParams) -> com.example.engine.ProEffectParams) { onChange(change(params)) }
+    when (effect) {
+        ProFilterType.GAUSSIAN_BLUR -> {
+            ProEffectSlider(stringResource(R.string.effect_radius), p.p1, 0.3f..100f, "px") { v -> upd { it.copy(p1 = v) } }
+        }
+        ProFilterType.SURFACE_BLUR -> {
+            ProEffectSlider(stringResource(R.string.effect_radius), p.p1, 1f..50f, "px") { v -> upd { it.copy(p1 = v) } }
+            ProEffectSlider(stringResource(R.string.effect_threshold), p.p2, 2f..100f, "") { v -> upd { it.copy(p2 = v) } }
+        }
+        ProFilterType.OIL_PAINT -> {
+            ProEffectSlider(stringResource(R.string.effect_brush_size), p.p1, 1f..12f, "", step = 1f) { v -> upd { it.copy(p1 = v) } }
+            ProEffectSlider(stringResource(R.string.effect_texture), p.p2, 0f..100f, "%") { v -> upd { it.copy(p2 = v) } }
+        }
+        ProFilterType.SHARPEN -> {
+            ProEffectSlider(stringResource(R.string.effect_amount), p.p1, 0f..500f, "%") { v -> upd { it.copy(p1 = v) } }
+            ProEffectSlider(stringResource(R.string.effect_radius), p.p2, 0.1f..10f, "px") { v -> upd { it.copy(p2 = v) } }
+            ProEffectSlider(stringResource(R.string.effect_threshold), p.p3, 0f..50f, "") { v -> upd { it.copy(p3 = v) } }
+        }
+        ProFilterType.NOISE_REDUCTION -> {
+            ProEffectSlider(stringResource(R.string.effect_luminance_noise), p.p1, 0f..100f, "%") { v -> upd { it.copy(p1 = v) } }
+            ProEffectSlider(stringResource(R.string.effect_color_noise), p.p2, 0f..100f, "%") { v -> upd { it.copy(p2 = v) } }
+            ProEffectSlider(stringResource(R.string.effect_detail), p.p3, 0f..100f, "%") { v -> upd { it.copy(p3 = v) } }
+        }
+        ProFilterType.MOTION_BLUR -> {
+            ProEffectSlider(stringResource(R.string.effect_distance), p.p1, 1f..200f, "px") { v -> upd { it.copy(p1 = v) } }
+            ProEffectSlider(stringResource(R.string.effect_angle), p.p2, 0f..360f, "°", step = 1f) { v -> upd { it.copy(p2 = v) } }
+        }
+        ProFilterType.RADIAL_BLUR -> {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(horizontal = 4.dp)) {
+                FilterChip(
+                    selected = p.mode == 0,
+                    onClick = { upd { it.copy(mode = 0) } },
+                    label = { Text(stringResource(R.string.effect_zoom), fontSize = 12.sp) },
+                    modifier = Modifier.heightIn(min = 38.dp).testTag("chip_radial_zoom")
+                )
+                FilterChip(
+                    selected = p.mode == 1,
+                    onClick = { upd { it.copy(mode = 1) } },
+                    label = { Text(stringResource(R.string.effect_spin), fontSize = 12.sp) },
+                    modifier = Modifier.heightIn(min = 38.dp).testTag("chip_radial_spin")
+                )
+            }
+            ProEffectSlider(stringResource(R.string.effect_amount), p.p1, 1f..100f, "%") { v -> upd { it.copy(p1 = v) } }
+        }
+        ProFilterType.LENS_BLUR -> {
+            ProEffectSlider(stringResource(R.string.effect_radius), p.p1, 1f..60f, "px") { v -> upd { it.copy(p1 = v) } }
+            ProEffectSlider(stringResource(R.string.effect_highlights), p.p2, 0f..100f, "%") { v -> upd { it.copy(p2 = v) } }
+        }
+        ProFilterType.TILT_SHIFT -> {
+            ProEffectSlider(stringResource(R.string.effect_radius), p.p1, 1f..60f, "px") { v -> upd { it.copy(p1 = v) } }
+            ProEffectSlider(stringResource(R.string.effect_focus_size), p.p2, 2f..90f, "%") { v -> upd { it.copy(p2 = v) } }
+            ProEffectSlider(stringResource(R.string.effect_transition), p.p3, 2f..80f, "%") { v -> upd { it.copy(p3 = v) } }
+            ProEffectSlider(stringResource(R.string.effect_angle), p.angle, -90f..90f, "°", step = 1f) { v -> upd { it.copy(angle = v) } }
+        }
+        ProFilterType.HIGH_PASS -> {
+            ProEffectSlider(stringResource(R.string.effect_radius), p.p1, 0.3f..50f, "px") { v -> upd { it.copy(p1 = v) } }
+        }
+    }
+    // Every effect can be faded into the original.
+    ProEffectSlider(stringResource(R.string.effect_fade), p.fade, 0f..100f, "%", step = 1f) { v -> upd { it.copy(fade = v) } }
 }
