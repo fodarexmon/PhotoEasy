@@ -237,6 +237,25 @@ class ProToolsTest {
     // --- Levels per channel, noise reduction, grain -------------------------------------------
 
     @Test
+    fun `colorize gives one hue and keeps lightness`() {
+        val p = AdjustmentLayerParams(colorize = true, colorizeHue = 0f, colorizeSaturation = 100f)
+        val px = intArrayOf(Color.rgb(128, 128, 128), Color.rgb(20, 200, 60), Color.WHITE, Color.BLACK)
+        AdjustmentLayerEngine.colorizePixels(px, p)
+        // Mid grey -> pure red at the same lightness.
+        assertEquals(Color.rgb(255, 1, 1), px[0].let { Color.rgb(Color.red(it), Color.green(it).coerceAtLeast(1), Color.blue(it).coerceAtLeast(1)) })
+        assertTrue(Color.red(px[1]) > Color.green(px[1]) && Color.green(px[1]) == Color.blue(px[1]))
+        assertEquals(Color.WHITE, px[2]); assertEquals(Color.BLACK, px[3])
+        assertEquals(p, AdjustmentLayerEngine.fromJson(JSONObject(AdjustmentLayerEngine.toJson(p).toString())))
+        // Rendered on a Hue/Saturation adjustment layer.
+        val base = Layer(id = "b", name = "B", type = LayerType.IMAGE, bitmap = solid(4, 4, Color.rgb(128, 128, 128)), contentWidth = 4f, contentHeight = 4f)
+        val adj = Layer(id = "a", name = "A", type = LayerType.ADJUSTMENT, adjustmentKind = AdjustmentKind.HUE_SATURATION,
+            adjustmentParams = AdjustmentLayerParams(colorize = true, colorizeHue = 240f, colorizeSaturation = 50f))
+        val out = runBlocking { com.example.engine.LayerRenderer.renderCompositeCanvas(context, listOf(base, adj), 4, 4, includeBackground = false) }
+        val c = out.getPixel(1, 1)
+        assertTrue("blue: ${Integer.toHexString(c)}", Color.blue(c) > Color.red(c) + 40 && Color.red(c) == Color.green(c))
+    }
+
+    @Test
     fun `levels per channel change only their channel and survive json`() {
         val p = AdjustmentLayerParams(levelsRed = com.example.data.model.LevelsChannel(inWhite = 200f), levelsBlue = com.example.data.model.LevelsChannel(outWhite = 128f))
         assertFalse(AdjustmentLayerEngine.isIdentity(AdjustmentKind.LEVELS, p))

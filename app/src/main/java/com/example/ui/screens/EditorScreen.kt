@@ -409,7 +409,8 @@ fun EditorScreen(
         onMergeVisible = { viewModel.mergeVisibleLayers() },
         onFlatten = { viewModel.flattenImage() },
         onAlign = { viewModel.alignLayers(com.example.ui.viewmodel.EditorViewModel.LayerAlign.values()[it]) },
-        onBlendIf = { showBlendIf = true }
+        onBlendIf = { showBlendIf = true },
+        onEditAdjustment = { idx -> viewModel.selectLayer(idx); onToolSelect(ActiveTool.ADJUST) }
     )
     var currentCropRect by remember { mutableStateOf<android.graphics.RectF?>(null) }
     var showExportDialog by remember { mutableStateOf(false) }
@@ -887,7 +888,14 @@ fun EditorScreen(
                                 onHslTargetPropertyChange = { hslTargetProperty = it; if (it != null) { curvePickMode = null; replacePick = null } },
                                 onReplacePickChange = { replacePick = it; if (it != null) curvePickMode = null },
                                 hasActiveSelection = hasSel,
-                                onClearSelection = onClearSelection
+                                onClearSelection = onClearSelection,
+                                hslHeader = if (adjKind == com.example.data.model.AdjustmentKind.HUE_SATURATION) ({
+                                    com.example.ui.components.ColorizeControls(
+                                        params = layer.adjustmentParams,
+                                        onChange = { p -> onUpdateLookTransient { l -> l.adjustmentParams = p } },
+                                        onCommit = onCommitHistoryState
+                                    )
+                                }) else null
                             )
                         }
                     }

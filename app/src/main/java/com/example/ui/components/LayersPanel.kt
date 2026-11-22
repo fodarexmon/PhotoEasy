@@ -97,7 +97,9 @@ class LayerPanelActions(
     /** 0..5 = left, centre, right, top, middle, bottom; 6 / 7 = distribute horizontally / vertically. */
     val onAlign: (Int) -> Unit = {},
     /** Opens Blend If for the selected layer. */
-    val onBlendIf: () -> Unit = {}
+    val onBlendIf: () -> Unit = {},
+    /** Opens the settings of the adjustment layer at this index. */
+    val onEditAdjustment: (Int) -> Unit = {}
 )
 
 /** Align / distribute choices, in [LayerPanelActions.onAlign] order. */
@@ -685,10 +687,21 @@ fun LayersPanel(
                             .clickable {
                                 onSelectLayer(actualIdx)
                                 onSetEditingMask?.invoke(false)
+                                // Photoshop: the adjustment layer's icon opens its settings.
+                                if (layer.type == LayerType.ADJUSTMENT && !actions.multiSelect) actions.onEditAdjustment(actualIdx)
                             },
                         contentAlignment = Alignment.Center
                     ) {
                         LayerThumbnailContent(layer, documentWidth, documentHeight)
+                    }
+                    if (layer.type == LayerType.ADJUSTMENT && !actions.multiSelect) {
+                        // Reopen the adjustment's controls at any time.
+                        IconButton(
+                            onClick = { onSelectLayer(actualIdx); actions.onEditAdjustment(actualIdx) },
+                            modifier = Modifier.size(40.dp).testTag("btn_edit_adjustment")
+                        ) {
+                            Icon(Icons.Default.Tune, contentDescription = stringResource(R.string.cd_edit_adjustment), tint = IndigoPrimary, modifier = Modifier.size(20.dp))
+                        }
                     }
 
                     // Layer Mask Thumbnail (if present), with a chain link that toggles linking.

@@ -373,6 +373,12 @@ object LayerRenderer {
             coroutineContext.ensureActive()
             swap(ImageProcessor.applyLut(bmp, lut, layer.filterIntensity, isCancelled))
         }
+        // Hue/Saturation with Colorize: the hue/saturation sliders first, then one colour.
+        if (layer.type == LayerType.ADJUSTMENT && layer.adjustmentKind == com.example.data.model.AdjustmentKind.HUE_SATURATION &&
+            layer.adjustmentParams.colorize) {
+            coroutineContext.ensureActive()
+            swap(AdjustmentLayerEngine.colorize(bmp, layer.adjustmentParams))
+        }
         // Photoshop-style adjustment kinds (Levels, Black & White, Gradient Map...).
         if (layer.type == LayerType.ADJUSTMENT && !AdjustmentLayerEngine.usesColorAdjustments(layer.adjustmentKind)) {
             coroutineContext.ensureActive()

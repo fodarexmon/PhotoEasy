@@ -1205,4 +1205,9 @@
     <string name="adj_grain_size">حجم الحبيبات</string>
     <string name="adj_grain_roughness">خشونة الحبيبات</string>
     <string name="levels_channel_rgb">RGB</string>
+    <string name="cd_edit_adjustment">تعديل طبقة الضبط</string>
+    <string name="adj_colorize">تلوين</string>
+    <string name="adj_colorize_hue">اللون</string>
+    <string name="adj_colorize_saturation">التشبع</string>
+    <string name="adj_colorize_lightness">الإضاءة</string>
 </resources>

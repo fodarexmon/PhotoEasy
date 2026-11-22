@@ -1201,4 +1201,9 @@
     <string name="adj_grain_size">Grain size</string>
     <string name="adj_grain_roughness">Grain roughness</string>
     <string name="levels_channel_rgb">RGB</string>
+    <string name="cd_edit_adjustment">Edit adjustment</string>
+    <string name="adj_colorize">Colorize</string>
+    <string name="adj_colorize_hue">Hue</string>
+    <string name="adj_colorize_saturation">Saturation</string>
+    <string name="adj_colorize_lightness">Lightness</string>
 </resources>

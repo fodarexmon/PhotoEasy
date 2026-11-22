@@ -377,3 +377,23 @@ private fun ColorPairSlider(left: Int, right: Int, leftColor: Color, rightColor:
         colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = rightColor, inactiveTrackColor = leftColor)
     )
 }
+
+
+/** Hue/Saturation "Colorize" (Photoshop): one hue over the whole image, keeping its lightness. */
+@Composable
+fun ColorizeControls(params: AdjustmentLayerParams, onChange: (AdjustmentLayerParams) -> Unit, onCommit: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(stringResource(R.string.adj_colorize), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Switch(checked = params.colorize, onCheckedChange = { onChange(params.copy(colorize = it)); onCommit() },
+                modifier = Modifier.testTag("switch_colorize"))
+        }
+        if (params.colorize) {
+            AdjSlider(R.string.adj_colorize_hue, params.colorizeHue, 0f..360f, onCommit, unit = "°",
+                accent = Color(android.graphics.Color.HSVToColor(floatArrayOf(params.colorizeHue, 0.8f, 1f)))) { onChange(params.copy(colorizeHue = it)) }
+            AdjSlider(R.string.adj_colorize_saturation, params.colorizeSaturation, 0f..100f, onCommit) { onChange(params.copy(colorizeSaturation = it)) }
+            AdjSlider(R.string.adj_colorize_lightness, params.colorizeLightness, -100f..100f, onCommit) { onChange(params.copy(colorizeLightness = it)) }
+        }
+        HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
+    }
+}

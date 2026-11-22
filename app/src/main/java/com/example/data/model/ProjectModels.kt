@@ -156,7 +156,12 @@ data class AdjustmentLayerParams(
     // Levels per channel (applied before the RGB levels above, as in Photoshop).
     val levelsRed: LevelsChannel = LevelsChannel(),
     val levelsGreen: LevelsChannel = LevelsChannel(),
-    val levelsBlue: LevelsChannel = LevelsChannel()
+    val levelsBlue: LevelsChannel = LevelsChannel(),
+    // Hue/Saturation "Colorize": one hue (0..360), saturation 0..100, lightness -100..100.
+    val colorize: Boolean = false,
+    val colorizeHue: Float = 0f,
+    val colorizeSaturation: Float = 25f,
+    val colorizeLightness: Float = 0f
 ) {
     // FloatArray fields: compare by content (used to skip redundant renders and undo steps).
     override fun equals(other: Any?): Boolean {
@@ -172,7 +177,9 @@ data class AdjustmentLayerParams(
             photoFilterDensity == other.photoFilterDensity && photoFilterPreserveLuminosity == other.photoFilterPreserveLuminosity &&
             gradientStart == other.gradientStart && gradientEnd == other.gradientEnd && gradientReverse == other.gradientReverse &&
             posterizeLevels == other.posterizeLevels && thresholdLevel == other.thresholdLevel &&
-            levelsRed == other.levelsRed && levelsGreen == other.levelsGreen && levelsBlue == other.levelsBlue
+            levelsRed == other.levelsRed && levelsGreen == other.levelsGreen && levelsBlue == other.levelsBlue &&
+            colorize == other.colorize && colorizeHue == other.colorizeHue &&
+            colorizeSaturation == other.colorizeSaturation && colorizeLightness == other.colorizeLightness
     }
 
     override fun hashCode(): Int =

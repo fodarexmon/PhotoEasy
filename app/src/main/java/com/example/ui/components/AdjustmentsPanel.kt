@@ -75,6 +75,8 @@ fun AdjustmentsPanel(
     hslTargetProperty: String? = null,
     onHslTargetPropertyChange: (String?) -> Unit = {},
     onReplacePickChange: (Pair<Int, Boolean>?) -> Unit = {},
+    /** Extra controls at the top of the Hue/Saturation tab (an adjustment layer's Colorize). */
+    hslHeader: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var activeTab by remember(initialTab) { mutableStateOf(initialTab) }
@@ -348,6 +350,7 @@ fun AdjustmentsPanel(
             }
 
             AdjustmentsTab.HSL -> {
+                hslHeader?.invoke()
                 OutlinedButton(
                     onClick = {},
                     interactionSource = hslCompareInteraction,
