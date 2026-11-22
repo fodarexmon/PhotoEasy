@@ -303,7 +303,7 @@ class ProToolsTest {
         val m = com.example.engine.ai.ModelStore.parseManifest(
             "{\"name\":\"colorize-v1\",\"file\":\"colorize-v1.tflite\",\"size\":3,\"sha256\":\"BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD\",\"inputSize\":256,\"layout\":\"NHWC\"}")
         assertEquals(3L, m.size); assertEquals(256, m.inputSize)
-        val f = java.io.File.createTempFile("m", ".bin").apply { writeText("abc") }
+        val f = java.io.File.createTempFile("model", ".bin").apply { writeText("abc") }
         assertEquals(m.sha256, com.example.engine.ai.ModelStore.sha256(f))
         // Not installed yet.
         assertNull(com.example.engine.ai.ModelStore.installed(context, "nothing-here"))
