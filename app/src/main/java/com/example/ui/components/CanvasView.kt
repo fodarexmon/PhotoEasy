@@ -552,7 +552,9 @@ fun CanvasView(
         snapshot.filter = com.example.data.model.FilterType.NONE
         snapshot.lutId = null
         snapshot.adjustments = com.example.data.model.ColorAdjustments(); snapshot.adjustmentKind = com.example.data.model.AdjustmentKind.GENERAL
-        if (snapshot.isSticker) snapshot.isVisible = false
+        if (snapshot.isSticker || snapshot.isEffectResult) snapshot.isVisible = false
+        // Smart filters are effects too.
+        snapshot.smartFiltersVisible = false
         compareBefore[snapshot.id]?.let { b ->
             if (!b.bitmap.isRecycled && b.contentWidth == snapshot.contentWidth && b.contentHeight == snapshot.contentHeight) snapshot.bitmap = b.bitmap
         }
@@ -576,6 +578,9 @@ fun CanvasView(
                 if (showGeneralOriginal) {
                     asBefore(snapshot)
                 } else if (showSelectedLayerOriginal && index == selectedLayerIndex) {
+                    // A layer made by an effect (AI colorize) has no original of its own: hide it.
+                    if (snapshot.isEffectResult) snapshot.isVisible = false
+                    snapshot.smartFiltersVisible = false
                     snapshot.filter = com.example.data.model.FilterType.NONE
                     snapshot.lutId = null
                     snapshot.adjustments = com.example.data.model.ColorAdjustments(); snapshot.adjustmentKind = com.example.data.model.AdjustmentKind.GENERAL

@@ -5623,7 +5623,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     filter = FilterType.NONE, filterIntensity = 1f, lutId = null, adjustments = ColorAdjustments(),
                     isVisible = true, isLocked = false, isEditingMask = false,
                     isSmartObject = false, smartFilters = emptyList(), smartFilterMask = null,
-                    textConfig = layer.textConfig.copy(), distort = layer.distort?.copyOf()
+                    textConfig = layer.textConfig.copy(), distort = layer.distort?.copyOf(),
+                    // Part of the "after": Before/After hides it and shows the image below.
+                    isEffectResult = true
                 )
                 if (!commitDestructiveBitmap(proj, n, colored!!, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "colorize")) {
                     throw java.io.IOException("Save failed")
