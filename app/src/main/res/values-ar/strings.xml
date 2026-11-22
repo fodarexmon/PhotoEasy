@@ -1285,4 +1285,6 @@
     <string name="layer_solo">إظهار هذه الطبقة وحدها</string>
     <string name="status_solo_on">تظهر «%1$s» وحدها — اضغط مطولًا على عينها مرة أخرى لإرجاع باقي الطبقات</string>
     <string name="status_solo_off">عادت باقي الطبقات للظهور</string>
+    <string name="effect_none">بلا تأثير</string>
+    <string name="effect_choose_hint">اختر تأثيرًا لترى معاينته على الصورة.</string>
 </resources>

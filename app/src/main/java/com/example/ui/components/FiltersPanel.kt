@@ -150,7 +150,8 @@ fun FiltersPanel(
     ) { uri -> if (uri != null) onImportLut(uri) }
 
     // Pro effects state
-    var selectedProEffect by remember { mutableStateOf(ProFilterType.GAUSSIAN_BLUR) }
+    // Opens on "No effect": nothing is previewed until an effect is chosen.
+    var selectedProEffect by remember { mutableStateOf<ProFilterType?>(null) }
     var proParams by remember { mutableStateOf(com.example.engine.ProEffects.defaults(ProFilterType.GAUSSIAN_BLUR)) }
     val effectiveProParams = proParams.copy(centerX = proCenter.first, centerY = proCenter.second)
 
@@ -229,16 +230,17 @@ fun FiltersPanel(
     // Effect preview on/off: compares this effect alone (everything else stays as it is).
     var proPreviewOn by remember { mutableStateOf(true) }
     LaunchedEffect(activeTab, selectedProEffect, effectiveProParams, sourceBitmap, proPreviewOn) {
-        if (activeTab == FilterPanelTab.PRO_EFFECTS && proPreviewOn) {
+        val effect = selectedProEffect
+        if (activeTab == FilterPanelTab.PRO_EFFECTS && proPreviewOn && effect != null) {
             delay(150)
-            latestPreviewProEffect(selectedProEffect, effectiveProParams)
+            latestPreviewProEffect(effect, effectiveProParams)
         } else {
             latestPreviewProEffect(null, null)
         }
     }
     val latestCenterPick by rememberUpdatedState(onProCenterPickChange)
     LaunchedEffect(activeTab, selectedProEffect) {
-        latestCenterPick(activeTab == FilterPanelTab.PRO_EFFECTS && com.example.engine.ProEffects.usesCenter(selectedProEffect))
+        latestCenterPick(activeTab == FilterPanelTab.PRO_EFFECTS && selectedProEffect?.let { com.example.engine.ProEffects.usesCenter(it) } == true)
     }
 
     DisposableEffect(Unit) {
@@ -666,6 +668,18 @@ fun FiltersPanel(
                 contentPadding = PaddingValues(horizontal = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                item(key = "none") {
+                    val isNone = selectedProEffect == null
+                    FilterChip(
+                        selected = isNone,
+                        onClick = { selectedProEffect = null },
+                        label = {
+                            Text(stringResource(R.string.effect_none), fontSize = 11.sp,
+                                fontWeight = if (isNone) FontWeight.Bold else FontWeight.Normal)
+                        },
+                        modifier = Modifier.heightIn(min = 38.dp).testTag("chip_pro_none")
+                    )
+                }
                 items(ProFilterType.values().toList(), key = { it.name }) { effect ->
                     val isSelected = effect == selectedProEffect
                     FilterChip(
@@ -693,7 +707,8 @@ fun FiltersPanel(
                 stringResource(
                     when {
                         !isImageLayer -> R.string.effect_needs_image_layer
-                        com.example.engine.ProEffects.usesCenter(selectedProEffect) -> R.string.effect_tap_center_hint
+                        selectedProEffect == null -> R.string.effect_choose_hint
+                        com.example.engine.ProEffects.usesCenter(selectedProEffect!!) -> R.string.effect_tap_center_hint
                         selectedProEffect == ProFilterType.HIGH_PASS -> R.string.effect_high_pass_hint
                         else -> R.string.effect_live_preview_hint
                     }
@@ -704,8 +719,9 @@ fun FiltersPanel(
             )
             Spacer(Modifier.height(8.dp))
 
+            val chosen = selectedProEffect
             // Show / hide just this effect's preview (Before/After of the effect only).
-            Row(
+            if (chosen != null) Row(
                 Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -723,7 +739,7 @@ fun FiltersPanel(
                     )
                 }
             }
-            ProEffectControls(selectedProEffect, proParams) { proParams = it }
+            if (chosen != null) ProEffectControls(chosen, proParams) { proParams = it }
 
             Spacer(Modifier.height(12.dp))
 
@@ -735,14 +751,15 @@ fun FiltersPanel(
                     Text(stringResource(R.string.action_close), fontSize = 12.sp)
                 }
                 OutlinedButton(
-                    onClick = { proParams = com.example.engine.ProEffects.defaults(selectedProEffect) },
+                    onClick = { chosen?.let { proParams = com.example.engine.ProEffects.defaults(it) } },
+                    enabled = chosen != null,
                     modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag("btn_reset_pro_effect")
                 ) {
                     Text(stringResource(R.string.effect_reset), fontSize = 12.sp)
                 }
                 Button(
-                    onClick = { onApplyProEffect?.invoke(selectedProEffect, effectiveProParams) },
-                    enabled = isImageLayer,
+                    onClick = { chosen?.let { onApplyProEffect?.invoke(it, effectiveProParams) } },
+                    enabled = isImageLayer && chosen != null,
                     modifier = Modifier.weight(1.5f).heightIn(min = 48.dp).testTag("btn_apply_pro_effect"),
                     colors = ButtonDefaults.buttonColors(containerColor = AmberAccent, contentColor = Color.Black)
                 ) {

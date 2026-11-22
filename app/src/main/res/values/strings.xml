@@ -1281,4 +1281,6 @@
     <string name="layer_solo">Show only this layer</string>
     <string name="status_solo_on">Only “%1$s” is shown — long-press its eye again to bring the other layers back</string>
     <string name="status_solo_off">Other layers shown again</string>
+    <string name="effect_none">No effect</string>
+    <string name="effect_choose_hint">Choose an effect to see it on the image.</string>
 </resources>
