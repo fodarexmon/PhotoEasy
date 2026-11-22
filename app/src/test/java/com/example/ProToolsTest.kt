@@ -232,6 +232,32 @@ class ProToolsTest {
     }
 
     @Test
+    fun `a new fill on the previous fill replaces it`() {
+        val w = 40; val h = 20
+        val px = IntArray(w * h) { i -> if (i % w == 20) Color.BLACK else Color.WHITE }
+        val c = com.example.engine.RetouchCanvas(w, h, px)
+        // A pattern of red stripes with transparent gaps.
+        val stripes: (Int, Int) -> Int = { x, _ -> if (x % 4 < 2) Color.RED else 0 }
+        assertNotNull(c.fill(5, 5, stripes, 1f, 32, true, false))
+        assertEquals(Color.WHITE, px[5 * w + 2])
+        // Clicking a red stripe with another pattern: the whole first fill is replaced.
+        val blueDots: (Int, Int) -> Int = { x, y -> if ((x + y) % 2 == 0) Color.BLUE else 0 }
+        assertNotNull(c.fill(1, 5, blueDots, 1f, 32, true, false))
+        for (y in 0 until h) for (x in 0 until 20) {
+            val expect = if ((x + y) % 2 == 0) Color.BLUE else Color.WHITE
+            assertEquals("($x,$y)", expect, px[y * w + x])
+        }
+        assertEquals(Color.BLACK, px[5 * w + 20]); assertEquals(Color.WHITE, px[5 * w + 30])
+        // A solid colour then replaces the pattern everywhere.
+        assertNotNull(c.fill(3, 3, Color.GREEN, 1f, 0, true, false))
+        assertTrue((0 until 20).all { px[7 * w + it] == Color.GREEN })
+        // Once something else changes the area, a fill works on the pixels as they are.
+        px[2 * w + 2] = Color.YELLOW
+        assertNotNull(c.fill(10, 10, Color.CYAN, 1f, 0, true, false))
+        assertEquals(Color.YELLOW, px[2 * w + 2]); assertEquals(Color.CYAN, px[10 * w + 10])
+    }
+
+    @Test
     fun `cropped layers are decoded at the layer size not the canvas size`() {
         val layer = Layer(id = "p", name = "Photo", type = LayerType.IMAGE, contentWidth = 1440f, contentHeight = 3200f)
         assertEquals(3200, com.example.engine.LayerRenderer.sourcePixelsNeeded(layer, 1f))
