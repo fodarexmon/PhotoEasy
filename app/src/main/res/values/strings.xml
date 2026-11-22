@@ -1195,4 +1195,5 @@
     <string name="blend_if_this_layer">This layer</string>
     <string name="blend_if_underlying">Underlying layer</string>
     <string name="blend_if_hint">Drag a handle to hide darker or lighter tones. Long press a handle to split it for a soft fade (or join it again).</string>
+    <string name="status_smart_auto_noisy">Smart Auto applied • The photo is noisy: sharpening was skipped, try Noise reduction in Effects</string>
 </resources>

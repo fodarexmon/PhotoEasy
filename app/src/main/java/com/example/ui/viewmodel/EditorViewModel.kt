@@ -3023,6 +3023,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
      * adjustments (curves, HSL, colour replacement and the user's own slider values are kept).
      * The strength can then be tuned with [setSmartAutoStrength].
      */
+    /** The last Smart Auto found visible noise. */
+    private var smartAutoNoisy = false
+
     fun applySmartAutoCorrection() {
         val proj = _uiState.value.currentProject ?: return
         val idx = _uiState.value.selectedLayerIndex
@@ -3042,20 +3045,36 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             try {
                 // A small image is enough for analysis. An adjustment layer is analysed on what is
                 // below it; an image layer on its own pixels.
+                val own = layer.bitmap?.takeIf { layer.type == LayerType.IMAGE && !it.isRecycled }
                 src = withContext(Dispatchers.Default) {
-                    val own = layer.bitmap?.takeIf { layer.type == LayerType.IMAGE && !it.isRecycled }
-                    own?.let { ImageProcessor.scaleBitmapToMaxDimension(it, 512) } ?: LayerRenderer.renderCompositeCanvas(
+                    own?.let { ImageProcessor.scaleBitmapToMaxDimension(it, 1024) } ?: LayerRenderer.renderCompositeCanvas(
                         getApplication(),
                         proj.layers.subList(0, idx),
                         proj.width,
                         proj.height,
                         includeBackground = true,
-                        maxPreviewDimension = 512
+                        maxPreviewDimension = 1024
                     )
                 }
-                val delta = withContext(Dispatchers.Default) {
-                    ImageProcessor.computeSmartAutoAdjustments(src!!, layer.adjustments)
+                // Faces: exposure and white balance are judged on them first.
+                val faces = try {
+                    com.example.engine.FaceWarp.detect(src!!).map { f ->
+                        android.graphics.RectF(f.box.left / src!!.width, f.box.top / src!!.height, f.box.right / src!!.width, f.box.bottom / src!!.height)
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Throwable) { emptyList() }
+                // Noise is measured at full detail: a crop from the middle of the layer's pixels.
+                val detailSource = own ?: src!!
+                val result = withContext(Dispatchers.Default) {
+                    val cw = minOf(768, detailSource.width); val ch = minOf(768, detailSource.height)
+                    val detail = Bitmap.createBitmap(detailSource, (detailSource.width - cw) / 2, (detailSource.height - ch) / 2, cw, ch)
+                    try {
+                        com.example.engine.SmartAuto.analyze(src!!, layer.adjustments, faces, detail)
+                    } finally {
+                        if (detail !== detailSource && !detail.isRecycled) detail.recycle()
+                    }
                 }
+                val delta = result.delta
+                smartAutoNoisy = result.noisy
                 saveHistoryState()
                 // With a selection the correction goes to a clipped adjustment layer masked by it.
                 val curIdx = proj.layers.indexOf(layer)
@@ -3071,8 +3090,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 smartAutoSession = SmartAutoSession(target.id, delta, 1f)
                 commitProjectMutation(
                     selectedLayerIndex = if (look != null) curIdx + 1 else _uiState.value.selectedLayerIndex,
-                    statusMessage = tr(if (delta.isIdentity()) R.string.status_smart_auto_nothing else R.string.status_smart_auto_applied),
-                    transformState = { it.copy(isProcessing = false, smartAutoStrength = if (delta.isIdentity()) null else 1f) }
+                    statusMessage = when {
+                        delta.isIdentity() && !delta.hasCurves() -> tr(R.string.status_smart_auto_nothing)
+                        // Noisy photo: sharpening was left out; suggest noise reduction.
+                        result.noisy -> tr(R.string.status_smart_auto_noisy)
+                        else -> tr(R.string.status_smart_auto_applied)
+                    },
+                    transformState = { it.copy(isProcessing = false, smartAutoStrength = if (delta.isIdentity() && !delta.hasCurves()) null else 1f) }
                 )
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e

@@ -1199,4 +1199,5 @@
     <string name="blend_if_this_layer">هذه الطبقة</string>
     <string name="blend_if_underlying">الطبقة التحتية</string>
     <string name="blend_if_hint">اسحب مقبضًا لإخفاء الدرجات الأغمق أو الأفتح. اضغط مطولًا على مقبض لتقسيمه إلى نصفين لانتقال ناعم (أو لدمجه مرة أخرى).</string>
+    <string name="status_smart_auto_noisy">تم التحسين الذكي • الصورة فيها ضوضاء فلم تُزد الحدة، جرّب «تقليل الضوضاء» من التأثيرات</string>
 </resources>

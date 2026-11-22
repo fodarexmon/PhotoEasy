@@ -947,155 +947,8 @@ object ImageProcessor {
      * colourfulness and noise, and only corrects what is actually off. Transparent pixels are
      * ignored. Running it again on a corrected image changes little.
      */
-    fun computeSmartAutoAdjustments(source: Bitmap, current: ColorAdjustments = ColorAdjustments()): ColorAdjustments {
-        val thumb = scaleBitmapToMaxDimension(source, 512)
-        val look = applyAdjustments(thumb, current)
-        val w = look.width
-        val h = look.height
-        val px = IntArray(w * h)
-        look.getPixels(px, 0, w, 0, 0, w, h)
-        if (look !== thumb && !look.isRecycled) look.recycle()
-        if (thumb !== source && !thumb.isRecycled) thumb.recycle()
-
-        val hist = IntArray(256)
-        val luma = IntArray(px.size) { -1 }
-        var count = 0
-        var sumL = 0.0
-        var sumL2 = 0.0
-        var nR = 0.0; var nG = 0.0; var nB = 0.0; var nCount = 0
-        var chromaSum = 0.0
-        for (i in px.indices) {
-            val p = px[i]
-            if (((p ushr 24) and 0xFF) < 128) continue
-            val r = (p shr 16) and 0xFF
-            val g = (p shr 8) and 0xFF
-            val b = p and 0xFF
-            val l = (r * 54 + g * 183 + b * 19) shr 8
-            luma[i] = l
-            hist[l]++
-            count++
-            sumL += l
-            sumL2 += l.toDouble() * l
-            val mx = max(r, max(g, b))
-            val mn = min(r, min(g, b))
-            chromaSum += (mx - mn) / 255.0
-            // Neutral candidates for white balance: mid-tones that are not strongly coloured.
-            if (l in 40..225 && (mx - mn) < 70) {
-                nR += r; nG += g; nB += b; nCount++
-            }
-        }
-        if (count < 16) return ColorAdjustments()
-
-        fun percentile(q: Double): Int {
-            val target = (count * q).toLong()
-            var acc = 0L
-            for (v in 0 until 256) {
-                acc += hist[v]
-                if (acc > target) return v
-            }
-            return 255
-        }
-        val p005 = percentile(0.005)
-        val p995 = percentile(0.995)
-        val median = percentile(0.5).coerceAtLeast(1)
-        val mean = sumL / count
-        val std = sqrt((sumL2 / count - mean * mean).coerceAtLeast(0.0)).toFloat()
-        val meanChroma = (chromaSum / count).toFloat()
-        val clippedHigh = hist[255].toFloat() / count + hist[254].toFloat() / count
-        val clippedLow = hist[0].toFloat() / count + hist[1].toFloat() / count
-        val brightFrac = (230..255).sumOf { hist[it] }.toFloat() / count
-        val darkFrac = (0..35).sumOf { hist[it] }.toFloat() / count
-
-        // Noise: average absolute Laplacian of luminance in flat-ish areas.
-        var noiseSum = 0.0
-        var noiseN = 0
-        for (y in 1 until h - 1) {
-            for (x in 1 until w - 1) {
-                val i = y * w + x
-                val c = luma[i]
-                if (c < 0) continue
-                val l = luma[i - 1]; val r = luma[i + 1]; val t = luma[i - w]; val b = luma[i + w]
-                if (l < 0 || r < 0 || t < 0 || b < 0) continue
-                val lap = abs(4 * c - l - r - t - b)
-                if (lap < 40) { noiseSum += lap; noiseN++ }
-            }
-        }
-        val noise = if (noiseN > 0) (noiseSum / noiseN).toFloat() else 0f
-
-        // Exposure: bring the median towards a pleasant mid-grey without clipping highlights.
-        var ev = 0f
-        val ratio = 118f / median
-        if (ratio > 1.15f || ratio < 0.87f) {
-            ev = (kotlin.math.ln(ratio.toDouble()) / kotlin.math.ln(2.0)).toFloat() * 0.7f
-            if (ev > 0f && p995 > 0) ev = min(ev, (kotlin.math.ln(250.0 / p995) / kotlin.math.ln(2.0)).toFloat().coerceAtLeast(0f) + 0.15f)
-            ev = ev.coerceIn(-1f, 1.2f)
-        }
-        val exposure = (ev * 50f).coerceIn(-60f, 60f)
-
-        // Black / white points.
-        val blacks = when {
-            p005 > 10 -> -((p005 - 4) * 4f).coerceAtMost(60f)
-            clippedLow > 0.03f -> 15f
-            else -> 0f
-        }
-        val whites = when {
-            p995 < 240 && ev <= 0.2f -> ((248 - p995) * 3f).coerceIn(0f, 50f)
-            clippedHigh > 0.03f -> -15f
-            else -> 0f
-        }
-
-        // Contrast from the spread of tones.
-        val contrast = when {
-            std < 42f -> ((48f - std) * 1.1f).coerceIn(0f, 28f)
-            std > 75f -> -((std - 75f) * 0.6f).coerceAtMost(15f)
-            else -> 0f
-        }
-        val highlights = if (brightFrac > 0.08f) -(brightFrac * 220f).coerceAtMost(45f) else 0f
-        val shadows = if (darkFrac > 0.15f) (darkFrac * 120f).coerceAtMost(40f) else 0f
-
-        // White balance from neutral-ish pixels (60% strength keeps intentional mood).
-        var temperature = 0f
-        var tint = 0f
-        if (nCount > count * 0.05f) {
-            val ar = (nR / nCount).toFloat().coerceAtLeast(1f)
-            val ag = (nG / nCount).toFloat().coerceAtLeast(1f)
-            val ab = (nB / nCount).toFloat().coerceAtLeast(1f)
-            val q = ab / ar
-            val x = (q - 1f) / (q + 1f)
-            temperature = (x / 0.18f * 100f * 0.6f).coerceIn(-40f, 40f)
-            val gg = ((ar + ab) / 2f) / ag
-            tint = ((gg - 1f) / 0.12f * 100f * 0.6f).coerceIn(-30f, 30f)
-            if (abs(temperature) < 3f) temperature = 0f
-            if (abs(tint) < 3f) tint = 0f
-        }
-
-        // Colour: only muted images get vibrance; already colourful ones are left alone.
-        val vibrance = if (meanChroma < 0.2f) ((0.24f - meanChroma) * 120f).coerceIn(0f, 30f) else 0f
-        // Haze: lifted blacks together with weak colour.
-        val dehaze = if (p005 > 35 && meanChroma < 0.18f) ((p005 - 30) * 0.8f).coerceIn(0f, 30f) else 0f
-        // Detail: sharpen / clarity only when the image is clean.
-        val sharpness = when {
-            noise < 3f -> 20f
-            noise < 6f -> 10f
-            else -> 0f
-        }
-        val clarity = if (noise < 4f && std < 60f) 10f else 0f
-
-        return ColorAdjustments(
-            exposure = exposure,
-            contrast = contrast,
-            highlights = highlights,
-            shadows = shadows,
-            whites = whites,
-            blacks = blacks,
-            temperature = temperature,
-            tint = tint,
-            vibrance = vibrance,
-            dehaze = dehaze,
-            sharpness = sharpness,
-            clarity = clarity
-        )
-    }
+    fun computeSmartAutoAdjustments(source: Bitmap, current: ColorAdjustments = ColorAdjustments()): ColorAdjustments =
+        SmartAuto.analyze(source, current).delta
 
     /** [base] plus [delta] x [strength] for the fields Smart Auto sets (curves / HSL untouched). */
     fun combineSmartAuto(base: ColorAdjustments, delta: ColorAdjustments, strength: Float): ColorAdjustments {
@@ -1114,8 +967,29 @@ object ImageProcessor {
             vibrance = mix(base.vibrance, delta.vibrance),
             dehaze = mix(base.dehaze, delta.dehaze),
             clarity = mix(base.clarity, delta.clarity),
-            sharpness = mix(base.sharpness, delta.sharpness, 0f, 100f)
+            sharpness = mix(base.sharpness, delta.sharpness, 0f, 100f),
+            curvesRgb = mixCurve(base.curvesRgb, delta.curvesRgb, s)
         )
+    }
+
+    /**
+     * Smart Auto's tone curve at [s] strength on top of [base]: points move [s] x (delta - x) off
+     * where they are. Applied when [base] is the identity or has the same points (an earlier Smart
+     * Auto); a curve the user drew is kept as it is.
+     */
+    private fun mixCurve(base: List<android.graphics.PointF>, delta: List<android.graphics.PointF>, s: Float): List<android.graphics.PointF> {
+        val deltaIsIdentity = delta.all { kotlin.math.abs(it.y - it.x) < 0.01f }
+        if (deltaIsIdentity) return base
+        val baseIsIdentity = base.size == 2 && base[0].x == 0f && base[0].y == 0f && base[1].x == 255f && base[1].y == 255f
+        val sameXs = base.size == delta.size && base.indices.all { base[it].x == delta[it].x }
+        return when {
+            sameXs -> base.indices.map { i -> android.graphics.PointF(base[i].x, (base[i].y + s * (delta[i].y - delta[i].x)).coerceIn(0f, 255f)) }
+            baseIsIdentity -> delta.map { android.graphics.PointF(it.x, (it.x + s * (it.y - it.x)).coerceIn(0f, 255f)) }
+            else -> base
+        }.let { pts ->
+            // Back to the identity: store the plain two-point curve.
+            if (pts.all { kotlin.math.abs(it.y - it.x) < 0.01f }) listOf(android.graphics.PointF(0f, 0f), android.graphics.PointF(255f, 255f)) else pts
+        }
     }
 
     /**

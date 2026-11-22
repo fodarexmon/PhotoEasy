@@ -104,6 +104,135 @@ class ProToolsTest {
         assertTrue(runBlocking { repo.loadBeforeImages("before_proj", setOf("img-1")) }.isEmpty())
     }
 
+    // --- Smart Auto ---------------------------------------------------------------------------
+
+    /** A natural-looking test scene: smooth tones over the full range, a few colours, some texture. */
+    private fun scene(w: Int = 96, h: Int = 96, f: (x: Int, y: Int, base: Int) -> Int): Bitmap {
+        val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val rnd = java.util.Random(11)
+        for (y in 0 until h) for (x in 0 until w) {
+            val base = (x * 255 / (w - 1) * 0.7 + y * 255 / (h - 1) * 0.3).toInt() + rnd.nextInt(5) - 2
+            b.setPixel(x, y, f(x, y, base.coerceIn(0, 255)))
+        }
+        return b
+    }
+
+    private fun grey(v: Int) = Color.rgb(v.coerceIn(0, 255), v.coerceIn(0, 255), v.coerceIn(0, 255))
+
+    private fun medianLuma(b: Bitmap): Int {
+        val l = ArrayList<Int>()
+        for (y in 0 until b.height) for (x in 0 until b.width) { val p = b.getPixel(x, y); l.add(com.example.engine.SmartAuto.luma(Color.red(p), Color.green(p), Color.blue(p))) }
+        l.sort(); return l[l.size / 2]
+    }
+
+    private fun meanRgb(b: Bitmap, r: android.graphics.Rect = android.graphics.Rect(0, 0, b.width, b.height)): FloatArray {
+        var sr = 0.0; var sg = 0.0; var sb = 0.0; var n = 0
+        for (y in r.top until r.bottom) for (x in r.left until r.right) { val p = b.getPixel(x, y); sr += Color.red(p); sg += Color.green(p); sb += Color.blue(p); n++ }
+        return floatArrayOf((sr / n).toFloat(), (sg / n).toFloat(), (sb / n).toFloat())
+    }
+
+    private fun corrected(src: Bitmap, faces: List<android.graphics.RectF> = emptyList()): Pair<com.example.engine.SmartAuto.Result, Bitmap> {
+        val res = com.example.engine.SmartAuto.analyze(src, ColorAdjustments(), faces, src)
+        return res to com.example.engine.ImageProcessor.applyAdjustments(src, com.example.engine.ImageProcessor.combineSmartAuto(ColorAdjustments(), res.delta, 1f))
+    }
+
+    @Test
+    fun `smart auto brightens an underexposed photo towards mid grey`() {
+        val img = scene { _, _, v -> grey((v * 0.3).toInt()) }
+        val (res, out) = corrected(img)
+        assertEquals(com.example.engine.SmartAuto.Scene.NORMAL, res.scene)
+        assertTrue("exposure ${res.delta.exposure}", res.delta.exposure > 15f)
+        assertTrue("median ${medianLuma(out)}", medianLuma(out) > medianLuma(img) + 30)
+    }
+
+    @Test
+    fun `smart auto removes a colour cast from a neutral scene`() {
+        val img = scene { _, _, v -> Color.rgb((v * 0.8).toInt(), (v * 0.9).toInt(), (v * 1.0 + 25).toInt().coerceAtMost(255)) }
+        val (res, out) = corrected(img)
+        assertTrue("warms a blue cast: ${res.delta.temperature}", res.delta.temperature > 5f)
+        val before = meanRgb(img); val after = meanRgb(out)
+        assertTrue("blue - red gap shrinks", (after[2] - after[0]) < (before[2] - before[0]) * 0.8f)
+    }
+
+    @Test
+    fun `smart auto leaves a balanced photo nearly alone`() {
+        val img = scene { _, _, v -> grey(v) }
+        val (res, _) = corrected(img)
+        val d = res.delta
+        assertTrue("exposure ${d.exposure}", kotlin.math.abs(d.exposure) < 10f)
+        assertTrue("temperature ${d.temperature}", kotlin.math.abs(d.temperature) < 5f)
+        assertTrue("tint ${d.tint}", kotlin.math.abs(d.tint) < 5f)
+    }
+
+    @Test
+    fun `smart auto keeps snow bright and a night scene dark`() {
+        // Snow: bright and colourless; must not be pulled down to grey.
+        val snow = scene { _, _, v -> grey(180 + v / 4) }
+        val (rs, outSnow) = corrected(snow)
+        assertEquals(com.example.engine.SmartAuto.Scene.HIGH_KEY, rs.scene)
+        assertTrue("snow not darkened: ${medianLuma(outSnow)} vs ${medianLuma(snow)}", medianLuma(outSnow) >= medianLuma(snow) - 3)
+        // Night: mostly dark with bright lights; may be lifted a little, not turned into day.
+        val night = scene { x, y, v -> if ((x / 12 + y / 12) % 7 == 0) grey(245) else grey(8 + v / 12) }
+        val (rn, outNight) = corrected(night)
+        assertEquals(com.example.engine.SmartAuto.Scene.NIGHT, rn.scene)
+        assertTrue("night stays dark: ${medianLuma(outNight)}", medianLuma(outNight) < 70)
+    }
+
+    @Test
+    fun `smart auto keeps the warmth of a sunset`() {
+        val sunset = scene { _, _, v -> Color.rgb(140 + v / 3, 60 + v / 3, 20 + v / 8) }
+        val (res, _) = corrected(sunset)
+        assertEquals(com.example.engine.SmartAuto.Scene.SUNSET, res.scene)
+        assertTrue("not cooled much: ${res.delta.temperature}", res.delta.temperature >= -6f)
+    }
+
+    @Test
+    fun `smart auto meters a backlit face`() {
+        // Bright background, dark face in the middle.
+        val face = android.graphics.RectF(0.3f, 0.25f, 0.7f, 0.75f)
+        val img = scene { x, y, v ->
+            val inFace = x in 29..67 && y in 24..72
+            if (inFace) Color.rgb(70 + v / 20, 50 + v / 20, 40 + v / 20) else grey(200 + v / 5)
+        }
+        val (res, out) = corrected(img, listOf(face))
+        assertEquals(com.example.engine.SmartAuto.Scene.BACKLIT, res.scene)
+        val faceBefore = meanRgb(img, android.graphics.Rect(38, 38, 58, 60))
+        val faceAfter = meanRgb(out, android.graphics.Rect(38, 38, 58, 60))
+        assertTrue("face brighter: ${faceAfter[0]} vs ${faceBefore[0]}", faceAfter[0] > faceBefore[0] + 15)
+    }
+
+    @Test
+    fun `smart auto adds a tone curve to a flat photo and the strength scales it`() {
+        val flat = scene { _, _, v -> grey(90 + v / 4) }
+        val (res, out) = corrected(flat)
+        assertTrue("curve added", res.delta.hasCurves())
+        fun std(b: Bitmap): Double {
+            val l = ArrayList<Int>()
+            for (y in 0 until b.height) for (x in 0 until b.width) l.add(Color.red(b.getPixel(x, y)))
+            val m = l.average(); return kotlin.math.sqrt(l.sumOf { (it - m) * (it - m) } / l.size)
+        }
+        assertTrue("more contrast", std(out) > std(flat) * 1.2)
+        // Strength: half the correction moves the curve points half as far, zero removes it.
+        val full = com.example.engine.ImageProcessor.combineSmartAuto(ColorAdjustments(), res.delta, 1f)
+        val back = com.example.engine.ImageProcessor.combineSmartAuto(full, res.delta, -1f)
+        assertFalse(back.hasCurves())
+        val half = com.example.engine.ImageProcessor.combineSmartAuto(ColorAdjustments(), res.delta, 0.5f)
+        val i = 2
+        assertEquals((full.curvesRgb[i].y - full.curvesRgb[i].x) / 2f, half.curvesRgb[i].y - half.curvesRgb[i].x, 0.01f)
+    }
+
+    @Test
+    fun `smart auto does not sharpen a noisy photo`() {
+        val rnd = java.util.Random(3)
+        val noisy = scene { _, _, v -> grey(v + (rnd.nextGaussian() * 12).toInt()) }
+        assertTrue(com.example.engine.SmartAuto.noiseSigma(noisy) > 3.2f)
+        val (res, _) = corrected(noisy)
+        assertTrue(res.noisy)
+        assertEquals(0f, res.delta.sharpness, 0f)
+        val clean = scene { _, _, v -> grey(v) }
+        assertTrue(com.example.engine.SmartAuto.noiseSigma(clean) < 3.2f)
+    }
+
     // --- Blend If -----------------------------------------------------------------------------
 
     @Test
