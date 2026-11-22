@@ -945,52 +945,55 @@ private fun MaskControls(
                 .fillMaxWidth()
                 .padding(horizontal = 10.dp, vertical = 6.dp)
         ) {
+            // Title on its own line (tap to fold / open), the two switches on the line below, so
+            // long labels never squeeze the title into a narrow column.
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 36.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable { expanded = !expanded }
+                    .testTag("mask_controls_toggle")
+            ) {
+                Text(
+                    stringResource(R.string.layer_mask_controls),
+                    color = IndigoPrimary,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Icon(
+                    if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                    contentDescription = stringResource(if (expanded) R.string.mask_controls_hide else R.string.mask_controls_show),
+                    tint = IndigoPrimary,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(6.dp))
-                        .clickable { expanded = !expanded }
-                        .testTag("mask_controls_toggle")
-                ) {
-                    Icon(
-                        if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                        contentDescription = stringResource(if (expanded) R.string.mask_controls_hide else R.string.mask_controls_show),
-                        tint = IndigoPrimary,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Spacer(Modifier.width(4.dp))
-                    Text(
-                        stringResource(R.string.layer_mask_controls),
-                        color = IndigoPrimary,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 12.sp
-                    )
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    FilterChip(
-                        selected = showMaskRubyOverlay,
-                        onClick = { onToggleRubyOverlay?.invoke() },
-                        label = { Text(stringResource(R.string.layer_mask_overlay), fontSize = 10.sp) },
-                        modifier = Modifier.heightIn(min = 32.dp).testTag("chip_ruby_overlay")
-                    )
-                    FilterChip(
-                        selected = layer.isEditingMask,
-                        onClick = { onSetEditingMask?.invoke(!layer.isEditingMask) },
-                        label = {
-                            Text(
-                                if (layer.isEditingMask) stringResource(R.string.layer_mask_editing_mask) else stringResource(R.string.layer_mask_editing_layer),
-                                fontSize = 10.sp
-                            )
-                        },
-                        modifier = Modifier.heightIn(min = 32.dp).testTag("chip_editing_mask")
-                    )
-                }
+                FilterChip(
+                    selected = showMaskRubyOverlay,
+                    onClick = { onToggleRubyOverlay?.invoke() },
+                    label = { Text(stringResource(R.string.layer_mask_overlay), fontSize = 10.sp, maxLines = 2) },
+                    modifier = Modifier.weight(1f).heightIn(min = 36.dp).testTag("chip_ruby_overlay")
+                )
+                FilterChip(
+                    selected = layer.isEditingMask,
+                    onClick = { onSetEditingMask?.invoke(!layer.isEditingMask) },
+                    label = {
+                        Text(
+                            if (layer.isEditingMask) stringResource(R.string.layer_mask_editing_mask) else stringResource(R.string.layer_mask_editing_layer),
+                            fontSize = 10.sp, maxLines = 2
+                        )
+                    },
+                    modifier = Modifier.weight(1f).heightIn(min = 36.dp).testTag("chip_editing_mask")
+                )
             }
 
             if (expanded) {
