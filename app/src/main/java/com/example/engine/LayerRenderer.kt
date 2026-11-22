@@ -251,7 +251,7 @@ object LayerRenderer {
                     try {
                         coroutineContext.ensureActive()
                         // A look set on the group (adjustments, filter, LUT) applies to all of it.
-                        groupBmp = applyLook(sub, layer, currentJob)
+                        groupBmp = applyLook(sub, layer, currentJob, scaleRatio.coerceAtMost(1f))
                         if (groupBmp !== sub) { sub.recycle() }
                         applyLayerMask(Canvas(groupBmp), layer, groupBmp.width, groupBmp.height, docW, docH)
                         for (c in clipped) {
@@ -274,7 +274,7 @@ object LayerRenderer {
                         val copy = composite.copy(Bitmap.Config.ARGB_8888, true)
                         var adjustedComposite = copy
                         try {
-                            adjustedComposite = applyLook(copy, layer, currentJob)
+                            adjustedComposite = applyLook(copy, layer, currentJob, scaleRatio.coerceAtMost(1f))
                             coroutineContext.ensureActive()
                             // A masked adjustment layer only affects the revealed area; the hidden
                             // area becomes transparent and the composite below shows through unchanged.
@@ -349,7 +349,12 @@ object LayerRenderer {
      * Renders a single layer (Image, Text, Color Fill) to a canvas sized bitmap
      */
     /** Applies [layer]'s adjustments, filter and LUT to [input]; returns [input] or a new bitmap. */
-    private suspend fun applyLook(input: Bitmap, layer: Layer, currentJob: Job?): Bitmap {
+    /**
+     * [pixelScale]: pixels of [input] per pixel of the full-resolution image it stands for (a
+     * preview is < 1), so detail-size adjustments (noise reduction) look the same in the preview
+     * and in the export.
+     */
+    private suspend fun applyLook(input: Bitmap, layer: Layer, currentJob: Job?, pixelScale: Float = 1f): Bitmap {
         val isCancelled: () -> Boolean = { currentJob?.isActive == false }
         var bmp = input
         fun swap(next: Bitmap) {
@@ -358,7 +363,7 @@ object LayerRenderer {
         }
         if (!layer.adjustments.isIdentity()) {
             coroutineContext.ensureActive()
-            swap(ImageProcessor.applyAdjustments(bmp, layer.adjustments, isCancelled))
+            swap(ImageProcessor.applyAdjustments(bmp, layer.adjustments, isCancelled, pixelScale))
         }
         if (layer.filter != com.example.data.model.FilterType.NONE) {
             coroutineContext.ensureActive()
@@ -400,7 +405,7 @@ object LayerRenderer {
             val copy = base.copy(Bitmap.Config.ARGB_8888, true)
             var adjusted = copy
             try {
-                adjusted = applyLook(copy, c, currentJob)
+                adjusted = applyLook(copy, c, currentJob, scaleRatio.coerceAtMost(1f))
                 applyLayerMask(Canvas(adjusted), c, adjusted.width, adjusted.height, docW, docH)
                 Canvas(adjusted).drawBitmap(base, 0f, 0f, keepBaseAlpha)
                 drawBlended(Canvas(base), base, adjusted, c.blendMode, c.opacity, paint, c.blendIf)
@@ -639,7 +644,10 @@ object LayerRenderer {
                         if (!lookFromCache && !layer.adjustments.isIdentity()) {
                             coroutineContext.ensureActive()
                             val isCancelledCheck: () -> Boolean = { currentJob?.isActive == false }
-                            val adjusted = ImageProcessor.applyAdjustments(processedBmp, layer.adjustments, isCancelledCheck)
+                            // The layer's full-resolution width: what the export works on.
+                            val fullW = layer.originalWidth.takeIf { it > 0 }?.toFloat() ?: layer.intrinsicDocumentWidth()
+                            val pixelScale = (processedBmp.width / fullW.coerceAtLeast(1f)).coerceIn(0.02f, 1f)
+                            val adjusted = ImageProcessor.applyAdjustments(processedBmp, layer.adjustments, isCancelledCheck, pixelScale)
                             if (processedBmp !== baseBmp && processedBmp !== adjusted && !processedBmp.isRecycled) {
                                 processedBmp.recycle()
                             }

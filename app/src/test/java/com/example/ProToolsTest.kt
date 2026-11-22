@@ -274,6 +274,36 @@ class ProToolsTest {
     }
 
     @Test
+    fun `noise reduction on a preview matches the export`() {
+        val fw = 400; val fh = 300; val rnd = java.util.Random(7)
+        // Flat grey on the left, fine texture on the right, all with noise.
+        val full = IntArray(fw * fh) { i ->
+            val x = i % fw; val y = i / fw
+            val base = if (x < 200) 120 else if (((x / 4) + (y / 4)) % 2 == 0) 90 else 160
+            val n = (rnd.nextGaussian() * 12).toInt(); val cn = (rnd.nextGaussian() * 10).toInt()
+            Color.rgb((base + n + cn).coerceIn(0, 255), (base + n).coerceIn(0, 255), (base + n - cn).coerceIn(0, 255))
+        }
+        fun down(a: IntArray, w: Int, h: Int): IntArray = IntArray((w / 2) * (h / 2)) { j ->
+            val x = j % (w / 2); val y = j / (w / 2)
+            var r = 0; var g = 0; var b = 0
+            for (dy in 0..1) for (dx in 0..1) { val p = a[(y * 2 + dy) * w + x * 2 + dx]; r += Color.red(p); g += Color.green(p); b += Color.blue(p) }
+            Color.rgb(r / 4, g / 4, b / 4)
+        }
+        fun diff(a: IntArray, b: IntArray) = a.indices.sumOf { kotlin.math.abs(Color.green(a[it]) - Color.green(b[it])).toDouble() } / a.size
+        for (amount in listOf(60f, 90f)) {
+            val export = full.copyOf().also { com.example.engine.NoiseAndGrain.reduceNoise(it, fw, fh, amount) }
+            // Preview at half and at a quarter of the size, with and without the scale.
+            var ew = fw; var eh = fh; var exp = export; var src = full
+            for (scale in listOf(0.5f, 0.25f)) {
+                exp = down(exp, ew, eh); src = down(src, ew, eh); ew /= 2; eh /= 2
+                val old = src.copyOf().also { com.example.engine.NoiseAndGrain.reduceNoise(it, ew, eh, amount) }
+                val new = src.copyOf().also { com.example.engine.NoiseAndGrain.reduceNoise(it, ew, eh, amount, {}, scale) }
+                assertTrue("amount $amount scale $scale: ${diff(new, exp)} vs ${diff(old, exp)}", diff(new, exp) < diff(old, exp))
+            }
+        }
+    }
+
+    @Test
     fun `grain adds a fixed pattern that scales with the image`() {
         fun grained(size: Int): IntArray {
             val a = IntArray(size * size) { Color.rgb(128, 128, 128) }

@@ -71,8 +71,12 @@ object NoiseAndGrain {
      * Noise reduction, [amount] 0..100: luminance noise smoothed with an edge-preserving filter,
      * colour noise (blotches) smoothed more strongly along the image's own edges.
      */
-    fun reduceNoise(px: IntArray, w: Int, h: Int, amount: Float, checkCancel: () -> Unit = {}) {
+    fun reduceNoise(px: IntArray, w: Int, h: Int, amount: Float, checkCancel: () -> Unit = {}, pixelScale: Float = 1f) {
         if (amount <= 0f || w < 3 || h < 3) return
+        // On a reduced copy (preview) the radii shrink with it. The edge threshold stays: shrinking the copy averages the noise down,
+        // but fine texture keeps its contrast, and measured against full-resolution results
+        // (noise and texture) an unchanged threshold matches best.
+        val sc = pixelScale.coerceIn(0.02f, 1f)
         val n = w * h
         val t = (amount / 100f).coerceIn(0f, 1f)
         val yy = FloatArray(n); val cb = FloatArray(n); val cr = FloatArray(n)
@@ -85,17 +89,23 @@ object NoiseAndGrain {
         checkCancel()
         // Luminance: a small edge-aware smoothing, stronger with the amount.
         val ly = FloatArray(n)
-        val rl = 1 + (t * 2f).toInt()
+        val rlFull = 1f + (t * 2f).toInt()
+        val rlEff = rlFull * sc
+        val rl = max(1, Math.round(rlEff))
         guided(yy, yy, w, h, rl, 0.0004f + t * t * 0.01f, ly)
         checkCancel()
         // Colour: wider, guided by the luminance so colours do not bleed across edges.
-        val rc = 2 + (t * 5f).toInt()
+        val rcFull = 2f + (t * 5f).toInt()
+        val rcEff = rcFull * sc
+        val rc = max(1, Math.round(rcEff))
         val ocb = FloatArray(n); val ocr = FloatArray(n)
         guided(ly, cb, w, h, rc, 0.002f, ocb)
         checkCancel()
         guided(ly, cr, w, h, rc, 0.002f, ocr)
+        // Luminance keeps its full blend (a one-pixel window on a reduced copy matched the
+        // full-resolution result best); for colour a sub-pixel radius means a lighter blend.
         val kl = min(1f, t * 1.4f)
-        val kc = min(1f, t * 2f)
+        val kc = min(1f, t * 2f) * min(1f, rcEff)
         for (i in 0 until n) {
             val a = px[i] ushr 24
             if (a == 0) continue

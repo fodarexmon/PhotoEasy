@@ -349,7 +349,9 @@ object ImageProcessor {
     fun applyAdjustments(
         source: Bitmap,
         adj: ColorAdjustments,
-        isCancelled: (() -> Boolean)? = null
+        isCancelled: (() -> Boolean)? = null,
+        /** Pixels of [source] per full-resolution pixel (< 1 for a preview); see [NoiseAndGrain.reduceNoise]. */
+        pixelScale: Float = 1f
     ): Bitmap {
         if (adj.isIdentity()) return source
         val w = source.width
@@ -362,7 +364,7 @@ object ImageProcessor {
             if (isCancelled?.invoke() == true) throw CancellationException("Color adjustments cancelled")
         }
         // 0. Noise reduction works on the pixels as they came from the camera.
-        if (adj.noiseReduction > 0f) NoiseAndGrain.reduceNoise(px, w, h, adj.noiseReduction, ::checkCancel)
+        if (adj.noiseReduction > 0f) NoiseAndGrain.reduceNoise(px, w, h, adj.noiseReduction, ::checkCancel, pixelScale)
 
         // 1. Per-channel tone curves (white balance, exposure, white/black points, contrast,
         //    brightness), built once as float LUTs so nothing is clipped to 8 bits between steps.
