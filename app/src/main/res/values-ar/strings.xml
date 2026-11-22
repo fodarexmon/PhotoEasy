@@ -1282,4 +1282,7 @@
     <string name="preset_to_sliders">تعديل كمنزلقات</string>
     <string name="preset_to_sliders_hint">ينقل هذا الفلتر إلى منزلقات التعديل لتضبط كل جزء منه بنفسك.</string>
     <string name="preset_to_sliders_partial">بعض أجزاء الفلتر (الحبيبات، التظليل، التوهج) نُقلت بشكل تقريبي.</string>
+    <string name="layer_solo">إظهار هذه الطبقة وحدها</string>
+    <string name="status_solo_on">تظهر «%1$s» وحدها — اضغط مطولًا على عينها مرة أخرى لإرجاع باقي الطبقات</string>
+    <string name="status_solo_off">عادت باقي الطبقات للظهور</string>
 </resources>

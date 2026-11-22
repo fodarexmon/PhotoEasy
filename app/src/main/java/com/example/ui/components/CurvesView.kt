@@ -174,10 +174,13 @@ fun CurvesView(
             }
             CurvePickMode.BLACK, CurvePickMode.WHITE, CurvePickMode.GRAY -> {
                 // Per-channel points so the picked colour becomes neutral black / grey / white.
+                // A new pick replaces the earlier one of the same kind (as in Photoshop): the old
+                // black point is the point at output 0, the old white point the one at 255, and the
+                // old grey point the inner one — they are removed before the new point is set.
                 fun apply(pts: List<PointF>, v: Float): List<PointF> = when (mode) {
-                    CurvePickMode.BLACK -> (pts.filter { it.x > v + 3f } + PointF(v.coerceAtMost(250f), 0f)).sortedBy { it.x }
-                    CurvePickMode.WHITE -> (pts.filter { it.x < v - 3f } + PointF(v.coerceAtLeast(5f), 255f)).sortedBy { it.x }
-                    else -> setLevelPoint(pts, v, luma)
+                    CurvePickMode.BLACK -> (pts.filter { it.x > v + 3f && it.y > 0.5f } + PointF(v.coerceAtMost(250f), 0f)).sortedBy { it.x }
+                    CurvePickMode.WHITE -> (pts.filter { it.x < v - 3f && it.y < 254.5f } + PointF(v.coerceAtLeast(5f), 255f)).sortedBy { it.x }
+                    else -> setLevelPoint(withoutGrayPoint(pts), v, luma)
                 }
                 latestChange(
                     adj.copy(
@@ -584,4 +587,11 @@ private fun CurvePresetButton(label: String, onClick: () -> Unit) {
     ) {
         Text(label, fontSize = 11.sp, maxLines = 1)
     }
+}
+
+
+/** [pts] without inner points (0 < output < 255): the earlier grey-point pick, keeping black and white. */
+internal fun withoutGrayPoint(pts: List<PointF>): List<PointF> {
+    val kept = pts.filter { it.y <= 0.5f || it.y >= 254.5f }
+    return if (kept.size >= 2) kept else listOf(PointF(0f, 0f), PointF(255f, 255f))
 }

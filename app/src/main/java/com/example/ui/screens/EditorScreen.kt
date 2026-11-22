@@ -386,6 +386,7 @@ fun EditorScreen(
     var editingSmartFilter by remember { mutableStateOf<Pair<String, String>?>(null) }
     val layerActions = com.example.ui.components.LayerPanelActions(
         onToggleVisibilityAt = { viewModel.toggleLayerVisibilityAt(it) },
+        onSoloLayerAt = { viewModel.toggleSoloLayerAt(it) },
         onToggleLockAt = { viewModel.toggleLayerLockAt(it) },
         onMoveLayer = { from, to -> viewModel.moveLayer(from, to) },
         onRenameLayer = { index, name -> viewModel.renameLayer(index, name) },

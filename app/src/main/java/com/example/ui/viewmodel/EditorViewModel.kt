@@ -2254,8 +2254,45 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val proj = _uiState.value.currentProject ?: return
         val layer = proj.layers.getOrNull(index) ?: return
         saveHistoryState()
+        soloState = null
         layer.isVisible = !layer.isVisible
         commitProjectMutation()
+    }
+
+    /** Solo (Photoshop's Alt+click on the eye): the soloed layer's id and everyone's visibility before. */
+    private var soloState: Pair<String, Map<String, Boolean>>? = null
+
+    /**
+     * Shows only this layer (with the groups it is in, and its contents when it is a group); doing it
+     * again on the same layer brings back the visibility every layer had before.
+     */
+    fun toggleSoloLayerAt(index: Int) {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.getOrNull(index) ?: return
+        val solo = soloState
+        saveHistoryState()
+        if (solo != null && solo.first == layer.id) {
+            proj.layers.forEach { l -> solo.second[l.id]?.let { l.isVisible = it } }
+            soloState = null
+            commitProjectMutation(statusMessage = tr(R.string.status_solo_off))
+            return
+        }
+        // Remember the visibility from before the first solo, so switching solo between layers
+        // and then turning it off still restores the original state.
+        val before = solo?.second ?: proj.layers.associate { it.id to it.isVisible }
+        // The layer and the groups around it are shown; a soloed group's contents keep their own
+        // visibility; everything else is hidden.
+        val shown = com.example.engine.LayerTree.ancestors(proj.layers, layer).map { it.id }.toSet() + layer.id
+        val inside = if (layer.type == LayerType.GROUP) com.example.engine.LayerTree.descendants(proj.layers, layer.id) else emptySet()
+        proj.layers.forEach { l ->
+            l.isVisible = when (l.id) {
+                in shown -> true
+                in inside -> before[l.id] ?: l.isVisible
+                else -> false
+            }
+        }
+        soloState = layer.id to before
+        commitProjectMutation(statusMessage = tr(R.string.status_solo_on, layer.name))
     }
 
     fun toggleLayerLockAt(index: Int) {
