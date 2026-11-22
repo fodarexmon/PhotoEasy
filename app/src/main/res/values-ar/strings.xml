@@ -1287,4 +1287,6 @@
     <string name="status_solo_off">عادت باقي الطبقات للظهور</string>
     <string name="effect_none">بلا تأثير</string>
     <string name="effect_choose_hint">اختر تأثيرًا لترى معاينته على الصورة.</string>
+    <string name="mask_controls_hide">إخفاء أدوات القناع</string>
+    <string name="mask_controls_show">إظهار أدوات القناع</string>
 </resources>

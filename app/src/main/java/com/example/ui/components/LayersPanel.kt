@@ -929,6 +929,10 @@ private fun MaskControls(
     onMaskBrushSizeChange: ((Float) -> Unit)?,
     actions: LayerPanelActions
 ) {
+    // Open while the mask is being edited; "Done" folds it to its title row, and the arrow opens
+    // or folds it at any time.
+    var expanded by rememberSaveable(layer.id) { mutableStateOf(layer.isEditingMask) }
+    LaunchedEffect(layer.isEditingMask) { expanded = layer.isEditingMask }
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -946,12 +950,28 @@ private fun MaskControls(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text(
-                    stringResource(R.string.layer_mask_controls),
-                    color = IndigoPrimary,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 12.sp
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable { expanded = !expanded }
+                        .testTag("mask_controls_toggle")
+                ) {
+                    Icon(
+                        if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = stringResource(if (expanded) R.string.mask_controls_hide else R.string.mask_controls_show),
+                        tint = IndigoPrimary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        stringResource(R.string.layer_mask_controls),
+                        color = IndigoPrimary,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     FilterChip(
                         selected = showMaskRubyOverlay,
@@ -973,6 +993,7 @@ private fun MaskControls(
                 }
             }
 
+            if (expanded) {
             MaskSlider(
                 label = stringResource(R.string.layer_mask_density),
                 valueLabel = "${(layer.maskDensity * 100).roundToInt()}%",
@@ -1075,6 +1096,7 @@ private fun MaskControls(
                     onChange = actions.onMaskBrushOpacityChange,
                     tag = "slider_mask_brush_opacity"
                 )
+            }
             }
         }
     }

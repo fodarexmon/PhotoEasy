@@ -4408,7 +4408,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
                         xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
                     }
-                    Canvas(out).drawBitmap(localMask!!, 0f, 0f, maskPaint)
+                    // An ALPHA_8 mask is ignored by DST_IN on a colour bitmap: draw an ARGB copy.
+                    val argbMask = localMask!!.let { if (it.config == Bitmap.Config.ALPHA_8) it.copy(Bitmap.Config.ARGB_8888, false) else it }
+                    Canvas(out).drawBitmap(argbMask, 0f, 0f, maskPaint)
+                    if (argbMask !== localMask) argbMask.recycle()
                     out
                 }
                 saveHistoryState()

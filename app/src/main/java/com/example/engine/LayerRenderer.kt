@@ -567,6 +567,12 @@ object LayerRenderer {
             out.recycle()
             out = modMask
         }
+        // Drawn with DST_IN onto colour bitmaps, which ignores an ALPHA_8 source (see MaskDraw).
+        if (out.config == Bitmap.Config.ALPHA_8) {
+            val argb = out.copy(Bitmap.Config.ARGB_8888, false)
+            out.recycle()
+            out = argb
+        }
         if (useCache) synchronized(maskCacheLock) { maskCache["${layer.id}@${targetW}x${targetH}"] = key to out }
         return out
     }
@@ -607,7 +613,7 @@ object LayerRenderer {
                     targetH.toFloat() / selection.height.coerceAtLeast(1).toFloat()
                 )
             }
-            Canvas(effected).drawBitmap(selection, maskMatrix, maskPaint)
+            Canvas(effected).drawBitmap(MaskDraw.argb(selection), maskMatrix, maskPaint)
             Canvas(base).drawBitmap(effected, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG))
         } catch (e: Throwable) {
             if (!base.isRecycled) base.recycle()
@@ -793,8 +799,9 @@ object LayerRenderer {
                             val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
                                 xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
                             }
+                            val selArgb = MaskDraw.argb(activeSelectionMask)
                             if (activeSelectionMask.width == canvasWidth && activeSelectionMask.height == canvasHeight) {
-                                canvas.drawBitmap(activeSelectionMask, 0f, 0f, maskPaint)
+                                canvas.drawBitmap(selArgb, 0f, 0f, maskPaint)
                             } else {
                                 val maskMatrix = Matrix().apply {
                                     postScale(
@@ -802,7 +809,7 @@ object LayerRenderer {
                                         canvasHeight.toFloat() / activeSelectionMask.height.coerceAtLeast(1).toFloat()
                                     )
                                 }
-                                canvas.drawBitmap(activeSelectionMask, maskMatrix, maskPaint)
+                                canvas.drawBitmap(selArgb, maskMatrix, maskPaint)
                             }
                             canvas.restore()
                         } else {

@@ -200,7 +200,10 @@ object ExportEngine {
             postScale(sx, sy)
             postTranslate(-crop.left.toFloat(), -crop.top.toFloat())
         }
-        c.drawBitmap(docMask, m, Paint(Paint.FILTER_BITMAP_FLAG).apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN) })
+        // An ALPHA_8 mask is ignored by DST_IN on a colour bitmap: draw an ARGB copy.
+        val argbMask = if (docMask.config == Bitmap.Config.ALPHA_8) docMask.copy(Bitmap.Config.ARGB_8888, false) else docMask
+        c.drawBitmap(argbMask, m, Paint(Paint.FILTER_BITMAP_FLAG).apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN) })
+        if (argbMask !== docMask) argbMask.recycle()
         return out
     }
 
