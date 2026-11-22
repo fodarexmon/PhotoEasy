@@ -25,6 +25,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -69,6 +70,8 @@ import kotlinx.coroutines.withContext
 /** Layer-panel actions added for reordering, renaming, clipping and advanced mask editing. */
 class LayerPanelActions(
     val onToggleVisibilityAt: (Int) -> Unit = {},
+    /** Long-press on the eye: show only this layer / bring the others back (Alt+click in Photoshop). */
+    val onSoloLayerAt: (Int) -> Unit = {},
     val onToggleLockAt: (Int) -> Unit = {},
     val onMoveLayer: (from: Int, to: Int) -> Unit = { _, _ -> },
     val onRenameLayer: (Int, String) -> Unit = { _, _ -> },
@@ -837,7 +840,20 @@ fun LayersPanel(
                             overflow = TextOverflow.Ellipsis
                         )
                     }
-                    IconButton(onClick = { actions.onToggleVisibilityAt(actualIdx) }, modifier = Modifier.size(40.dp)) {
+                    // Tap: show / hide. Long-press: show only this layer, again to bring the others back.
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(CircleShape)
+                            .combinedClickable(
+                                onClick = { actions.onToggleVisibilityAt(actualIdx) },
+                                onLongClick = { actions.onSoloLayerAt(actualIdx) },
+                                onClickLabel = stringResource(R.string.layer_visibility),
+                                onLongClickLabel = stringResource(R.string.layer_solo)
+                            )
+                            .testTag("layer_eye_$actualIdx"),
+                        contentAlignment = Alignment.Center
+                    ) {
                         Icon(
                             if (layer.isVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
                             contentDescription = stringResource(R.string.layer_visibility),

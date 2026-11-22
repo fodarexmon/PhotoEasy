@@ -561,6 +561,8 @@ data class Layer(
     var isClipped: Boolean = false,
     /** Added from the Stickers tab: hidden in the Before view of Before/After. */
     var isSticker: Boolean = false,
+    /** Made by an effect from the layer below (AI colorize): hidden in the Before view too. */
+    var isEffectResult: Boolean = false,
     /** Skew in degrees (horizontal / vertical), applied around the layer centre. */
     var skewX: Float = 0f,
     var skewY: Float = 0f,

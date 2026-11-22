@@ -339,6 +339,7 @@ class ProjectRepository(private val context: Context) {
                         put("isMaskLinked", layer.isMaskLinked)
                         put("isClipped", layer.isClipped)
                         put("isSticker", layer.isSticker)
+                        if (layer.isEffectResult) put("isEffectResult", true)
                         layer.parentId?.let { put("parentId", it) }
                         if (layer.isSmartObject) {
                             put("smartObject", true)
@@ -1049,6 +1050,7 @@ class ProjectRepository(private val context: Context) {
                     isMaskLinked = layerObj.optBoolean("isMaskLinked", true),
                     isClipped = layerObj.optBoolean("isClipped", false),
                     isSticker = layerObj.optBoolean("isSticker", false),
+                    isEffectResult = layerObj.optBoolean("isEffectResult", false),
                     parentId = layerObj.optString("parentId", "").ifBlank { null },
                     isCollapsed = layerObj.optBoolean("isCollapsed", false),
                     isSmartObject = layerObj.optBoolean("smartObject", false),

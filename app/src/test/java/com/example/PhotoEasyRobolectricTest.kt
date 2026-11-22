@@ -373,6 +373,43 @@ class PhotoEasyRobolectricTest {
     }
 
     @Test
+    fun `long-press on the eye shows only that layer and brings the others back`() {
+        val (vm, _) = groupVm()
+        fun vis() = vm.uiState.value.currentProject!!.layers.associate { it.id to it.isVisible }
+        vm.uiState.value.currentProject!!.layers.first { it.id == "d" }.isVisible = false
+        vm.toggleSoloLayerAt(1) // b
+        assertEquals(mapOf("a" to false, "b" to true, "c" to false, "d" to false), vis())
+        // Solo another layer, then turn solo off: the original visibility comes back.
+        vm.toggleSoloLayerAt(2) // c
+        assertEquals(mapOf("a" to false, "b" to false, "c" to true, "d" to false), vis())
+        vm.toggleSoloLayerAt(2)
+        assertEquals(mapOf("a" to true, "b" to true, "c" to true, "d" to false), vis())
+        // A layer inside a group keeps its group visible.
+        vm.selectLayer(0)
+        vm.setLayerMultiSelect(true)
+        vm.toggleLayerPicked("c")
+        vm.groupLayers()
+        val layers = vm.uiState.value.currentProject!!.layers
+        val g = layers.single { it.type == LayerType.GROUP }
+        vm.toggleSoloLayerAt(layers.indexOfFirst { it.id == "a" })
+        assertTrue(layers.first { it.id == g.id }.isVisible)
+        assertTrue(layers.first { it.id == "a" }.isVisible)
+        assertFalse(layers.first { it.id == "c" }.isVisible)
+        assertFalse(layers.first { it.id == "b" }.isVisible)
+        // Undo brings back the state before the solo.
+        vm.undo()
+        assertTrue(vm.uiState.value.currentProject!!.layers.first { it.id == "b" }.isVisible)
+    }
+
+    @Test
+    fun `curves grey-point pick replaces the earlier one and keeps black and white`() {
+        val pts = listOf(android.graphics.PointF(30f, 0f), android.graphics.PointF(120f, 100f), android.graphics.PointF(230f, 255f))
+        val cleaned = com.example.ui.components.withoutGrayPoint(pts)
+        assertEquals(listOf(30f, 230f), cleaned.map { it.x })
+        assertEquals(2, com.example.ui.components.withoutGrayPoint(listOf(android.graphics.PointF(60f, 90f))).size)
+    }
+
+    @Test
     fun `grouping picked layers keeps them together under a group and ungroup restores them`() {
         val (vm, _) = groupVm()
         vm.selectLayer(0)

@@ -1278,4 +1278,9 @@
     <string name="preset_to_sliders">Edit as adjustments</string>
     <string name="preset_to_sliders_hint">Moves this preset into the adjustment sliders so you can fine-tune every part of it.</string>
     <string name="preset_to_sliders_partial">Some parts of this preset (grain, vignette, glow) were kept as an approximation.</string>
+    <string name="layer_solo">Show only this layer</string>
+    <string name="status_solo_on">Only “%1$s” is shown — long-press its eye again to bring the other layers back</string>
+    <string name="status_solo_off">Other layers shown again</string>
+    <string name="effect_none">No effect</string>
+    <string name="effect_choose_hint">Choose an effect to see it on the image.</string>
 </resources>
