@@ -779,8 +779,8 @@
     <string name="replace_softness">Edge softness</string>
     <string name="replace_show_area">Hold to see the affected area</string>
     <string name="replace_selection_only_hint">Change the colour only inside the selection</string>
-    <string name="status_selection_adjust_whole_layer">Selection active • Adjustments apply to the whole layer. To limit them, add an adjustment layer and give it a mask from the selection.</string>
-    <string name="status_selection_filters_scope">Selection active • Pro effects apply inside the selection; filter presets apply to the whole layer.</string>
+    <string name="status_selection_adjust_whole_layer">Selection active • Adjustments apply inside the selection only (an adjustment layer clipped to this layer, masked by the selection).</string>
+    <string name="status_selection_filters_scope">Selection active • Filters, LUTs and pro effects apply inside the selection only.</string>
 
     <!-- Before & After Comparison -->
     <string name="compare_title">Before &amp; After</string>
@@ -1123,4 +1123,27 @@
     <string name="fs_smooth_selection">Smooth selected area</string>
     <string name="fs_smooth_selection_hint">Select an area on the Low layer first.</string>
     <string name="fs_smooth_needs_selection">Select an area first</string>
+    <string name="layer_name_selection_look">Selection adjustment</string>
+    <string name="status_look_in_selection">Applied inside the selection (adjustment layer clipped to this layer)</string>
+    <string name="layer_name_cut">Cut selection</string>
+    <string name="status_cut_new_layer">Selection cut to a new layer</string>
+    <string name="status_selection_floated">The selection was cut to its own layer: transforming moves only it</string>
+    <string name="status_selection_cleared">Selected pixels deleted</string>
+    <string name="status_selection_filled">Selection filled</string>
+    <string name="status_selection_stroked">Selection stroked</string>
+    <string name="select_cut_layer">Cut to layer</string>
+    <string name="select_delete_pixels">Delete pixels</string>
+    <string name="sel_fill_more">Fill…</string>
+    <string name="sel_stroke_more">Stroke…</string>
+    <string name="sel_fill_title">Fill selection</string>
+    <string name="sel_stroke_title">Stroke selection</string>
+    <string name="sel_fill">Fill</string>
+    <string name="sel_stroke">Stroke</string>
+    <string name="sel_color">Colour</string>
+    <string name="sel_custom_color">Custom colour…</string>
+    <string name="sel_stroke_width">Width</string>
+    <string name="sel_stroke_inside">Inside</string>
+    <string name="sel_stroke_center">Centre</string>
+    <string name="sel_stroke_outside">Outside</string>
+    <string name="sel_opacity">Opacity</string>
 </resources>

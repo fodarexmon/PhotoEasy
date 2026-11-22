@@ -24,6 +24,7 @@ import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -229,6 +230,67 @@ class ProToolsTest {
         com.example.engine.RetouchCanvas(w, h, px4).fill(1, 1, Color.BLUE, 0.5f, 0, true, false)
         assertTrue(kotlin.math.abs((px4[0] ushr 24) - 128) <= 1)
         assertEquals(255, px4[0] and 255)
+    }
+
+    @Test
+    fun `brushes and healing stay inside the selection`() {
+        val grey = Color.rgb(120, 120, 120)
+        // Left half selected.
+        val sel = ByteArray(60 * 60) { i -> if (i % 60 < 30) 255.toByte() else 0 }
+        for (tool in listOf(RetouchTool.DODGE, RetouchTool.BURN, RetouchTool.BRUSH, RetouchTool.ERASER)) {
+            val c = canvasOf(60, 60, grey)
+            c.beginStroke(tool, RetouchBrush(hardness = 1f, strength = 1f, fillColor = Color.RED), selection = sel, selectionStride = 60)
+            c.stroke(floatArrayOf(10f, 30f, 50f, 30f), 12f)
+            c.endStroke()
+            assertNotEquals("$tool inside", grey, c.pix[30 * 60 + 15])
+            assertEquals("$tool outside", grey, c.pix[30 * 60 + 45])
+        }
+        // A stroke after the selected one paints everywhere again.
+        val c = canvasOf(60, 60, grey)
+        c.beginStroke(RetouchTool.BRUSH, RetouchBrush(hardness = 1f, fillColor = Color.RED), selection = sel, selectionStride = 60)
+        c.stroke(floatArrayOf(45f, 30f), 6f); c.endStroke()
+        assertEquals(grey, c.pix[30 * 60 + 45])
+        c.beginStroke(RetouchTool.BRUSH, RetouchBrush(hardness = 1f, fillColor = Color.RED))
+        c.stroke(floatArrayOf(45f, 30f), 6f); c.endStroke()
+        assertNotEquals(grey, c.pix[30 * 60 + 45])
+        // Healing entirely outside the selection does nothing.
+        val h = canvasOf(60, 60, grey)
+        h.pix[30 * 60 + 45] = Color.BLACK
+        assertNull(h.heal(floatArrayOf(45f, 30f), 4f, sel, 60))
+        assertEquals(Color.BLACK, h.pix[30 * 60 + 45])
+    }
+
+    @Test
+    fun `selection delete fill and stroke`() {
+        val w = 40; val h = 30
+        val sel = ByteArray(w * h) { i -> val x = i % w; val y = i / w; if (x in 10..29 && y in 8..21) 255.toByte() else 0 }
+        val px = IntArray(w * h) { Color.WHITE }
+        com.example.engine.SelectionOps.erase(px, w, h, sel, w)
+        assertEquals(0, px[15 * w + 15] ushr 24); assertEquals(Color.WHITE, px[0])
+        val f = IntArray(w * h) { Color.WHITE }
+        com.example.engine.SelectionOps.fill(f, w, h, sel, w, Color.RED, 1f)
+        assertEquals(Color.RED, f[15 * w + 15]); assertEquals(Color.WHITE, f[15 * w + 5])
+        // A 3 px stroke inside the edge: the border rows are covered, the middle and outside not.
+        val st = IntArray(w * h) { Color.WHITE }
+        com.example.engine.SelectionOps.stroke(st, w, h, sel, w, Color.BLUE, 3f, com.example.engine.StrokePosition.INSIDE, 1f)
+        assertEquals(Color.BLUE, st[15 * w + 10]); assertEquals(Color.BLUE, st[15 * w + 12])
+        assertEquals(Color.WHITE, st[15 * w + 13]); assertEquals(Color.WHITE, st[15 * w + 9]); assertEquals(Color.WHITE, st[15 * w + 20])
+        val out = IntArray(w * h) { Color.WHITE }
+        com.example.engine.SelectionOps.stroke(out, w, h, sel, w, Color.BLUE, 3f, com.example.engine.StrokePosition.OUTSIDE, 1f)
+        assertEquals(Color.BLUE, out[15 * w + 7]); assertEquals(Color.BLUE, out[15 * w + 9]); assertEquals(Color.WHITE, out[15 * w + 10])
+    }
+
+    @Test
+    fun `liquify does not move what is outside the selection`() {
+        val src = Bitmap.createBitmap(80, 80, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 80) for (x in 0 until 80) src.setPixel(x, y, if ((x / 4 + y / 4) % 2 == 0) Color.BLACK else Color.WHITE)
+        val e = LiquifyEngine(src)
+        // Only the left half is selected.
+        e.freezeOutside(ByteArray(80 * 80) { i -> if (i % 80 < 40) 255.toByte() else 0 }, 80)
+        e.beginStroke()
+        repeat(6) { e.dab(LiquifyTool.FORWARD_WARP, 30f + it * 3, 40f, 3f, 0f, LiquifyBrush(size = 60f, pressure = 100f, density = 50f)) }
+        assertTrue(e.hasChanges)
+        for (y in 0 until 80) for (x in 42 until 80) assertEquals("($x,$y)", src.getPixel(x, y), e.output[y * 80 + x])
     }
 
     @Test

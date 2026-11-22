@@ -821,6 +821,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val previous = _uiState.value.activeTool
         // Leaving the retouch brushes frees the full-resolution pixels they keep.
         if (previous == ActiveTool.RETOUCH && tool != ActiveTool.RETOUCH && !retouchStrokeActive) retouchSession = null
+        // Leaving the Adjust panel: an untouched selection adjustment layer goes away (no undo step).
+        if (previous == ActiveTool.ADJUST && tool != ActiveTool.ADJUST) endSelectionLook()
         // Leaving a transient editor (filters/adjustments/text/transform) should never
         // leave a half-open history transaction. Commit what the user can currently see.
         if (previous != tool && pendingTransactionSnapshot != null) {
@@ -835,12 +837,21 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             cropTargetWidth = if (tool == ActiveTool.CROP_PERSPECTIVE) _uiState.value.cropTargetWidth else 0,
             cropTargetHeight = if (tool == ActiveTool.CROP_PERSPECTIVE) _uiState.value.cropTargetHeight else 0
         )
+        if (previous != tool) when (tool) {
+            // With a selection: Adjust works on a clipped adjustment layer masked by it...
+            ActiveTool.ADJUST -> beginSelectionLook()
+            // ...and Transform moves only the selected pixels (cut to their own layer first).
+            ActiveTool.TRANSFORM -> floatSelectionForTransform()
+            else -> {}
+        }
     }
 
     /** Restore the state captured at the beginning of the current transient edit. */
     fun cancelHistoryTransaction() {
         val snapshot = pendingTransactionSnapshot ?: return
         val proj = _uiState.value.currentProject ?: run { pendingTransactionSnapshot = null; return }
+        val prevIdx = _uiState.value.selectedLayerIndex
+        val prevId = proj.layers.getOrNull(prevIdx)?.id
         proj.width = snapshot.width
         proj.height = snapshot.height
         restoreLayers(proj, snapshot.layers.map { it.snapshotLayer() })
@@ -848,9 +859,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         pendingTransactionSnapshot = null
         val wasDirty = pendingTransactionWasDirty
         pendingTransactionWasDirty = false
+        // A layer added during the edit (e.g. a selection adjustment) is gone: select the one below it.
+        val keptIdx = proj.layers.indexOfFirst { it.id == prevId }.takeIf { it >= 0 }
+            ?: (prevIdx - 1).coerceIn(0, (proj.layers.size - 1).coerceAtLeast(0))
         _uiState.value = _uiState.value.copy(
             currentProject = proj.copy(layers = ArrayList(proj.layers)),
             renderRevision = proj.renderRevision,
+            selectedLayerIndex = keptIdx,
             isProjectDirty = wasDirty
         )
         if (wasDirty) scheduleAutosave()
@@ -1532,6 +1547,94 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             action(layer)
             commitProjectMutation()
         }
+    }
+
+    /**
+     * A new Adjustment layer above [idx], clipped to it and masked by the selection, so a look
+     * (filter, LUT, adjustments) changes only the selected area of that layer, like Photoshop's
+     * Image > Adjustments on a selection. Null without a selection or for a non-pixel layer.
+     */
+    private fun selectionLookLayer(proj: Project, idx: Int): Layer? {
+        val layer = proj.layers.getOrNull(idx) ?: return null
+        if (layer.type != LayerType.IMAGE && layer.type != LayerType.TEXT) return null
+        val selection = _uiState.value.selectionMask?.takeIf { !it.isRecycled && SelectionEngine.hasSelection(it) } ?: return null
+        val mask = documentSizedMask(selection, proj.width, proj.height).let { if (it === selection) it.copy(Bitmap.Config.ALPHA_8, true) else it }
+        return Layer(
+            id = java.util.UUID.randomUUID().toString(),
+            name = uniqueLayerName(tr(R.string.layer_name_selection_look), proj),
+            type = LayerType.ADJUSTMENT,
+            adjustments = ColorAdjustments(),
+            maskBitmap = mask,
+            isClipped = true
+        ).also { it.maskAnchor = it.currentMaskAnchor() }
+    }
+
+    /** Adjustment layer added when the Adjust panel opened over a selection (removed if left unused). */
+    private var selectionLookId: String? = null
+    private var selectionLookBaseIndex = -1
+
+    /**
+     * Opening the Adjust panel with a selection on an image or text layer: its sliders work on
+     * a new clipped Adjustment layer masked by the selection (they start at zero instead of the
+     * layer's own values, so nothing is applied twice).
+     */
+    fun beginSelectionLook() {
+        if (selectionLookId != null) return
+        val proj = _uiState.value.currentProject ?: return
+        val idx = _uiState.value.selectedLayerIndex
+        val layer = proj.layers.getOrNull(idx) ?: return
+        if (layer.isLocked) return
+        val look = selectionLookLayer(proj, idx) ?: return
+        beginHistoryTransaction()
+        proj.layers.add(idx + 1, look)
+        selectionLookId = look.id
+        selectionLookBaseIndex = idx
+        clearSmartAutoSession()
+        commitProjectMutation(selectedLayerIndex = idx + 1, statusMessage = tr(R.string.status_look_in_selection))
+    }
+
+    /** Closing the Adjust panel: an untouched selection Adjustment layer is taken away again. */
+    fun endSelectionLook() {
+        val id = selectionLookId ?: return
+        selectionLookId = null
+        val proj = _uiState.value.currentProject ?: return
+        val i = proj.layers.indexOfFirst { it.id == id }
+        if (i < 0) return
+        val l = proj.layers[i]
+        val unused = l.adjustments.isIdentity() && !l.adjustments.hasCurves() && l.filter == FilterType.NONE && l.lutId == null
+        if (!unused) return
+        val base = selectionLookBaseIndex.coerceIn(0, proj.layers.size - 2)
+        if (pendingTransactionSnapshot != null) {
+            cancelHistoryTransaction()
+        } else {
+            saveHistoryState()
+            proj.layers.removeAt(i)
+            commitProjectMutation(selectedLayerIndex = base)
+        }
+    }
+
+    /**
+     * Changes the selected layer's look (filter, LUT, preset, adjustments). With an active
+     * selection on an image or text layer the change goes to a new clipped Adjustment layer
+     * masked by the selection (one per edit session), so only the selected area changes.
+     */
+    fun updateLookTransient(action: (Layer) -> Unit) {
+        val proj = _uiState.value.currentProject ?: return
+        val idx = _uiState.value.selectedLayerIndex
+        val layer = proj.layers.getOrNull(idx) ?: return
+        if (!layer.isLocked) {
+            if (pendingTransactionSnapshot == null) beginHistoryTransaction()
+            val look = selectionLookLayer(proj, idx)
+            if (look != null) {
+                proj.layers.add(idx + 1, look)
+                clearSmartAutoSession()
+                _uiState.value = _uiState.value.copy(
+                    selectedLayerIndex = idx + 1,
+                    statusMessage = tr(R.string.status_look_in_selection)
+                )
+            }
+        }
+        updateSelectedLayerTransient(action)
     }
 
     fun updateSelectedLayerTransient(action: (Layer) -> Unit) {
@@ -2460,9 +2563,20 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     ImageProcessor.computeSmartAutoAdjustments(src!!, layer.adjustments)
                 }
                 saveHistoryState()
-                layer.adjustments = ImageProcessor.combineSmartAuto(layer.adjustments, delta, 1f)
-                smartAutoSession = SmartAutoSession(layer.id, delta, 1f)
+                // With a selection the correction goes to a clipped adjustment layer masked by it.
+                val curIdx = proj.layers.indexOf(layer)
+                val look = if (curIdx >= 0) selectionLookLayer(proj, curIdx) else null
+                val target = if (look != null) {
+                    look.adjustments = ImageProcessor.combineSmartAuto(ColorAdjustments(), delta, 1f)
+                    proj.layers.add(curIdx + 1, look)
+                    look
+                } else {
+                    layer.adjustments = ImageProcessor.combineSmartAuto(layer.adjustments, delta, 1f)
+                    layer
+                }
+                smartAutoSession = SmartAutoSession(target.id, delta, 1f)
                 commitProjectMutation(
+                    selectedLayerIndex = if (look != null) curIdx + 1 else _uiState.value.selectedLayerIndex,
                     statusMessage = tr(if (delta.isIdentity()) R.string.status_smart_auto_nothing else R.string.status_smart_auto_applied),
                     transformState = { it.copy(isProcessing = false, smartAutoStrength = if (delta.isIdentity()) null else 1f) }
                 )
@@ -4107,10 +4221,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         class Start(
             val layer: Layer, val docW: Int, val docH: Int, val tool: com.example.engine.RetouchTool,
             val brush: com.example.engine.RetouchBrush, val cloneOffsetDoc: PointF?,
-            val points: List<PointF>, val docRadius: Float
+            val points: List<PointF>, val docRadius: Float, val selection: Bitmap? = null
         ) : RetouchEvent()
         class Move(val points: List<PointF>, val docRadius: Float) : RetouchEvent()
-        class Heal(val layer: Layer, val docW: Int, val docH: Int, val points: List<PointF>, val docRadius: Float) : RetouchEvent()
+        class Heal(val layer: Layer, val docW: Int, val docH: Int, val points: List<PointF>, val docRadius: Float, val selection: Bitmap? = null) : RetouchEvent()
         class Fill(
             val layer: Layer, val docW: Int, val docH: Int, val pointDoc: PointF, val endDoc: PointF?,
             val brush: com.example.engine.RetouchBrush, val selection: Bitmap?
@@ -4141,7 +4255,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     /** The stroke being processed has recorded its undo step (roll it back if it fails). */
     private var retouchStepOpen = false
     private class GradientDrag(val layer: Layer, val start: PointF, val selection: Bitmap?)
-    private class HealStroke(val layer: Layer, val points: MutableList<PointF>, val docRadius: Float)
+    private class HealStroke(val layer: Layer, val points: MutableList<PointF>, val docRadius: Float, val selection: Bitmap?)
     /** Spot Healing stroke being painted (document coordinates). */
     private var healStroke: HealStroke? = null
     /** Fill in gradient mode: where the drag started. */
@@ -4266,7 +4380,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             if (tool == com.example.engine.RetouchTool.PATCH) { patchStartDoc = points.firstOrNull(); return }
             if (tool == com.example.engine.RetouchTool.HEAL) {
                 // Spot Healing: the stroke is collected and healed when the finger lifts.
-                healStroke = HealStroke(layer!!, points.toMutableList(), docRadius)
+                healStroke = HealStroke(layer!!, points.toMutableList(), docRadius, st.selectionMask?.takeIf { hasSelection })
                 return
             }
             val first = points.firstOrNull() ?: return
@@ -4295,7 +4409,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
             queueRetouch(RetouchEvent.Start(
                 layer!!, proj.width, proj.height, tool, st.retouchBrush,
-                if (tool == com.example.engine.RetouchTool.CLONE) cloneOffsetDoc else null, points.toList(), docRadius
+                if (tool == com.example.engine.RetouchTool.CLONE) cloneOffsetDoc else null, points.toList(), docRadius,
+                // Every brush stays inside the selection, as in Photoshop.
+                st.selectionMask?.takeIf { hasSelection }
             ))
             return
         }
@@ -4305,7 +4421,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             heal.points.addAll(points)
             if (phase == StrokePhase.END) {
                 healStroke = null
-                queueRetouch(RetouchEvent.Heal(heal.layer, proj.width, proj.height, heal.points.toList(), heal.docRadius))
+                queueRetouch(RetouchEvent.Heal(heal.layer, proj.width, proj.height, heal.points.toList(), heal.docRadius, heal.selection))
             }
             return
         }
@@ -4479,6 +4595,15 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
+    /** The document selection [sel] on the layer's own pixels (alpha bytes and row stride), or null. */
+    private fun localSelectionBytes(c: com.example.engine.RetouchCanvas, sel: Bitmap?): Pair<ByteArray?, Int> {
+        val s = sel?.takeIf { !it.isRecycled } ?: return null to c.width
+        val m = Bitmap.createBitmap(c.width, c.height, Bitmap.Config.ALPHA_8)
+        android.graphics.Canvas(m).drawBitmap(s, strokeToLocal!!, Paint(Paint.FILTER_BITMAP_FLAG))
+        val r = SelectionEngine.readAlphaBytes(m); m.recycle()
+        return r.first to r.second
+    }
+
     private suspend fun handleRetouchEvent(ev: RetouchEvent) {
         when (ev) {
             is RetouchEvent.Start -> {
@@ -4491,7 +4616,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 val off = ev.cloneOffsetDoc?.let { o ->
                     val v = floatArrayOf(o.x, o.y); strokeToLocal!!.mapVectors(v); v
                 } ?: floatArrayOf(0f, 0f)
-                withContext(retouchDispatcher) { session.canvas.beginStroke(ev.tool, ev.brush, off[0], off[1]) }
+                withContext(retouchDispatcher) {
+                    val (selBytes, selStride) = localSelectionBytes(session.canvas, ev.selection)
+                    session.canvas.beginStroke(ev.tool, ev.brush, off[0], off[1], selBytes, selStride)
+                }
                 paintRetouch(session.canvas, ev.points, ev.docRadius)
             }
             is RetouchEvent.Move -> {
@@ -4520,7 +4648,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 val local = toLocalPoints(ev.points)
                 val r = ev.docRadius * strokeLocalScale
                 val changed = withContext(retouchDispatcher) {
-                    c.heal(local, r)?.also { area -> c.downsampleInto(preview, area) }
+                    val (selBytes, selStride) = localSelectionBytes(c, ev.selection)
+                    c.heal(local, r, selBytes, selStride)?.also { area -> c.downsampleInto(preview, area) }
                 }
                 if (changed == null) {
                     onRetouchFailed(R.string.heal_failed)
@@ -4547,13 +4676,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     else -> { _, _ -> b.fillColor or (0xFF shl 24) }
                 }
                 val changed = withContext(retouchDispatcher) {
-                    var bytes: ByteArray? = null; var stride = c.width
-                    ev.selection?.takeIf { !it.isRecycled }?.let { sel ->
-                        val m = Bitmap.createBitmap(c.width, c.height, Bitmap.Config.ALPHA_8)
-                        android.graphics.Canvas(m).drawBitmap(sel, strokeToLocal!!, Paint(Paint.FILTER_BITMAP_FLAG))
-                        val r = SelectionEngine.readAlphaBytes(m); m.recycle()
-                        bytes = r.first; stride = r.second
-                    }
+                    val (bytes, stride) = localSelectionBytes(c, ev.selection)
                     c.fill(
                         kotlin.math.floor(local[0]).toInt(), kotlin.math.floor(local[1]).toInt(), paint, b.fillOpacity,
                         b.fillTolerance, b.fillContiguous, b.fillAntiAlias, bytes, stride
@@ -4769,7 +4892,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /** True when Liquify can work on the selected layer; otherwise explains why in the status. */
-    fun canLiquifySelectedLayer(): Boolean {
+    /** The active selection on [layer]'s preview pixels (ALPHA_8, caller recycles), or null. */
+    fun selectionOnLayerPreview(layer: Layer): Bitmap? {
+        val proj = _uiState.value.currentProject ?: return null
+        val sel = _uiState.value.selectionMask?.takeIf { !it.isRecycled && SelectionEngine.hasSelection(it) } ?: return null
+        return try { SelectionEngine.mapDocumentMaskToLayerLocal(sel, layer, proj.width, proj.height) } catch (e: Throwable) { null }
+    }
+
+        fun canLiquifySelectedLayer(): Boolean {
         val layer = _uiState.value.currentProject?.layers?.getOrNull(_uiState.value.selectedLayerIndex) ?: return false
         val msg = when {
             layer.isLocked -> R.string.status_layer_locked
@@ -5490,6 +5620,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun clearSelection() {
+        // Adjusting the whole layer now: an unused selection Adjustment layer goes away.
+        if (selectionLookId != null) {
+            endSelectionLook()
+            // Still open in the Adjust panel: it keeps working on the layer below.
+        }
         val proj = _uiState.value.currentProject ?: return
         val w = proj.width
         val h = proj.height
@@ -5497,7 +5632,97 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /** Copies the selected pixels of the selected image layer into a new layer placed exactly over them. */
-    fun copySelectionToNewLayer() {
+    /** Edit > Clear: the selected pixels of the selected image layer become transparent. */
+    fun deleteSelectedPixels() = selectionPixelEdit("clear", R.string.status_selection_cleared) { px, w, h, m, st, _ ->
+        com.example.engine.SelectionOps.erase(px, w, h, m, st)
+    }
+
+    /** Edit > Fill: [color] at [opacity] inside the selection. */
+    fun fillSelection(color: Int, opacity: Float) = selectionPixelEdit("fill", R.string.status_selection_filled) { px, w, h, m, st, _ ->
+        com.example.engine.SelectionOps.fill(px, w, h, m, st, color or (0xFF shl 24), opacity)
+    }
+
+    /** Edit > Stroke: a line [widthDoc] document pixels wide along the selection edge. */
+    fun strokeSelection(color: Int, widthDoc: Float, position: com.example.engine.StrokePosition, opacity: Float) =
+        selectionPixelEdit("stroke", R.string.status_selection_stroked) { px, w, h, m, st, perDoc ->
+            com.example.engine.SelectionOps.stroke(px, w, h, m, st, color or (0xFF shl 24), widthDoc * perDoc, position, opacity)
+        }
+
+    /**
+     * Runs [edit] on the selected image layer's full-resolution pixels with the selection on them
+     * (alpha bytes, stride, layer pixels per document pixel), as one undo step.
+     */
+    private fun selectionPixelEdit(
+        prefix: String, @StringRes done: Int,
+        edit: (IntArray, Int, Int, ByteArray, Int, Float) -> Unit
+    ) {
+        val proj = _uiState.value.currentProject ?: return
+        if (_uiState.value.isProcessing) return
+        val idx = _uiState.value.selectedLayerIndex
+        val layer = proj.layers.getOrNull(idx) ?: return
+        val mask = _uiState.value.selectionMask?.takeIf { !it.isRecycled && SelectionEngine.hasSelection(it) }
+        if (mask == null) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_nothing_selected)); return }
+        if (layer.isLocked) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_layer_locked)); return }
+        if (layer.type != LayerType.IMAGE || layer.bitmap == null) {
+            _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.effect_needs_image_layer)); return
+        }
+        if (pendingTransactionSnapshot != null) saveHistoryState()
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_processing))
+            var src: Bitmap? = null
+            var local: Bitmap? = null
+            var out: Bitmap? = null
+            var historySaved = false
+            try {
+                src = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Image unavailable")
+                val work = workLayerFor(layer, src!!)
+                out = withContext(Dispatchers.Default) {
+                    local = SelectionEngine.mapDocumentMaskToLayerLocal(mask, work, proj.width, proj.height)
+                    val (mb, stride) = SelectionEngine.readAlphaBytes(local!!)
+                    val w = src!!.width; val h = src!!.height
+                    val px = IntArray(w * h); src!!.getPixels(px, 0, w, 0, 0, w, h)
+                    edit(px, w, h, mb, stride, w / layer.intrinsicDocumentWidth().coerceAtLeast(1f))
+                    Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(px, 0, w, 0, 0, w, h) }
+                }
+                saveHistoryState()
+                historySaved = true
+                if (!commitDestructiveBitmap(proj, layer, out!!, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), prefix, keepBefore = true)) {
+                    throw java.io.IOException("Save failed")
+                }
+                commitProjectMutation(statusMessage = tr(done), transformState = { it.copy(isProcessing = false) })
+            } catch (e: OutOfMemoryError) {
+                if (historySaved) rollbackToLastHistoryState()
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_processing_failed_memory))
+            } catch (e: Exception) {
+                if (historySaved) rollbackToLastHistoryState()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_effect_failed))
+            } finally {
+                local?.let { if (!it.isRecycled) it.recycle() }
+                src?.let { if (it !== layer.bitmap && !it.isRecycled) it.recycle() }
+                out?.let { if (it !== layer.bitmap && !it.isRecycled) it.recycle() }
+            }
+        }
+    }
+
+    fun copySelectionToNewLayer() = selectionToNewLayer(cut = false)
+
+    /** Layer via Cut: the selected pixels move to a new layer (and leave a hole in this one). */
+    fun cutSelectionToNewLayer() = selectionToNewLayer(cut = true)
+
+    /**
+     * Transforming with a selection on an image layer: the selected pixels are cut to their own
+     * layer first, so moving, scaling, rotating or flipping moves only them (as in Photoshop).
+     */
+    fun floatSelectionForTransform() {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.getOrNull(_uiState.value.selectedLayerIndex) ?: return
+        val sel = _uiState.value.selectionMask?.takeIf { !it.isRecycled && SelectionEngine.hasSelection(it) } ?: return
+        if (layer.type != LayerType.IMAGE || layer.isLocked || sel.isRecycled) return
+        selectionToNewLayer(cut = true, status = R.string.status_selection_floated)
+    }
+
+    private fun selectionToNewLayer(cut: Boolean, @StringRes status: Int = if (cut) R.string.status_cut_new_layer else R.string.status_copied_new_layer) {
         val proj = _uiState.value.currentProject ?: return
         val idx = _uiState.value.selectedLayerIndex
         if (idx !in proj.layers.indices) return
@@ -5520,11 +5745,20 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 copy = withContext(Dispatchers.Default) { SelectionEngine.copySelectedToNewBitmap(src!!, local!!) }
                     ?: throw IllegalStateException("No pixels selected")
+                if (cut && layer.isLocked) throw IllegalStateException("Locked")
+                // Layer via Cut: what was copied is removed from the source layer.
+                val holed = if (cut) withContext(Dispatchers.Default) {
+                    val (mb, stride) = SelectionEngine.readAlphaBytes(local!!)
+                    val w = src!!.width; val h = src!!.height
+                    val px = IntArray(w * h); src!!.getPixels(px, 0, w, 0, 0, w, h)
+                    com.example.engine.SelectionOps.erase(px, w, h, mb, stride)
+                    Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(px, 0, w, 0, 0, w, h) }
+                } else null
                 // Same placement and look as the source layer (skew / distort included), so the
                 // copy sits exactly over the pixels it came from.
                 val n = Layer(
                     id = java.util.UUID.randomUUID().toString(),
-                    name = tr(R.string.layer_name_selection),
+                    name = tr(if (cut) R.string.layer_name_cut else R.string.layer_name_selection),
                     type = LayerType.IMAGE,
                     exifTags = layer.exifTags,
                     positionX = layer.positionX,
@@ -5548,10 +5782,15 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     throw java.io.IOException("Save failed")
                 }
                 saveHistoryState()
+                if (holed != null) {
+                    val ok = commitDestructiveBitmap(proj, layer, holed, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "cut", keepBefore = true)
+                    if (holed !== layer.bitmap && !holed.isRecycled) holed.recycle()
+                    if (!ok) { rollbackToLastHistoryState(); throw java.io.IOException("Save failed") }
+                }
                 proj.layers.add(idx + 1, n)
                 commitProjectMutation(
                     selectedLayerIndex = idx + 1,
-                    statusMessage = tr(R.string.status_copied_new_layer),
+                    statusMessage = tr(status),
                     transformState = { it.copy(selectionMask = SelectionEngine.createBlankMask(proj.width, proj.height), isProcessing = false) }
                 )
                 clearSelectionHistory()
