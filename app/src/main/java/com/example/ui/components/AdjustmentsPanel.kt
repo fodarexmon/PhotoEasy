@@ -1,6 +1,9 @@
 package com.example.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
@@ -372,6 +375,8 @@ fun AdjustmentsPanel(
                     targetProperty = hslTargetProperty,
                     onTargetPropertyChange = onHslTargetPropertyChange
                 )
+                Spacer(Modifier.height(10.dp))
+                ColorGradingSection(adjustments, onAdjustmentsChange, onAdjustmentsCommit)
             }
 
             AdjustmentsTab.REPLACE -> {
@@ -508,4 +513,48 @@ private fun AdjustmentGroupTitle(text: String) {
         modifier = Modifier.padding(top = 10.dp, bottom = 2.dp)
     )
     HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+}
+
+
+/** Color Grading (Lightroom / Camera Raw): a colour for shadows, midtones and highlights. */
+@Composable
+private fun ColorGradingSection(adjustments: ColorAdjustments, onChange: (ColorAdjustments) -> Unit, onCommit: () -> Unit) {
+    var zone by remember { mutableIntStateOf(0) }
+    Column(Modifier.fillMaxWidth()) {
+        HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
+        Spacer(Modifier.height(6.dp))
+        Text(stringResource(R.string.color_grading), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+        Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf(R.string.grade_shadows, R.string.grade_midtones, R.string.grade_highlights).forEachIndexed { i, label ->
+                val sat = when (i) { 0 -> adjustments.gradeShadowSat; 1 -> adjustments.gradeMidSat; else -> adjustments.gradeHighSat }
+                val hue = when (i) { 0 -> adjustments.gradeShadowHue; 1 -> adjustments.gradeMidHue; else -> adjustments.gradeHighHue }
+                FilterChip(
+                    selected = zone == i, onClick = { zone = i },
+                    label = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(10.dp).clip(CircleShape).background(
+                                if (sat > 0f) Color(android.graphics.Color.HSVToColor(floatArrayOf(hue, (sat / 100f).coerceIn(0.15f, 1f), 1f))) else Color.Gray))
+                            Spacer(Modifier.width(4.dp))
+                            Text(stringResource(label), fontSize = 12.sp)
+                        }
+                    },
+                    modifier = Modifier.weight(1f).testTag("grade_zone_$i")
+                )
+            }
+        }
+        val hue = when (zone) { 0 -> adjustments.gradeShadowHue; 1 -> adjustments.gradeMidHue; else -> adjustments.gradeHighHue }
+        val sat = when (zone) { 0 -> adjustments.gradeShadowSat; 1 -> adjustments.gradeMidSat; else -> adjustments.gradeHighSat }
+        fun setZone(h: Float, s: Float) = onChange(when (zone) {
+            0 -> adjustments.copy(gradeShadowHue = h, gradeShadowSat = s)
+            1 -> adjustments.copy(gradeMidHue = h, gradeMidSat = s)
+            else -> adjustments.copy(gradeHighHue = h, gradeHighSat = s)
+        })
+        // Hue over a rainbow.
+        Box(Modifier.fillMaxWidth().height(8.dp).padding(horizontal = 8.dp).clip(RoundedCornerShape(4.dp))
+            .background(Brush.horizontalGradient((0..12).map { Color(android.graphics.Color.HSVToColor(floatArrayOf(it * 30f, 0.85f, 0.95f))) })))
+        AdjustmentSlider(stringResource(R.string.grade_hue), hue, 0f..360f, onValueChange = { setZone(it, sat) }, onValueChangeFinished = onCommit, defaultValue = hue, showCompare = false)
+        AdjustmentSlider(stringResource(R.string.grade_saturation), sat, 0f..100f, onValueChange = { setZone(hue, it) }, onValueChangeFinished = onCommit)
+        AdjustmentSlider(stringResource(R.string.grade_balance), adjustments.gradeBalance, -100f..100f, onValueChange = { onChange(adjustments.copy(gradeBalance = it)) }, onValueChangeFinished = onCommit)
+        AdjustmentSlider(stringResource(R.string.grade_blending), adjustments.gradeBlending, 0f..100f, onValueChange = { onChange(adjustments.copy(gradeBlending = it)) }, onValueChangeFinished = onCommit, defaultValue = 50f)
+    }
 }

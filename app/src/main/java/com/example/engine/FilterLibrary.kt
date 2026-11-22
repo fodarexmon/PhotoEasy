@@ -196,6 +196,10 @@ object AdjustmentsJson {
         put("whites", a.whites.toDouble()); put("blacks", a.blacks.toDouble()); put("vibrance", a.vibrance.toDouble())
         put("clarity", a.clarity.toDouble()); put("dehaze", a.dehaze.toDouble())
         if (a.noiseReduction != 0f) put("noiseReduction", a.noiseReduction.toDouble())
+        if (a.gradeShadowSat != 0f || a.gradeMidSat != 0f || a.gradeHighSat != 0f) {
+            put("grade", JSONArray(listOf(a.gradeShadowHue, a.gradeShadowSat, a.gradeMidHue, a.gradeMidSat,
+                a.gradeHighHue, a.gradeHighSat, a.gradeBalance, a.gradeBlending).map { it.toDouble() }))
+        }
         if (a.grainAmount != 0f) {
             put("grainAmount", a.grainAmount.toDouble()); put("grainSize", a.grainSize.toDouble()); put("grainRoughness", a.grainRoughness.toDouble())
         }
@@ -220,6 +224,8 @@ object AdjustmentsJson {
         val d = ColorAdjustments()
         if (o == null) return d
         fun f(key: String, def: Float) = o.optDouble(key, def.toDouble()).toFloat()
+        val gradeArr = o.optJSONArray("grade")
+        fun grade(i: Int, def: Float) = gradeArr?.optDouble(i, def.toDouble())?.toFloat() ?: def
         return ColorAdjustments(
             brightness = f("brightness", 0f), contrast = f("contrast", 0f), saturation = f("saturation", 0f),
             temperature = f("temperature", 0f), tint = f("tint", 0f), exposure = f("exposure", 0f),
@@ -237,6 +243,10 @@ object AdjustmentsJson {
             whites = f("whites", 0f), blacks = f("blacks", 0f), vibrance = f("vibrance", 0f),
             clarity = f("clarity", 0f), dehaze = f("dehaze", 0f),
             noiseReduction = f("noiseReduction", 0f).coerceIn(0f, 100f),
+            gradeShadowHue = grade(0, 220f), gradeShadowSat = grade(1, 0f).coerceIn(0f, 100f),
+            gradeMidHue = grade(2, 30f), gradeMidSat = grade(3, 0f).coerceIn(0f, 100f),
+            gradeHighHue = grade(4, 45f), gradeHighSat = grade(5, 0f).coerceIn(0f, 100f),
+            gradeBalance = grade(6, 0f).coerceIn(-100f, 100f), gradeBlending = grade(7, 50f).coerceIn(0f, 100f),
             grainAmount = f("grainAmount", 0f).coerceIn(0f, 100f), grainSize = f("grainSize", 25f).coerceIn(0f, 100f),
             grainRoughness = f("grainRoughness", 50f).coerceIn(0f, 100f),
             colorizeEnabled = o.optBoolean("colorizeEnabled", false),

@@ -464,6 +464,21 @@ object ImageProcessor {
         val colorizeAngle = kotlin.math.atan2(colorizeLab[2], colorizeLab[1])
         val colorizeChroma = adj.colorizeSaturation.coerceIn(0f, 100f) / 100f * 70f
         val hasHsl = bands.isNotEmpty() || adj.colorizeEnabled
+        // Color Grading: each zone's colour as a direction in Lab, its strength from saturation.
+        val hasGrade = adj.gradeShadowSat > 0f || adj.gradeMidSat > 0f || adj.gradeHighSat > 0f
+        fun gradeDir(hue: Float, sat: Float): FloatArray {
+            val c = Color.HSVToColor(floatArrayOf(((hue % 360f) + 360f) % 360f, 1f, 1f))
+            val t = FloatArray(3)
+            rgbToLabF(((c shr 16) and 0xFF) / 255f, ((c shr 8) and 0xFF) / 255f, (c and 0xFF) / 255f, t)
+            val len = sqrt(t[1] * t[1] + t[2] * t[2]).coerceAtLeast(1e-3f)
+            val k = sat.coerceIn(0f, 100f) / 100f * 28f
+            return floatArrayOf(t[1] / len * k, t[2] / len * k)
+        }
+        val gS = gradeDir(adj.gradeShadowHue, adj.gradeShadowSat)
+        val gM = gradeDir(adj.gradeMidHue, adj.gradeMidSat)
+        val gH = gradeDir(adj.gradeHighHue, adj.gradeHighSat)
+        val gPivot = 0.5f - adj.gradeBalance.coerceIn(-100f, 100f) / 100f * 0.3f
+        val gSoft = 0.12f + adj.gradeBlending.coerceIn(0f, 100f) / 100f * 0.38f
         // Colour replacements, matched and transferred in CIE Lab (perceptual).
         val replaceSpecs = adj.effectiveReplacements().filter { it.enabled }.map { ReplaceSpec.of(it) }
         val previewMask = adj.replacePreviewMask
@@ -600,6 +615,23 @@ object ImageProcessor {
                         labToRgbF(l.coerceIn(0f, 100f), la, lb, rgb)
                         r = rgb[0]; g = rgb[1]; b = rgb[2]
                     }
+                }
+
+                if (hasGrade) {
+                    // Shadows / midtones / highlights take their colours by lightness; the
+                    // lightness itself does not change.
+                    rgbToLabF(r.coerceIn(0f, 1f), g.coerceIn(0f, 1f), b.coerceIn(0f, 1f), lab)
+                    val ln = lab[0] / 100f
+                    val t = smoothstepF(gPivot - gSoft, gPivot + gSoft, ln)
+                    val wS = (1f - t) * (1f - t)
+                    val wH = t * t
+                    val wM = (1f - wS - wH).coerceAtLeast(0f)
+                    // Little colour in pure black and white, as in Lightroom.
+                    val edge = smoothstepF(0f, 0.08f, ln) * (1f - smoothstepF(0.94f, 1f, ln))
+                    val da = (gS[0] * wS + gM[0] * wM + gH[0] * wH) * edge
+                    val db = (gS[1] * wS + gM[1] * wM + gH[1] * wH) * edge
+                    labToRgbF(lab[0], lab[1] + da, lab[2] + db, rgb)
+                    r = rgb[0]; g = rgb[1]; b = rgb[2]
                 }
 
                 if (replaceSpecs.isNotEmpty() || previewMask) {
@@ -1069,6 +1101,8 @@ object ImageProcessor {
         isCancelled: (() -> Boolean)? = null
     ): Bitmap {
         if (filter == FilterType.NONE) return source
+        if (filter == FilterType.OIL_PAINTING) return ArtFilters.oilPainting(source, isCancelled)
+        if (filter == FilterType.CHARCOAL) return ArtFilters.charcoal(source, isCancelled)
         // Looks built from tone curves / split toning / grain (see FilterRecipes).
         FilterRecipes.recipeFor(filter)?.let { return FilterRecipes.render(source, it, isCancelled) }
 

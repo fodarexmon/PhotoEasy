@@ -2,7 +2,9 @@ package com.example.engine
 
 import android.graphics.Bitmap
 import android.graphics.PointF
+import com.example.data.model.ColorAdjustments
 import com.example.data.model.FilterType
+import com.example.data.model.HslBand
 import kotlinx.coroutines.CancellationException
 import kotlin.math.abs
 import kotlin.math.max
@@ -45,116 +47,254 @@ data class FilterRecipe(
     val vignette: Float = 0f,            // 0..1
     val glow: Float = 0f,                // 0..1 highlight bloom
     val lightLeak: Float = 0f,           // 0..1
-    val leakColor: Int = 0xFF7A2E
+    val leakColor: Int = 0xFF7A2E,
+    val glowTint: Int = 0xFFFFFF,        // halation colour (white = neutral bloom)
+    /** Colour work run first by the adjustment engine (HSL mixer, color grading, clarity, dehaze…). */
+    val adjust: ColorAdjustments? = null
 )
 
 object FilterRecipes {
 
     private fun pts(vararg v: Int): List<PointF> = v.toList().chunked(2).map { PointF(it[0].toFloat(), it[1].toFloat()) }
 
-    /** Recipe per preset; null = a special pixel effect handled by [ImageProcessor]. */
+    private fun b(hue: Float = 0f, sat: Float = 0f, light: Float = 0f) = HslBand(hue = hue, saturation = sat, lightness = light)
+
+    /** Colour work done by the adjustment engine: HSL mixer, color grading, clarity, dehaze… */
+    private fun adj(
+        vararg bands: Pair<String, HslBand>,
+        clarity: Float = 0f, dehaze: Float = 0f, highlights: Float = 0f, shadows: Float = 0f,
+        whites: Float = 0f, blacks: Float = 0f,
+        shadowGrade: Pair<Float, Float>? = null, midGrade: Pair<Float, Float>? = null, highGrade: Pair<Float, Float>? = null,
+        balance: Float = 0f, blending: Float = 50f
+    ) = ColorAdjustments(
+        clarity = clarity, dehaze = dehaze, highlights = highlights, shadows = shadows, whites = whites, blacks = blacks,
+        hslBands = bands.toMap(),
+        gradeShadowHue = shadowGrade?.first ?: 220f, gradeShadowSat = shadowGrade?.second ?: 0f,
+        gradeMidHue = midGrade?.first ?: 30f, gradeMidSat = midGrade?.second ?: 0f,
+        gradeHighHue = highGrade?.first ?: 45f, gradeHighSat = highGrade?.second ?: 0f,
+        gradeBalance = balance, gradeBlending = blending
+    )
+
+    /** Recipe per preset; null = a special pixel effect handled by [ImageProcessor] / [ArtFilters]. */
     fun recipeFor(type: FilterType): FilterRecipe? = when (type) {
         FilterType.NONE -> null
-        FilterType.PIXELATE, FilterType.EDGES, FilterType.GLITCH, FilterType.SOLARIZE -> null
+        FilterType.PIXELATE, FilterType.EDGES, FilterType.GLITCH, FilterType.SOLARIZE,
+        FilterType.OIL_PAINTING, FilterType.CHARCOAL -> null
 
+        // ---- Film / retro -------------------------------------------------------------------
+        // Vintage: aged, yellowed print (greens turn olive, blues fade, grain); Faded Matte below is
+        // the neutral matte look without the colour shift.
         FilterType.VINTAGE -> FilterRecipe(
-            contrast = -0.1f, fade = 0.45f, highlightRolloff = 0.5f, temperature = 0.35f, saturation = -0.25f,
-            curveB = pts(0, 22, 128, 120, 255, 228),
-            shadowTint = 0x5A6A80, shadowAmount = 0.25f, highlightTint = 0xF2D7A8, highlightAmount = 0.35f,
-            grain = 0.35f, vignette = 0.35f
+            adjust = adj("GREENS" to b(-25f, -30f), "BLUES" to b(-15f, -35f), "CYANS" to b(sat = -25f),
+                shadowGrade = 200f to 12f, highGrade = 45f to 28f),
+            contrast = -0.1f, fade = 0.42f, highlightRolloff = 0.5f, temperature = 0.3f, saturation = -0.15f,
+            curveB = pts(0, 22, 128, 120, 255, 228), grain = 0.4f, vignette = 0.4f
         )
+        FilterType.FADED_MATTE -> FilterRecipe(contrast = -0.15f, fade = 0.6f, saturation = -0.2f, highlightRolloff = 0.6f)
         FilterType.SEPIA -> FilterRecipe(
             mono = Triple(0.3f, 0.59f, 0.11f), contrast = 0.05f, fade = 0.15f, highlightRolloff = 0.4f,
             shadowTint = 0x4A3020, shadowAmount = 0.7f, highlightTint = 0xF0D8B0, highlightAmount = 0.65f, grain = 0.2f
         )
-        FilterType.GRAYSCALE -> FilterRecipe(mono = Triple(0.3f, 0.59f, 0.11f), contrast = 0.12f, highlightRolloff = 0.3f)
-        FilterType.CYBERPUNK -> FilterRecipe(
-            contrast = 0.3f, temperature = -0.45f, tint = 0.55f, saturation = 0.25f,
-            shadowTint = 0x2030A0, shadowAmount = 0.55f, highlightTint = 0xFF40C0, highlightAmount = 0.45f, glow = 0.3f, vignette = 0.3f
-        )
-        FilterType.CINEMATIC -> FilterRecipe(
-            contrast = 0.22f, fade = 0.12f, highlightRolloff = 0.6f, saturation = -0.1f, protectSkin = true,
-            shadowTint = 0x2A5A70, shadowAmount = 0.4f, highlightTint = 0xF0C890, highlightAmount = 0.25f, vignette = 0.4f
-        )
-        FilterType.HDR -> FilterRecipe(
-            contrast = 0.15f, curve = pts(0, 0, 50, 72, 128, 132, 200, 196, 255, 248), vibrance = 0.4f, highlightRolloff = 0.7f
-        )
-        FilterType.WARM -> FilterRecipe(temperature = 0.45f, vibrance = 0.15f, highlightRolloff = 0.4f, protectSkin = true)
-        FilterType.COOL -> FilterRecipe(temperature = -0.45f, tint = -0.05f, vibrance = 0.1f, highlightRolloff = 0.3f)
-        FilterType.GLOW -> FilterRecipe(glow = 0.75f, contrast = -0.05f, highlightRolloff = 0.5f, vibrance = 0.1f)
-        FilterType.ORANGE_TEAL -> FilterRecipe(
-            contrast = 0.18f, highlightRolloff = 0.5f, saturation = 0.05f, protectSkin = true,
-            shadowTint = 0x1E7080, shadowAmount = 0.6f, highlightTint = 0xFFA050, highlightAmount = 0.45f, vignette = 0.2f
-        )
-        FilterType.MOODY_DARK -> FilterRecipe(
-            exposure = -0.35f, contrast = 0.25f, fade = 0.2f, saturation = -0.3f, highlightRolloff = 0.6f,
-            shadowTint = 0x283848, shadowAmount = 0.45f, vignette = 0.5f
-        )
-        FilterType.VAPORWAVE -> FilterRecipe(
-            contrast = 0.1f, fade = 0.25f, tint = 0.5f, saturation = 0.3f,
-            shadowTint = 0x5030C0, shadowAmount = 0.6f, highlightTint = 0xFF80D0, highlightAmount = 0.5f, glow = 0.2f
-        )
-        FilterType.FILM_NOIR -> FilterRecipe(
-            mono = Triple(0.25f, 0.65f, 0.1f), contrast = 0.55f, curve = pts(0, 0, 64, 40, 192, 215, 255, 255),
-            grain = 0.4f, vignette = 0.6f
-        )
         FilterType.KODACHROME -> FilterRecipe(
-            contrast = 0.2f, saturation = 0.25f, highlightRolloff = 0.4f, temperature = 0.1f, protectSkin = true,
+            adjust = adj("REDS" to b(sat = 15f, light = -8f), "BLUES" to b(-6f, 15f, -10f), "GREENS" to b(-8f)),
+            contrast = 0.2f, saturation = 0.18f, highlightRolloff = 0.4f, temperature = 0.1f, protectSkin = true,
             curveR = pts(0, 0, 128, 136, 255, 255), curveB = pts(0, 6, 128, 120, 255, 245), grain = 0.15f
         )
-        FilterType.PASTEL_DREAM -> FilterRecipe(
-            exposure = 0.2f, contrast = -0.3f, fade = 0.4f, saturation = -0.15f, highlightRolloff = 0.8f,
-            shadowTint = 0xB090C0, shadowAmount = 0.3f, highlightTint = 0xFFE0E8, highlightAmount = 0.3f
+        FilterType.PORTRA_FILM -> FilterRecipe(
+            adjust = adj("ORANGES" to b(sat = -8f, light = 6f), "GREENS" to b(10f, -20f), "BLUES" to b(sat = -15f),
+                shadowGrade = 200f to 10f, highGrade = 35f to 14f),
+            contrast = -0.05f, fade = 0.12f, highlightRolloff = 0.7f, temperature = 0.15f, saturation = -0.1f, protectSkin = true,
+            curveG = pts(0, 0, 128, 132, 255, 252), grain = 0.25f, grainSize = 1.2f
         )
-        FilterType.DUOTONE_VIOLET -> FilterRecipe(
-            mono = Triple(0.3f, 0.59f, 0.11f), contrast = 0.15f,
-            shadowTint = 0x301060, shadowAmount = 1f, highlightTint = 0xFFB0E0, highlightAmount = 0.9f
+        FilterType.FUJI_FILM -> FilterRecipe(
+            adjust = adj("GREENS" to b(15f, 10f), "BLUES" to b(-8f, 10f), shadowGrade = 170f to 18f),
+            contrast = 0.15f, highlightRolloff = 0.5f, tint = -0.1f, vibrance = 0.2f, protectSkin = true,
+            curveB = pts(0, 10, 128, 134, 255, 250), grain = 0.25f
         )
-        FilterType.EMERALD_MINT -> FilterRecipe(
-            tint = -0.35f, temperature = -0.15f, saturation = 0.1f, fade = 0.15f, protectSkin = true,
-            shadowTint = 0x186050, shadowAmount = 0.45f, highlightTint = 0xD8FFE8, highlightAmount = 0.3f
+        FilterType.KODAK_GOLD -> FilterRecipe(
+            adjust = adj("REDS" to b(sat = 10f), "YELLOWS" to b(-5f, 15f), "GREENS" to b(-10f, -10f), "BLUES" to b(sat = -12f),
+                shadowGrade = 30f to 8f, highGrade = 50f to 25f),
+            contrast = 0.1f, fade = 0.08f, temperature = 0.22f, highlightRolloff = 0.6f, protectSkin = true, grain = 0.3f
         )
-        FilterType.GOLDEN_HOUR -> FilterRecipe(
-            exposure = 0.1f, temperature = 0.6f, vibrance = 0.25f, highlightRolloff = 0.6f, protectSkin = true,
-            highlightTint = 0xFFC060, highlightAmount = 0.45f, glow = 0.35f, vignette = 0.25f
+        FilterType.CLASSIC_CHROME -> FilterRecipe(
+            adjust = adj("REDS" to b(sat = -10f, light = -10f), "ORANGES" to b(sat = -10f), "YELLOWS" to b(sat = -30f),
+                "GREENS" to b(10f, -35f), "BLUES" to b(-8f, -25f, -10f), "CYANS" to b(sat = -20f), shadowGrade = 200f to 10f),
+            contrast = 0.22f, fade = 0.06f, saturation = -0.15f, highlightRolloff = 0.5f, grain = 0.1f
         )
-        FilterType.BLEACH_BYPASS -> FilterRecipe(
-            contrast = 0.45f, saturation = -0.55f, highlightRolloff = 0.3f, curve = pts(0, 0, 64, 52, 192, 206, 255, 255), grain = 0.2f
+        // Tungsten film: cool white balance, teal shadows, red halation around lights.
+        FilterType.CINESTILL_800T -> FilterRecipe(
+            adjust = adj("REDS" to b(sat = 10f), "ORANGES" to b(-8f, 5f), "BLUES" to b(sat = 10f), "CYANS" to b(sat = 15f),
+                shadowGrade = 195f to 30f, highGrade = 25f to 10f),
+            contrast = 0.12f, fade = 0.1f, temperature = -0.35f, highlightRolloff = 0.6f, protectSkin = true,
+            glow = 0.35f, glowTint = 0xFF5A3C, grain = 0.35f, grainSize = 1.3f
+        )
+        FilterType.EKTAR -> FilterRecipe(
+            adjust = adj("REDS" to b(sat = 20f), "BLUES" to b(sat = 20f), "GREENS" to b(sat = 10f), dehaze = 8f),
+            contrast = 0.22f, saturation = 0.18f, temperature = 0.05f, highlightRolloff = 0.4f, protectSkin = true, grain = 0.08f
         )
         FilterType.CROSS_PROCESS -> FilterRecipe(
             contrast = 0.25f, saturation = 0.2f,
             curveR = pts(0, 0, 64, 52, 192, 220, 255, 255), curveG = pts(0, 0, 64, 70, 192, 206, 255, 240),
             curveB = pts(0, 40, 128, 118, 255, 200), vignette = 0.25f
         )
-        FilterType.PORTRA_FILM -> FilterRecipe(
-            contrast = -0.05f, fade = 0.12f, highlightRolloff = 0.7f, temperature = 0.18f, saturation = -0.12f, protectSkin = true,
-            curveG = pts(0, 0, 128, 132, 255, 252), shadowTint = 0x4A6070, shadowAmount = 0.2f,
-            highlightTint = 0xF8DCC0, highlightAmount = 0.3f, grain = 0.25f, grainSize = 1.2f
-        )
-        FilterType.FUJI_FILM -> FilterRecipe(
-            contrast = 0.15f, highlightRolloff = 0.5f, tint = -0.15f, vibrance = 0.2f, protectSkin = true,
-            curveB = pts(0, 10, 128, 134, 255, 250), shadowTint = 0x205850, shadowAmount = 0.35f, grain = 0.25f
-        )
-        FilterType.TRI_X_BW -> FilterRecipe(
-            mono = Triple(0.35f, 0.55f, 0.1f), contrast = 0.35f, highlightRolloff = 0.5f, grain = 0.6f, grainSize = 1.4f, vignette = 0.2f
-        )
-        FilterType.FADED_MATTE -> FilterRecipe(
-            contrast = -0.15f, fade = 0.6f, saturation = -0.25f, highlightRolloff = 0.6f,
-            shadowTint = 0x406070, shadowAmount = 0.2f
+        FilterType.BLEACH_BYPASS -> FilterRecipe(
+            adjust = adj(clarity = 20f),
+            contrast = 0.45f, saturation = -0.55f, highlightRolloff = 0.3f, curve = pts(0, 0, 64, 52, 192, 206, 255, 255), grain = 0.2f
         )
         FilterType.LIGHT_LEAK -> FilterRecipe(
             fade = 0.15f, temperature = 0.2f, highlightRolloff = 0.5f, lightLeak = 0.75f, grain = 0.25f, vignette = 0.2f
+        )
+
+        // ---- Portrait / lifestyle -----------------------------------------------------------
+        // Warm: a plain, gentle white-balance warm-up. Golden Hour is the full sunset-light look.
+        FilterType.WARM -> FilterRecipe(temperature = 0.35f, vibrance = 0.1f, highlightRolloff = 0.3f, protectSkin = true)
+        FilterType.GOLDEN_HOUR -> FilterRecipe(
+            adjust = adj("ORANGES" to b(sat = 15f), "YELLOWS" to b(-10f, 20f), "BLUES" to b(sat = -20f),
+                shadowGrade = 270f to 8f, midGrade = 30f to 15f, highGrade = 40f to 35f),
+            exposure = 0.1f, temperature = 0.4f, highlightRolloff = 0.6f, protectSkin = true, glow = 0.35f, vignette = 0.2f
+        )
+        FilterType.BRIGHT_AIRY -> FilterRecipe(
+            adjust = adj("ORANGES" to b(sat = -10f, light = 10f), "YELLOWS" to b(sat = -25f), "GREENS" to b(20f, -35f, 10f),
+                "BLUES" to b(sat = -15f, light = 15f), shadows = 45f, highlights = -25f, blacks = 15f, clarity = -10f),
+            exposure = 0.3f, contrast = -0.15f, fade = 0.1f, temperature = 0.05f, saturation = -0.08f,
+            highlightRolloff = 0.8f, protectSkin = true
+        )
+        FilterType.CLEAN_PORTRAIT -> FilterRecipe(
+            adjust = adj("REDS" to b(sat = -8f), "ORANGES" to b(sat = -10f, light = 10f), "YELLOWS" to b(sat = -10f),
+                clarity = -12f, highGrade = 40f to 8f),
+            exposure = 0.1f, contrast = 0.05f, temperature = 0.05f, vibrance = 0.15f, highlightRolloff = 0.6f, protectSkin = true
+        )
+        FilterType.PASTEL_DREAM -> FilterRecipe(
+            adjust = adj("REDS" to b(sat = -25f, light = 10f), "ORANGES" to b(sat = -15f, light = 10f), "YELLOWS" to b(sat = -30f, light = 15f),
+                "GREENS" to b(25f, -40f, 15f), "BLUES" to b(sat = -25f, light = 20f), shadowGrade = 280f to 12f, highGrade = 20f to 12f),
+            exposure = 0.2f, contrast = -0.3f, fade = 0.4f, saturation = -0.1f, highlightRolloff = 0.8f
+        )
+        FilterType.GLOW -> FilterRecipe(glow = 0.75f, contrast = -0.05f, highlightRolloff = 0.5f, vibrance = 0.1f)
+        FilterType.FOOD -> FilterRecipe(
+            adjust = adj("REDS" to b(sat = 15f), "ORANGES" to b(sat = 15f, light = 5f), "YELLOWS" to b(sat = 10f),
+                "GREENS" to b(-5f, 20f), "BLUES" to b(sat = -20f), clarity = 15f),
+            exposure = 0.1f, contrast = 0.12f, temperature = 0.12f, vibrance = 0.15f, highlightRolloff = 0.6f, vignette = 0.1f
+        )
+
+        // ---- Landscape / colour -------------------------------------------------------------
+        // Orange & Teal works on hues: warm tones gather at orange, cool and green tones at teal,
+        // stray purples / magentas are muted — not just a tint on shadows and highlights.
+        FilterType.ORANGE_TEAL -> FilterRecipe(
+            adjust = adj(
+                "REDS" to b(12f, 5f), "ORANGES" to b(sat = 12f), "YELLOWS" to b(-30f, -10f),
+                "GREENS" to b(60f, -35f), "CYANS" to b(10f, 15f), "BLUES" to b(-35f, 5f, -10f),
+                "PURPLES" to b(-55f, -50f), "MAGENTAS" to b(-70f, -60f),
+                clarity = 10f, shadowGrade = 190f to 35f, highGrade = 35f to 22f, balance = -10f
+            ),
+            contrast = 0.18f, highlightRolloff = 0.5f, protectSkin = true, vignette = 0.15f
+        )
+        // Cinematic: muted film-print look — lifted blacks, soft shoulder, desaturated greens.
+        FilterType.CINEMATIC -> FilterRecipe(
+            adjust = adj("GREENS" to b(15f, -40f), "YELLOWS" to b(sat = -25f), "BLUES" to b(-10f, -20f), "ORANGES" to b(sat = -5f),
+                shadowGrade = 205f to 18f, midGrade = 35f to 8f, highGrade = 45f to 12f, blending = 70f),
+            contrast = 0.2f, fade = 0.18f, highlightRolloff = 0.7f, saturation = -0.12f, protectSkin = true,
+            vignette = 0.35f, grain = 0.15f
+        )
+        FilterType.HDR -> FilterRecipe(
+            adjust = adj(clarity = 45f, dehaze = 15f, shadows = 40f, highlights = -40f),
+            vibrance = 0.25f, highlightRolloff = 0.5f
+        )
+        FilterType.COOL -> FilterRecipe(
+            adjust = adj("BLUES" to b(sat = 15f), "CYANS" to b(sat = 10f), clarity = 10f),
+            temperature = -0.35f, tint = -0.03f, highlightRolloff = 0.3f
+        )
+        FilterType.MOODY_DARK -> FilterRecipe(
+            adjust = adj("GREENS" to b(sat = -40f), "BLUES" to b(sat = -30f), "YELLOWS" to b(sat = -25f), shadowGrade = 210f to 15f),
+            exposure = -0.35f, contrast = 0.25f, fade = 0.2f, saturation = -0.2f, highlightRolloff = 0.6f, vignette = 0.5f
+        )
+        FilterType.MOODY_FOREST -> FilterRecipe(
+            adjust = adj("GREENS" to b(-15f, -35f, -25f), "YELLOWS" to b(-10f, -30f, -15f), "CYANS" to b(sat = -20f),
+                "BLUES" to b(sat = -30f, light = -10f), clarity = 15f, dehaze = 10f,
+                shadowGrade = 180f to 20f, highGrade = 40f to 10f),
+            exposure = -0.2f, contrast = 0.15f, fade = 0.15f, highlightRolloff = 0.6f, vignette = 0.35f
+        )
+        FilterType.VELVIA -> FilterRecipe(
+            adjust = adj("GREENS" to b(sat = 25f, light = -8f), "BLUES" to b(sat = 25f, light = -15f), "REDS" to b(sat = 15f),
+                "YELLOWS" to b(sat = 15f), "CYANS" to b(sat = 15f), dehaze = 10f),
+            contrast = 0.3f, saturation = 0.2f, tint = 0.06f, highlightRolloff = 0.4f, protectSkin = true
+        )
+        FilterType.DESERT_EARTH -> FilterRecipe(
+            adjust = adj("ORANGES" to b(sat = 5f, light = 5f), "YELLOWS" to b(-20f, -20f), "GREENS" to b(-40f, -55f),
+                "BLUES" to b(-15f, -50f, 10f), "CYANS" to b(sat = -40f), shadowGrade = 30f to 15f, highGrade = 40f to 20f),
+            contrast = 0.1f, fade = 0.12f, temperature = 0.3f, saturation = -0.05f, highlightRolloff = 0.6f
+        )
+        FilterType.SUNSET_BOOST -> FilterRecipe(
+            adjust = adj("REDS" to b(sat = 25f), "ORANGES" to b(sat = 30f, light = -5f), "YELLOWS" to b(sat = 20f),
+                "PURPLES" to b(sat = 25f), "MAGENTAS" to b(sat = 20f), "BLUES" to b(20f, 10f), dehaze = 15f),
+            contrast = 0.15f, temperature = 0.15f, tint = 0.12f, highlightRolloff = 0.6f, vignette = 0.25f
+        )
+        FilterType.EMERALD_MINT -> FilterRecipe(
+            adjust = adj("GREENS" to b(20f, 15f), "YELLOWS" to b(25f, -10f), "BLUES" to b(-20f), shadowGrade = 165f to 25f, highGrade = 140f to 10f),
+            tint = -0.2f, temperature = -0.1f, fade = 0.15f, protectSkin = true
+        )
+        FilterType.URBAN_STREET -> FilterRecipe(
+            adjust = adj("ORANGES" to b(sat = -15f), "YELLOWS" to b(sat = -40f), "GREENS" to b(sat = -50f), "BLUES" to b(-10f, -30f),
+                clarity = 35f, dehaze = 10f, shadowGrade = 210f to 15f, highGrade = 40f to 8f),
+            contrast = 0.25f, fade = 0.06f, saturation = -0.25f, highlightRolloff = 0.4f, vignette = 0.3f, grain = 0.2f
+        )
+
+        // ---- Creative -----------------------------------------------------------------------
+        // Cyberpunk moves the warm hues to magenta and greens to cyan, hard contrast and glow;
+        // Vaporwave is the soft, faded pastel pink / purple one.
+        FilterType.CYBERPUNK -> FilterRecipe(
+            adjust = adj("REDS" to b(-30f, 10f), "ORANGES" to b(-60f), "YELLOWS" to b(-50f), "GREENS" to b(60f, 10f),
+                "CYANS" to b(sat = 30f), "BLUES" to b(-20f, 20f), "MAGENTAS" to b(sat = 30f), clarity = 20f,
+                shadowGrade = 200f to 45f, highGrade = 320f to 35f, balance = -20f),
+            exposure = -0.1f, contrast = 0.35f, saturation = 0.15f, glow = 0.3f, vignette = 0.35f
+        )
+        FilterType.VAPORWAVE -> FilterRecipe(
+            adjust = adj("GREENS" to b(80f, -20f), "YELLOWS" to b(-40f, -20f), shadowGrade = 260f to 35f, highGrade = 330f to 30f),
+            exposure = 0.1f, contrast = -0.1f, fade = 0.35f, saturation = 0.1f, glow = 0.2f
+        )
+        FilterType.NEON_NIGHT -> FilterRecipe(
+            adjust = adj("MAGENTAS" to b(sat = 35f), "PURPLES" to b(sat = 30f), "BLUES" to b(8f, 25f), "CYANS" to b(sat = 30f),
+                "REDS" to b(sat = 20f), "ORANGES" to b(-10f, 15f), "GREENS" to b(50f, -20f), "YELLOWS" to b(-25f),
+                dehaze = 15f, clarity = 10f, shadowGrade = 230f to 30f, highGrade = 320f to 15f),
+            exposure = -0.05f, contrast = 0.2f, glow = 0.4f, vignette = 0.25f
+        )
+        FilterType.DUOTONE_VIOLET -> FilterRecipe(
+            mono = Triple(0.3f, 0.59f, 0.11f), contrast = 0.15f,
+            shadowTint = 0x301060, shadowAmount = 1f, highlightTint = 0xFFB0E0, highlightAmount = 0.9f
+        )
+
+        // ---- Black & white ------------------------------------------------------------------
+        // B&W: neutral, flat conversion to build on; Tri-X: contrasty, grainy film.
+        FilterType.GRAYSCALE -> FilterRecipe(mono = Triple(0.3f, 0.59f, 0.11f), highlightRolloff = 0.2f)
+        FilterType.TRI_X_BW -> FilterRecipe(
+            mono = Triple(0.35f, 0.55f, 0.1f), contrast = 0.35f, highlightRolloff = 0.5f, grain = 0.6f, grainSize = 1.4f, vignette = 0.2f
+        )
+        FilterType.FILM_NOIR -> FilterRecipe(
+            mono = Triple(0.25f, 0.65f, 0.1f), contrast = 0.55f, curve = pts(0, 0, 64, 40, 192, 215, 255, 255),
+            grain = 0.4f, vignette = 0.6f
+        )
+        // A red lens filter: blue skies go dark and dramatic, skin and brick light.
+        FilterType.BW_RED_FILTER -> FilterRecipe(
+            mono = Triple(0.85f, 0.22f, -0.07f), contrast = 0.3f, highlightRolloff = 0.4f, grain = 0.15f
+        )
+        // Infrared: foliage glows white, skies turn black, with the Wood-effect bloom.
+        FilterType.INFRARED -> FilterRecipe(
+            adjust = adj("GREENS" to b(light = 40f), "YELLOWS" to b(light = 40f)),
+            mono = Triple(0.2f, 1.15f, -0.35f), contrast = 0.2f, highlightRolloff = 0.5f, glow = 0.45f, grain = 0.3f
         )
     }
 
     fun categoryOf(type: FilterType): FilterCategory = when (type) {
         FilterType.WARM, FilterType.PORTRA_FILM, FilterType.PASTEL_DREAM, FilterType.GOLDEN_HOUR,
-        FilterType.FADED_MATTE, FilterType.GLOW -> FilterCategory.PORTRAIT
+        FilterType.FADED_MATTE, FilterType.GLOW, FilterType.BRIGHT_AIRY, FilterType.CLEAN_PORTRAIT,
+        FilterType.FOOD -> FilterCategory.PORTRAIT
         FilterType.HDR, FilterType.COOL, FilterType.EMERALD_MINT, FilterType.ORANGE_TEAL,
-        FilterType.MOODY_DARK, FilterType.CINEMATIC -> FilterCategory.LANDSCAPE
+        FilterType.MOODY_DARK, FilterType.CINEMATIC, FilterType.MOODY_FOREST, FilterType.VELVIA,
+        FilterType.DESERT_EARTH, FilterType.SUNSET_BOOST, FilterType.URBAN_STREET -> FilterCategory.LANDSCAPE
         FilterType.VINTAGE, FilterType.KODACHROME, FilterType.FUJI_FILM, FilterType.CROSS_PROCESS,
-        FilterType.BLEACH_BYPASS, FilterType.LIGHT_LEAK -> FilterCategory.FILM
-        FilterType.GRAYSCALE, FilterType.SEPIA, FilterType.FILM_NOIR, FilterType.TRI_X_BW -> FilterCategory.BLACK_WHITE
+        FilterType.BLEACH_BYPASS, FilterType.LIGHT_LEAK, FilterType.KODAK_GOLD, FilterType.CLASSIC_CHROME,
+        FilterType.CINESTILL_800T, FilterType.EKTAR -> FilterCategory.FILM
+        FilterType.GRAYSCALE, FilterType.SEPIA, FilterType.FILM_NOIR, FilterType.TRI_X_BW,
+        FilterType.BW_RED_FILTER, FilterType.INFRARED -> FilterCategory.BLACK_WHITE
         else -> FilterCategory.CREATIVE
     }
 
@@ -204,7 +344,9 @@ object FilterRecipes {
         val w = source.width
         val h = source.height
         val px = IntArray(w * h)
-        source.getPixels(px, 0, w, 0, 0, w, h)
+        val pre = r.adjust?.let { ImageProcessor.applyAdjustments(source, it, isCancelled) } ?: source
+        pre.getPixels(px, 0, w, 0, 0, w, h)
+        if (pre !== source && !pre.isRecycled) pre.recycle()
 
         val lutR = buildChannelLut(r, r.curveR)
         val lutG = buildChannelLut(r, r.curveG)
@@ -280,7 +422,7 @@ object FilterRecipes {
 
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         out.setPixels(px, 0, w, 0, 0, w, h)
-        if (r.glow > 0f) applyGlow(out, r.glow, isCancelled)
+        if (r.glow > 0f) applyGlow(out, r.glow, r.glowTint, isCancelled)
         return out
     }
 
@@ -331,7 +473,7 @@ object FilterRecipes {
      * Highlight bloom computed in linear light (so it glows instead of greying), at a size relative
      * to the image, screened back over the picture.
      */
-    private fun applyGlow(bitmap: Bitmap, amount: Float, isCancelled: (() -> Boolean)?) {
+    private fun applyGlow(bitmap: Bitmap, amount: Float, tint: Int, isCancelled: (() -> Boolean)?) {
         val w = bitmap.width
         val h = bitmap.height
         val scale = min(1f, 480f / max(w, h))
@@ -359,14 +501,23 @@ object FilterRecipes {
         big.getPixels(bp, 0, w, 0, 0, w, h)
         bitmap.getPixels(op, 0, w, 0, 0, w, h)
         val k = (amount * 0.9f).coerceIn(0f, 1f)
+        val tinted = (tint and 0xFFFFFF) != 0xFFFFFF
+        val tr = ((tint shr 16) and 0xFF) / 255f * 1.6f
+        val tg = ((tint shr 8) and 0xFF) / 255f * 1.6f
+        val tb = (tint and 0xFF) / 255f * 1.6f
+        fun bl(c: Int) = 0.299f * ((c shr 16) and 0xFF) + 0.587f * ((c shr 8) and 0xFF) + 0.114f * (c and 0xFF)
         for (i in op.indices) {
             val o = op[i]
             val a = (o ushr 24) and 0xFF
             if (a == 0) continue
             val b2 = bp[i]
             fun screen(c: Int, l: Int): Int = (255 - (255 - c) * (255 - (l * k).toInt()) / 255).coerceIn(0, 255)
-            op[i] = (a shl 24) or (screen((o shr 16) and 0xFF, (b2 shr 16) and 0xFF) shl 16) or
-                (screen((o shr 8) and 0xFF, (b2 shr 8) and 0xFF) shl 8) or screen(o and 0xFF, b2 and 0xFF)
+            // A coloured bloom (film halation) keeps its brightness: luminance × tint.
+            val br = if (tinted) (bl(b2) * tr).toInt() else (b2 shr 16) and 0xFF
+            val bg = if (tinted) (bl(b2) * tg).toInt() else (b2 shr 8) and 0xFF
+            val bb = if (tinted) (bl(b2) * tb).toInt() else b2 and 0xFF
+            op[i] = (a shl 24) or (screen((o shr 16) and 0xFF, br.coerceIn(0, 255)) shl 16) or
+                (screen((o shr 8) and 0xFF, bg.coerceIn(0, 255)) shl 8) or screen(o and 0xFF, bb.coerceIn(0, 255))
         }
         bitmap.setPixels(op, 0, w, 0, 0, w, h)
         listOf(small, bright, blurred, big).forEach { if (it !== bitmap && !it.isRecycled) it.recycle() }

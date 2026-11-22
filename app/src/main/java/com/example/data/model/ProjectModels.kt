@@ -79,7 +79,24 @@ enum class FilterType(val displayName: String, val resId: Int) {
     FUJI_FILM("Fuji Film", R.string.filter_fuji_film),
     TRI_X_BW("Tri-X B&W", R.string.filter_tri_x_bw),
     FADED_MATTE("Faded Matte", R.string.filter_faded_matte),
-    LIGHT_LEAK("Light Leak", R.string.filter_light_leak)
+    LIGHT_LEAK("Light Leak", R.string.filter_light_leak),
+    BRIGHT_AIRY("Bright & Airy", R.string.filter_bright_airy),
+    CLEAN_PORTRAIT("Clean Portrait", R.string.filter_clean_portrait),
+    MOODY_FOREST("Moody Forest", R.string.filter_moody_forest),
+    VELVIA("Velvia", R.string.filter_velvia),
+    DESERT_EARTH("Desert Earth", R.string.filter_desert_earth),
+    SUNSET_BOOST("Sunset Boost", R.string.filter_sunset_boost),
+    KODAK_GOLD("Kodak Gold", R.string.filter_kodak_gold),
+    CLASSIC_CHROME("Classic Chrome", R.string.filter_classic_chrome),
+    CINESTILL_800T("CineStill 800T", R.string.filter_cinestill_800t),
+    EKTAR("Ektar", R.string.filter_ektar),
+    URBAN_STREET("Urban Street", R.string.filter_urban_street),
+    NEON_NIGHT("Neon Night", R.string.filter_neon_night),
+    BW_RED_FILTER("B&W Red Filter", R.string.filter_bw_red),
+    INFRARED("Infrared", R.string.filter_infrared),
+    FOOD("Food", R.string.filter_food),
+    OIL_PAINTING("Oil Painting", R.string.filter_oil_painting),
+    CHARCOAL("Charcoal Drawing", R.string.filter_charcoal)
 }
 
 /**
@@ -359,6 +376,15 @@ data class ColorAdjustments(
     val grainAmount: Float = 0f,
     val grainSize: Float = 25f,
     val grainRoughness: Float = 50f,
+    /**
+     * Color Grading (Camera Raw / Lightroom): a hue (0..360) and saturation (0..100) for the
+     * shadows, midtones and highlights; balance (-100..100) moves the split towards shadows or
+     * highlights, blending (0..100) widens the overlap.
+     */
+    val gradeShadowHue: Float = 220f, val gradeShadowSat: Float = 0f,
+    val gradeMidHue: Float = 30f, val gradeMidSat: Float = 0f,
+    val gradeHighHue: Float = 45f, val gradeHighSat: Float = 0f,
+    val gradeBalance: Float = 0f, val gradeBlending: Float = 50f,
     // Curves (control points in [0..255] range)
     val curvesRgb: List<PointF> = listOf(PointF(0f, 0f), PointF(255f, 255f)),
     val curvesRed: List<PointF> = listOf(PointF(0f, 0f), PointF(255f, 255f)),
@@ -401,6 +427,7 @@ data class ColorAdjustments(
                 highlights == 0f && shadows == 0f && sharpness == 0f && vignette == 0f &&
                 whites == 0f && blacks == 0f && vibrance == 0f && clarity == 0f && dehaze == 0f &&
                 noiseReduction == 0f && grainAmount == 0f &&
+                gradeShadowSat == 0f && gradeMidSat == 0f && gradeHighSat == 0f &&
                 !hasCurves() && !hasHsl() && effectiveReplacements().none { it.enabled } && !replacePreviewMask && !colorizeEnabled
 
     fun hasHsl(): Boolean = effectiveHslBands().values.any { !it.isIdentity() } || colorizeEnabled

@@ -806,7 +806,8 @@ class PhotoEasyRobolectricTest {
 
     @Test
     fun `every preset filter has a recipe or a special implementation`() {
-        val special = setOf(FilterType.NONE, FilterType.PIXELATE, FilterType.EDGES, FilterType.GLITCH, FilterType.SOLARIZE)
+        val special = setOf(FilterType.NONE, FilterType.PIXELATE, FilterType.EDGES, FilterType.GLITCH, FilterType.SOLARIZE,
+            FilterType.OIL_PAINTING, FilterType.CHARCOAL)
         for (f in FilterType.values()) {
             if (f in special) continue
             assertNotNull("missing recipe for $f", com.example.engine.FilterRecipes.recipeFor(f))

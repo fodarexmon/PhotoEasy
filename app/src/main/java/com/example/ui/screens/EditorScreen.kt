@@ -984,6 +984,21 @@ fun EditorScreen(
                                 onSaveLook = onSaveLook,
                                 onDeleteCustomPreset = onDeleteCustomPreset,
                                 onIntensityChange = { intensity -> onUpdateLookTransient { l -> l.filterIntensity = intensity } },
+                                onEditPresetAsSliders = {
+                                    val converted = com.example.engine.PresetSliders.toAdjustments(layer.filter, layer.filterIntensity)
+                                    if (converted != null) {
+                                        onUpdateLookTransient { l ->
+                                            l.adjustments = com.example.engine.PresetSliders.merge(l.adjustments, converted.adjustments)
+                                            l.filter = FilterType.NONE
+                                            l.filterIntensity = 1f
+                                        }
+                                        onCommitHistoryState()
+                                        if (!converted.exact) {
+                                            android.widget.Toast.makeText(context, context.getString(R.string.preset_to_sliders_partial), android.widget.Toast.LENGTH_LONG).show()
+                                        }
+                                        onToolSelect(ActiveTool.ADJUST)
+                                    }
+                                },
                                 onCompareChange = { compareOriginal = it },
                                 onApply = { onCommitHistoryState(); onToolSelect(ActiveTool.NONE) },
                                 onCancel = { onCancelHistoryState(); onToolSelect(ActiveTool.NONE) },

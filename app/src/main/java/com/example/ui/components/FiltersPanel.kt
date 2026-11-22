@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.material3.*
@@ -87,6 +88,8 @@ fun FiltersPanel(
     adjustments: ColorAdjustments,
     onPreviewFilter: (FilterType) -> Unit,
     onIntensityChange: (Float) -> Unit = {},
+    /** Moves the selected preset into the adjustment sliders (null hides the button). */
+    onEditPresetAsSliders: (() -> Unit)? = null,
     onCompareChange: (Boolean) -> Unit = {},
     onApply: () -> Unit,
     onCancel: () -> Unit,
@@ -551,6 +554,23 @@ fun FiltersPanel(
                         valueRange = 0f..1f,
                         colors = SliderDefaults.colors(thumbColor = IndigoPrimary, activeTrackColor = IndigoPrimary)
                     )
+                    if (onEditPresetAsSliders != null && selectedKey.startsWith("f:") &&
+                        com.example.engine.PresetSliders.canConvert(selectedFilter)
+                    ) {
+                        OutlinedButton(
+                            onClick = onEditPresetAsSliders,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 40.dp).testTag("btn_preset_to_sliders")
+                        ) {
+                            Icon(Icons.Default.Tune, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(stringResource(R.string.preset_to_sliders), fontSize = 12.sp)
+                        }
+                        Text(
+                            stringResource(R.string.preset_to_sliders_hint),
+                            color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp,
+                            modifier = Modifier.padding(top = 2.dp, start = 2.dp)
+                        )
+                    }
                 }
             }
 
