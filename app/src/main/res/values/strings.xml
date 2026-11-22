@@ -1244,4 +1244,10 @@
     <string name="status_ai_colorized">Colorized into a new layer</string>
     <string name="status_ai_colorize_failed">Colorizing failed</string>
     <string name="layer_name_ai_colorized">AI colour</string>
+    <string name="effect_preview_on">Preview: on (showing the effect)</string>
+    <string name="effect_preview_off">Preview: off (image without this effect)</string>
+    <string name="effect_preview_toggle">Show or hide this effect\'s preview</string>
+    <string name="curves_pick_black_hint">Tap what should be pure black (the darkest point)</string>
+    <string name="curves_pick_gray_hint">Tap something that should be neutral grey: removes the colour cast</string>
+    <string name="curves_pick_white_hint">Tap what should be pure white (the brightest point)</string>
 </resources>

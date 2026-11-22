@@ -220,8 +220,10 @@ fun FiltersPanel(
     // Pro effects are previewed live on the main image (scoped to the selection, like the real
     // effect). Slider drags are debounced so the canvas is not re-rendered for every tiny step.
     val latestPreviewProEffect by rememberUpdatedState(onPreviewProEffect)
-    LaunchedEffect(activeTab, selectedProEffect, effectiveProParams, sourceBitmap) {
-        if (activeTab == FilterPanelTab.PRO_EFFECTS) {
+    // Effect preview on/off: compares this effect alone (everything else stays as it is).
+    var proPreviewOn by remember { mutableStateOf(true) }
+    LaunchedEffect(activeTab, selectedProEffect, effectiveProParams, sourceBitmap, proPreviewOn) {
+        if (activeTab == FilterPanelTab.PRO_EFFECTS && proPreviewOn) {
             delay(150)
             latestPreviewProEffect(selectedProEffect, effectiveProParams)
         } else {
@@ -679,6 +681,25 @@ fun FiltersPanel(
             )
             Spacer(Modifier.height(8.dp))
 
+            // Show / hide just this effect's preview (Before/After of the effect only).
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    stringResource(if (proPreviewOn) R.string.effect_preview_on else R.string.effect_preview_off),
+                    color = if (proPreviewOn) Color.White else AmberAccent, fontSize = 12.sp, modifier = Modifier.weight(1f)
+                )
+                FilledTonalIconToggleButton(
+                    checked = proPreviewOn, onCheckedChange = { proPreviewOn = it },
+                    modifier = Modifier.size(40.dp).testTag("btn_effect_preview_toggle")
+                ) {
+                    Icon(
+                        if (proPreviewOn) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                        contentDescription = stringResource(R.string.effect_preview_toggle)
+                    )
+                }
+            }
             ProEffectControls(selectedProEffect, proParams) { proParams = it }
 
             Spacer(Modifier.height(12.dp))

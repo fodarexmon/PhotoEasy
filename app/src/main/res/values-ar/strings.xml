@@ -1248,4 +1248,10 @@
     <string name="status_ai_colorized">لُوّنت الصورة في طبقة جديدة</string>
     <string name="status_ai_colorize_failed">فشل التلوين</string>
     <string name="layer_name_ai_colorized">تلوين ذكي</string>
+    <string name="effect_preview_on">المعاينة: تعمل (يظهر التأثير)</string>
+    <string name="effect_preview_off">المعاينة: متوقفة (الصورة بدون هذا التأثير)</string>
+    <string name="effect_preview_toggle">إظهار أو إخفاء معاينة هذا التأثير</string>
+    <string name="curves_pick_black_hint">انقر على ما يجب أن يكون أسود تمامًا (أغمق نقطة)</string>
+    <string name="curves_pick_gray_hint">انقر على شيء يجب أن يكون رماديًا محايدًا: يزيل الصبغة اللونية</string>
+    <string name="curves_pick_white_hint">انقر على ما يجب أن يكون أبيض تمامًا (أفتح نقطة)</string>
 </resources>
