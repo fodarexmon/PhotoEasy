@@ -62,8 +62,26 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
+      # Robolectric downloads its Android framework jars from Maven Central while the tests run.
+      # Keep them between runs so a Maven Central hiccup doesn't fail the build.
+      - name: Cache Robolectric Android jars
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: robolectric-
+
       - name: Unit tests
-        run: ./gradlew testDebugUnitTest --stacktrace
+        run: |
+          if ./gradlew testDebugUnitTest --stacktrace; then exit 0; fi
+          # Retry once, only when the failure was the Robolectric download.
+          if grep -rqs "MavenArtifactFetcher" app/build/test-results/testDebugUnitTest; then
+            echo "::warning::Robolectric could not download its Android jars; retrying in 60 s"
+            sleep 60
+            ./gradlew testDebugUnitTest --stacktrace
+          else
+            exit 1
+          fi
 
       # R8-shrunk build, one APK per processor type plus a universal one.
       - name: Build APKs
