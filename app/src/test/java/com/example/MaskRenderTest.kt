@@ -9,7 +9,6 @@ import com.example.data.model.Layer
 import com.example.data.model.LayerType
 import com.example.data.model.Project
 import com.example.engine.LayerRenderer
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -69,12 +68,14 @@ class MaskRenderTest {
         vm.addLayerMask(fromSelection = false)
         vm.invertLayerMask()
         vm.applyLayerMask()
-        org.robolectric.shadows.ShadowLooper.idleMainLooper()
-        runBlocking {
-            kotlinx.coroutines.withTimeout(10_000) {
-                vm.uiState.first { st -> st.currentProject?.layers?.getOrNull(0)?.maskBitmap == null && !st.isProcessing }
-            }
+        // The work runs on background threads and finishes on the main looper: keep the looper going.
+        val deadline = System.currentTimeMillis() + 15_000
+        fun done() = vm.uiState.value.let { st -> st.currentProject?.layers?.getOrNull(0)?.maskBitmap == null && !st.isProcessing }
+        while (!done() && System.currentTimeMillis() < deadline) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            Thread.sleep(25)
         }
+        assertTrue("apply mask finished: ${vm.uiState.value.statusMessage}", done())
         val l = vm.uiState.value.currentProject!!.layers[0]
         val px = l.bitmap!!.getPixel(l.bitmap!!.width / 2, l.bitmap!!.height / 2)
         assertEquals("applied mask hides pixels ${Integer.toHexString(px)} mask=${l.maskBitmap}", 0, Color.alpha(px))
