@@ -31,7 +31,7 @@ jobs:
         run: |
           pip install --quiet torch==2.3.1 --index-url https://download.pytorch.org/whl/cpu
           pip install --quiet tensorflow==2.16.1 tf_keras==2.16.0 onnx==1.16.1 onnxruntime==1.18.1 \
-            onnx2tf==1.22.3 onnx_graphsurgeon==0.5.2 sng4onnx==1.0.4 onnxsim==0.4.36 psutil pillow numpy==1.26.4
+            onnx2tf==1.22.3 onnx_graphsurgeon==0.5.2 sng4onnx==1.0.4 onnxsim==0.4.36 psutil pillow numpy==1.26.4 ipython scikit-image==0.22.0 matplotlib
 
       - name: Get the network
         run: git clone --depth 1 https://github.com/richzhang/colorization rz
