@@ -9,6 +9,7 @@ import com.example.data.model.Layer
 import com.example.data.model.LayerType
 import com.example.data.model.Project
 import com.example.engine.LayerRenderer
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -61,38 +62,22 @@ class MaskRenderTest {
     }
 
     @Test
-    fun probe() {
+    fun selectionLimitedLookAndMaskedApplyUseTheMask() {
+        // Applying the mask into the pixels (Apply Mask) hides what the mask hides.
         val vm = vmWith(image("a", 200, 150, Color.RED), w = 200, h = 150)
         vm.selectLayer(0)
         vm.addLayerMask(fromSelection = false)
         vm.invertLayerMask()
-        val l = vm.uiState.value.currentProject!!.layers[0]
-        val eff = LayerRenderer.renderEffectiveMask(l, 200, 150)
-        val single = runBlocking { LayerRenderer.renderSingleLayerToBitmap(app, l.previewSnapshot(), 200, 150, 1f) }
-        val singlePooled = runBlocking { LayerRenderer.renderSingleLayerToBitmap(app, l.previewSnapshot(), 200, 150, 1f, cacheLook = true) }
-        // Raw Android: DST_IN with this mask.
-        val raw = Bitmap.createBitmap(200, 150, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) }
-        android.graphics.Canvas(raw).drawBitmap(l.maskBitmap!!, 0f, 0f, android.graphics.Paint().apply {
-            xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_IN) })
-        val a8 = Bitmap.createBitmap(200, 150, Bitmap.Config.ALPHA_8)
-        android.graphics.Canvas(a8).drawBitmap(l.maskBitmap!!, 0f, 0f, android.graphics.Paint())
-        fun tryDraw(src: Bitmap, paint: android.graphics.Paint): String {
-            val t = Bitmap.createBitmap(200, 150, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) }
-            paint.xfermode = android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.DST_IN)
-            android.graphics.Canvas(t).drawBitmap(src, 0f, 0f, paint)
-            return Integer.toHexString(t.getPixel(100, 75))
+        vm.applyLayerMask()
+        org.robolectric.shadows.ShadowLooper.idleMainLooper()
+        runBlocking {
+            kotlinx.coroutines.withTimeout(10_000) {
+                vm.uiState.first { st -> st.currentProject?.layers?.getOrNull(0)?.maskBitmap == null && !st.isProcessing }
+            }
         }
-        val argb = l.maskBitmap!!.copy(Bitmap.Config.ARGB_8888, false)
-        val fresh = Bitmap.createBitmap(200, 150, Bitmap.Config.ALPHA_8) // all zero, never written
-        val erased = Bitmap.createBitmap(200, 150, Bitmap.Config.ALPHA_8).apply { eraseColor(Color.TRANSPARENT) }
-        val probes = "argbCopy=${tryDraw(argb, android.graphics.Paint())}(a=${argb.getPixel(100,75) ushr 24}) " +
-            "blackPaint=${tryDraw(l.maskBitmap!!, android.graphics.Paint().apply { color = Color.BLACK })} " +
-            "fresh=${tryDraw(fresh, android.graphics.Paint())} erased=${tryDraw(erased, android.graphics.Paint())} " +
-            "a8a8=${a8.let { tryDraw(it, android.graphics.Paint()) }}"
-        val msg = probes + " eff=${eff?.let { "${it.config} a=${it.getPixel(100, 75) ushr 24}" }} single=${single?.let { Integer.toHexString(it.getPixel(100, 75)) }} " +
-            "pooled=${singlePooled?.let { Integer.toHexString(it.getPixel(100, 75)) }} raw=${Integer.toHexString(raw.getPixel(100, 75))} a8copy=${a8.getPixel(100, 75) ushr 24} " +
-            "maskHasAlpha=${l.maskBitmap!!.hasAlpha()} premul=${l.maskBitmap!!.isPremultiplied}"
-        throw AssertionError("PROBE $msg")
+        val l = vm.uiState.value.currentProject!!.layers[0]
+        val px = l.bitmap!!.getPixel(l.bitmap!!.width / 2, l.bitmap!!.height / 2)
+        assertEquals("applied mask hides pixels ${Integer.toHexString(px)} mask=${l.maskBitmap}", 0, Color.alpha(px))
     }
 
     @Test
