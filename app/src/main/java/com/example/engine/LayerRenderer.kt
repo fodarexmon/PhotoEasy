@@ -174,10 +174,17 @@ object LayerRenderer {
         selectedLayerId: String? = null,
         proEffectPreview: ProEffectPreview? = null,
         /** Document-space selection limiting [proEffectPreview], as the real effect is limited. */
-        proEffectMask: Bitmap? = null
+        proEffectMask: Bitmap? = null,
+        /** Renders only the members of this group (internal: groups are drawn as one unit). */
+        groupLevel: String? = null
     ): Bitmap {
         coroutineContext.ensureActive()
         FilterLibrary.ensureLoaded(context)
+        // With groups, this pass draws one level; each group is rendered on its own first.
+        val allLayers = layers
+        @Suppress("NAME_SHADOWING")
+        val layers = if (groupLevel != null || allLayers.any { it.type == LayerType.GROUP || it.parentId != null })
+            LayerTree.level(allLayers, groupLevel) else allLayers
         val currentJob = coroutineContext[Job]
 
         var targetW = width
@@ -230,6 +237,36 @@ object LayerRenderer {
                 i = j
                 // A hidden base hides its clipped layers too (as in Photoshop).
                 if (!layer.isVisible || layer.opacity <= 0.01f) continue
+
+                if (layer.type == LayerType.GROUP) {
+                    // The group's members composited on their own, then drawn as one layer with
+                    // the group's mask, opacity and blend mode (Photoshop's group in Normal mode).
+                    val sub = renderCompositeCanvas(
+                        context, allLayers, width, height, includeBackground = false, backgroundColor = null,
+                        maxPreviewDimension = maxPreviewDimension, activeSelectionMask = activeSelectionMask,
+                        selectedLayerId = selectedLayerId, proEffectPreview = proEffectPreview,
+                        proEffectMask = proEffectMask, groupLevel = layer.id
+                    )
+                    var groupBmp = sub
+                    try {
+                        coroutineContext.ensureActive()
+                        // A look set on the group (adjustments, filter, LUT) applies to all of it.
+                        groupBmp = applyLook(sub, layer, currentJob)
+                        if (groupBmp !== sub) { sub.recycle() }
+                        applyLayerMask(Canvas(groupBmp), layer, groupBmp.width, groupBmp.height, docW, docH)
+                        for (c in clipped) {
+                            coroutineContext.ensureActive()
+                            if (!c.isVisible || c.opacity <= 0.01f) continue
+                            drawClippedLayer(context, groupBmp, c, targetW, targetH, scaleRatio, docW, docH, currentJob,
+                                if (c.id == selectedLayerId) activeSelectionMask else null)
+                        }
+                        drawBlended(canvas, composite, groupBmp, layer.blendMode, layer.opacity, paint)
+                    } finally {
+                        if (!sub.isRecycled) sub.recycle()
+                        if (!groupBmp.isRecycled) groupBmp.recycle()
+                    }
+                    continue
+                }
 
                 if (layer.type == LayerType.ADJUSTMENT) {
                     // Non-destructive Adjustment Layer: applies adjustments/filters to accumulated composite
@@ -729,6 +766,10 @@ object LayerRenderer {
 
                 LayerType.ADJUSTMENT -> {
                     // Adjustment layer
+                }
+
+                LayerType.GROUP -> {
+                    // Drawn by renderCompositeCanvas from its members.
                 }
             }
 

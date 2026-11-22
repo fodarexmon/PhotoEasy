@@ -390,7 +390,23 @@ fun EditorScreen(
         onSelectLayerPixels = { viewModel.selectLayerPixels(it) },
         onMaskGradient = { viewModel.applyMaskGradient(it) },
         onMaskBrushHardnessChange = { viewModel.setMaskBrushHardness(it) },
-        onMaskBrushOpacityChange = { viewModel.setMaskBrushOpacity(it) }
+        onMaskBrushOpacityChange = { viewModel.setMaskBrushOpacity(it) },
+        multiSelect = uiState.isLayerMultiSelect,
+        pickedIds = uiState.selectedLayerIds,
+        onSetMultiSelect = { viewModel.setLayerMultiSelect(it) },
+        onTogglePicked = { viewModel.toggleLayerPicked(it) },
+        onPickAll = { viewModel.pickAllLayers(it) },
+        onDeletePicked = { viewModel.deleteLayers() },
+        onDuplicatePicked = { viewModel.duplicateLayers() },
+        onSetPickedVisible = { viewModel.setLayersVisible(it) },
+        onSetPickedLocked = { viewModel.setLayersLocked(it) },
+        onMergePicked = { viewModel.mergeLayers() },
+        onGroup = { viewModel.groupLayers() },
+        onUngroup = { viewModel.ungroupLayers() },
+        onToggleCollapsed = { viewModel.toggleGroupCollapsed(it) },
+        onMergeVisible = { viewModel.mergeVisibleLayers() },
+        onFlatten = { viewModel.flattenImage() },
+        onAlign = { viewModel.alignLayers(com.example.ui.viewmodel.EditorViewModel.LayerAlign.values()[it]) }
     )
     var currentCropRect by remember { mutableStateOf<android.graphics.RectF?>(null) }
     var showExportDialog by remember { mutableStateOf(false) }

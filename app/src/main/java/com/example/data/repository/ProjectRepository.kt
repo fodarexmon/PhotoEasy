@@ -337,6 +337,8 @@ class ProjectRepository(private val context: Context) {
                         put("isMaskLinked", layer.isMaskLinked)
                         put("isClipped", layer.isClipped)
                         put("isSticker", layer.isSticker)
+                        layer.parentId?.let { put("parentId", it) }
+                        if (layer.isCollapsed) put("isCollapsed", true)
                         layer.maskAnchor?.let { a ->
                             put("maskAnchor", JSONObject().apply {
                                 put("x", a.x.toDouble()); put("y", a.y.toDouble())
@@ -1004,6 +1006,8 @@ class ProjectRepository(private val context: Context) {
                     isMaskLinked = layerObj.optBoolean("isMaskLinked", true),
                     isClipped = layerObj.optBoolean("isClipped", false),
                     isSticker = layerObj.optBoolean("isSticker", false),
+                    parentId = layerObj.optString("parentId", "").ifBlank { null },
+                    isCollapsed = layerObj.optBoolean("isCollapsed", false),
                     skewX = layerObj.optDouble("skewX", 0.0).toFloat(),
                     skewY = layerObj.optDouble("skewY", 0.0).toFloat(),
                     distort = layerObj.optJSONArray("distort")?.takeIf { it.length() == 8 }?.let { a ->

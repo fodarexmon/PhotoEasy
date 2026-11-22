@@ -205,7 +205,10 @@ data class EditorUiState(
     /** Where the Clone Stamp is currently sampling (shown as a cross-hair on the canvas). */
     val retouchMarkerDoc: PointF? = null,
     /** Pre-retouch pixels per layer id, for the Before view of Before/After. */
-    val compareBefore: Map<String, com.example.data.model.LayerBefore> = emptyMap()
+    val compareBefore: Map<String, com.example.data.model.LayerBefore> = emptyMap(),
+    /** Layers panel in multi-select mode, and the layers picked there. */
+    val isLayerMultiSelect: Boolean = false,
+    val selectedLayerIds: Set<String> = emptySet()
 )
 
 data class EditableShape(
@@ -463,13 +466,20 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         transformState: (EditorUiState) -> EditorUiState = { it }
     ) {
         val proj = _uiState.value.currentProject ?: return
+        // Keep groups whole when a layer was added among a group's members.
+        val selId = proj.layers.getOrNull(selectedLayerIndex ?: _uiState.value.selectedLayerIndex)?.id
+        var reIndexed: Int? = null
+        if (proj.layers.any { it.type == LayerType.GROUP }) {
+            com.example.engine.LayerTree.adoptStrays(proj.layers)
+            reIndexed = proj.layers.indexOfFirst { it.id == selId }.takeIf { it >= 0 }
+        }
         proj.markDirty()
         markDirty()
         val newState = transformState(
             _uiState.value.copy(
                 currentProject = proj.copy(layers = ArrayList(proj.layers)),
                 renderRevision = proj.renderRevision,
-                selectedLayerIndex = selectedLayerIndex ?: _uiState.value.selectedLayerIndex,
+                selectedLayerIndex = reIndexed ?: selectedLayerIndex ?: _uiState.value.selectedLayerIndex,
                 statusMessage = statusMessage ?: _uiState.value.statusMessage
             )
         )
@@ -728,7 +738,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         retouchSession = null
         retouchPending = 0
         retouchStepOpen = false
-        _uiState.value = _uiState.value.copy(compareBefore = emptyMap())
+        _uiState.value = _uiState.value.copy(compareBefore = emptyMap(), isLayerMultiSelect = false, selectedLayerIds = emptySet())
         com.example.engine.LayerRenderer.clearLookCache()
         cloneOffsetDoc = null
         undoStack.clear()
@@ -832,6 +842,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (previous == ActiveTool.RETOUCH && tool != ActiveTool.RETOUCH && !retouchStrokeActive) retouchSession = null
         // Leaving the Adjust panel: an untouched selection adjustment layer goes away (no undo step).
         if (previous == ActiveTool.ADJUST && tool != ActiveTool.ADJUST) endSelectionLook()
+        // Leaving the layers panel ends picking several layers.
+        if (previous == ActiveTool.LAYERS && tool != ActiveTool.LAYERS && _uiState.value.isLayerMultiSelect)
+            _uiState.value = _uiState.value.copy(isLayerMultiSelect = false, selectedLayerIds = emptySet())
         // Leaving a transient editor (filters/adjustments/text/transform) should never
         // leave a half-open history transaction. Commit what the user can currently see.
         if (previous != tool && pendingTransactionSnapshot != null) {
@@ -1557,7 +1570,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
             saveHistoryState()
             layer.ensureMaskAnchor()
+            val followers = transformFollowers(proj, layer)
+            val before = placementOf(layer)
             action(layer)
+            follow(followers, before, placementOf(layer))
             commitProjectMutation()
         }
     }
@@ -1660,7 +1676,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 beginHistoryTransaction()
             }
             layer.ensureMaskAnchor()
+            // Picked layers / a group's contents move, scale and rotate with the selected layer.
+            val followers = transformFollowers(proj, layer)
+            val before = placementOf(layer)
             action(layer)
+            follow(followers, before, placementOf(layer))
             proj.markDirty()
             _uiState.value = _uiState.value.copy(
                 currentProject = proj.copy(layers = ArrayList(proj.layers)),
@@ -1695,6 +1715,430 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    // --- Several layers at once and layer groups ------------------------------------------
+
+    fun setLayerMultiSelect(enabled: Boolean) {
+        val proj = _uiState.value.currentProject
+        val current = proj?.layers?.getOrNull(_uiState.value.selectedLayerIndex)?.id
+        _uiState.value = _uiState.value.copy(
+            isLayerMultiSelect = enabled,
+            // Starts with the layer that was selected.
+            selectedLayerIds = if (enabled && current != null) setOf(current) else emptySet()
+        )
+    }
+
+    fun toggleLayerPicked(id: String) {
+        val proj = _uiState.value.currentProject ?: return
+        val ids = _uiState.value.selectedLayerIds
+        val next = if (id in ids) ids - id else ids + id
+        val idx = proj.layers.indexOfFirst { it.id == id }
+        _uiState.value = _uiState.value.copy(
+            selectedLayerIds = next,
+            // The last picked layer is the one the tools work on.
+            selectedLayerIndex = if (id !in ids && idx >= 0) idx else _uiState.value.selectedLayerIndex
+        )
+    }
+
+    fun pickAllLayers(all: Boolean) {
+        val proj = _uiState.value.currentProject ?: return
+        _uiState.value = _uiState.value.copy(selectedLayerIds = if (all) proj.layers.map { it.id }.toSet() else emptySet())
+    }
+
+    /** The layers an action applies to: the picked ones in multi-select, else the selected one. */
+    private fun targetLayers(proj: Project): List<Layer> {
+        val st = _uiState.value
+        val ids = if (st.isLayerMultiSelect) st.selectedLayerIds
+            else setOfNotNull(proj.layers.getOrNull(st.selectedLayerIndex)?.id)
+        return proj.layers.filter { it.id in ids }
+    }
+
+    /** [targets] without those already inside a picked group (the group carries them). */
+    private fun rootsOf(proj: Project, targets: List<Layer>): List<Layer> {
+        val ids = targets.map { it.id }.toSet()
+        return targets.filter { t -> com.example.engine.LayerTree.ancestors(proj.layers, t).none { it.id in ids } }
+    }
+
+    /** [targets] plus everything inside the picked groups, in layer order. */
+    private fun expandedTargets(proj: Project, targets: List<Layer>): List<Layer> {
+        val ids = HashSet<String>()
+        for (t in targets) {
+            ids.add(t.id)
+            if (t.type == LayerType.GROUP) ids.addAll(com.example.engine.LayerTree.descendants(proj.layers, t.id))
+        }
+        return proj.layers.filter { it.id in ids }
+    }
+
+    private fun anyLocked(proj: Project, layers: List<Layer>): Boolean =
+        layers.any { com.example.engine.LayerTree.effectivelyLocked(proj.layers, it) }
+
+    /** After a change of the layer structure: group layout restored, selection kept on [keepId]. */
+    private fun commitStructure(proj: Project, keepId: String?, @StringRes status: Int? = null, pick: Set<String>? = null) {
+        com.example.engine.LayerTree.normalize(proj.layers)
+        proj.layers.firstOrNull()?.isClipped = false
+        val idx = proj.layers.indexOfFirst { it.id == keepId }.takeIf { it >= 0 }
+            ?: _uiState.value.selectedLayerIndex.coerceIn(0, (proj.layers.size - 1).coerceAtLeast(0))
+        val live = proj.layers.map { it.id }.toSet()
+        commitProjectMutation(
+            selectedLayerIndex = idx,
+            statusMessage = status?.let { tr(it) },
+            transformState = { it.copy(selectedLayerIds = (pick ?: it.selectedLayerIds).filter { id -> id in live }.toSet()) }
+        )
+    }
+
+    /** Deletes the picked layers (groups with their contents). */
+    fun deleteLayers() {
+        val proj = _uiState.value.currentProject ?: return
+        val targets = expandedTargets(proj, targetLayers(proj))
+        if (targets.isEmpty()) return
+        if (anyLocked(proj, targets)) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_locked_delete)); return }
+        if (targets.size >= proj.layers.size) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_cannot_delete_all_layers)); return }
+        saveHistoryState()
+        val ids = targets.map { it.id }.toSet()
+        val lowest = proj.layers.indexOfFirst { it.id in ids }
+        proj.layers.removeAll { it.id in ids }
+        val keep = proj.layers.getOrNull((lowest - 1).coerceAtLeast(0))?.id
+        commitStructure(proj, keep, R.string.status_layers_deleted, pick = emptySet())
+        if (_uiState.value.isLayerMultiSelect) _uiState.value = _uiState.value.copy(isLayerMultiSelect = false)
+    }
+
+    /** Duplicates the picked layers (groups with their contents) above the topmost of them. */
+    fun duplicateLayers() {
+        val proj = _uiState.value.currentProject ?: return
+        val targets = expandedTargets(proj, targetLayers(proj))
+        if (targets.isEmpty()) return
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_duplicating_layer))
+            try {
+                val idMap = targets.associate { it.id to java.util.UUID.randomUUID().toString() }
+                val copies = withContext(Dispatchers.Default) {
+                    targets.map { t ->
+                        t.duplicateLayer(uniqueLayerName(tr(R.string.layer_name_copy, t.name), proj))
+                    }
+                }
+                // Copies keep their structure: ids remapped, parents inside the copy follow.
+                val fixed = copies.mapIndexed { i, c ->
+                    val orig = targets[i]
+                    c.copy(id = idMap.getValue(orig.id), parentId = orig.parentId?.let { idMap[it] ?: it })
+                }
+                saveHistoryState()
+                val top = proj.layers.indexOfLast { l -> targets.any { it.id == l.id } }
+                proj.layers.addAll(top + 1, fixed)
+                val newIds = fixed.map { it.id }.toSet()
+                commitStructure(proj, fixed.last().id, R.string.status_layers_duplicated,
+                    pick = if (_uiState.value.isLayerMultiSelect) newIds else null)
+                _uiState.value = _uiState.value.copy(isProcessing = false)
+            } catch (e: OutOfMemoryError) {
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_duplicate_failed))
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_duplicate_failed))
+            }
+        }
+    }
+
+    fun setLayersVisible(visible: Boolean) {
+        val proj = _uiState.value.currentProject ?: return
+        val targets = targetLayers(proj)
+        if (targets.isEmpty()) return
+        saveHistoryState()
+        targets.forEach { it.isVisible = visible }
+        commitProjectMutation()
+    }
+
+    fun setLayersLocked(locked: Boolean) {
+        val proj = _uiState.value.currentProject ?: return
+        val targets = targetLayers(proj)
+        if (targets.isEmpty()) return
+        saveHistoryState()
+        expandedTargets(proj, targets).forEach { it.isLocked = locked }
+        commitProjectMutation()
+    }
+
+    /** Puts the picked layers into a new group (Ctrl+G). */
+    fun groupLayers() {
+        val proj = _uiState.value.currentProject ?: return
+        val roots = rootsOf(proj, targetLayers(proj))
+        if (roots.isEmpty()) return
+        if (anyLocked(proj, roots)) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_layer_locked)); return }
+        saveHistoryState()
+        val topmost = roots.last()
+        val group = Layer(
+            id = java.util.UUID.randomUUID().toString(),
+            name = uniqueLayerName(tr(R.string.layer_name_group, proj.layers.count { it.type == LayerType.GROUP } + 1), proj),
+            type = LayerType.GROUP,
+            parentId = com.example.engine.LayerTree.parentOf(proj.layers, topmost)
+        )
+        roots.forEach { it.parentId = group.id; it.isClipped = false }
+        proj.layers.add(proj.layers.indexOf(topmost) + 1, group)
+        commitStructure(proj, group.id, R.string.status_layers_grouped, pick = setOf(group.id))
+        if (_uiState.value.isLayerMultiSelect) _uiState.value = _uiState.value.copy(isLayerMultiSelect = false, selectedLayerIds = emptySet())
+    }
+
+    /** Takes the members out of the selected group(s) and removes the group (Shift+Ctrl+G). */
+    fun ungroupLayers() {
+        val proj = _uiState.value.currentProject ?: return
+        val groups = targetLayers(proj).filter { it.type == LayerType.GROUP }
+        if (groups.isEmpty()) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_not_a_group)); return }
+        if (anyLocked(proj, groups)) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_layer_locked)); return }
+        saveHistoryState()
+        var keep: String? = null
+        for (g in groups) {
+            val members = proj.layers.filter { it.parentId == g.id }
+            members.forEach { it.parentId = g.parentId }
+            keep = keep ?: members.lastOrNull()?.id
+            proj.layers.remove(g)
+        }
+        commitStructure(proj, keep, R.string.status_layers_ungrouped, pick = emptySet())
+        if (_uiState.value.isLayerMultiSelect) _uiState.value = _uiState.value.copy(isLayerMultiSelect = false)
+    }
+
+    fun toggleGroupCollapsed(groupId: String) {
+        val proj = _uiState.value.currentProject ?: return
+        val g = proj.layers.firstOrNull { it.id == groupId && it.type == LayerType.GROUP } ?: return
+        g.isCollapsed = !g.isCollapsed
+        // Folding is a view setting: saved with the project but not an undo step.
+        commitProjectMutation()
+    }
+
+    /** Merges the picked layers (groups with their contents) into one image layer. */
+    fun mergeLayers() {
+        val proj = _uiState.value.currentProject ?: return
+        val picked = targetLayers(proj)
+        val single = picked.singleOrNull()
+        // One group selected: merge the group; otherwise at least two layers are needed.
+        if (picked.size < 2 && single?.type != LayerType.GROUP) {
+            _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_pick_two_layers)); return
+        }
+        mergeIntoOne(proj, expandedTargets(proj, picked), R.string.status_layers_merged)
+    }
+
+    /** Merges all visible layers into one; hidden layers stay as they are. */
+    fun mergeVisibleLayers() {
+        val proj = _uiState.value.currentProject ?: return
+        val visible = proj.layers.filter { !com.example.engine.LayerTree.effectivelyHidden(proj.layers, it) }
+        val visibleIds = visible.map { it.id }.toSet()
+        val withGroups = proj.layers.filter { l -> l.id in visibleIds }
+        if (withGroups.size < 2) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_pick_two_layers)); return }
+        mergeIntoOne(proj, withGroups, R.string.status_layers_merged)
+    }
+
+    /** Flatten Image: everything into one layer; hidden layers are discarded. */
+    fun flattenImage() {
+        val proj = _uiState.value.currentProject ?: return
+        if (proj.layers.size < 2) return
+        mergeIntoOne(proj, proj.layers.toList(), R.string.status_image_flattened)
+    }
+
+    private fun mergeIntoOne(proj: Project, layers: List<Layer>, @StringRes done: Int) {
+        if (layers.isEmpty() || _uiState.value.isProcessing) return
+        if (anyLocked(proj, layers)) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_locked_merge)); return }
+        val ids = layers.map { it.id }.toSet()
+        val topmost = layers.last()
+        // The merged layer sits where the topmost one was, in the group that held it.
+        var parent = com.example.engine.LayerTree.parentOf(proj.layers, topmost)
+        while (parent != null && parent in ids) parent = proj.layers.firstOrNull { it.id == parent }?.let { com.example.engine.LayerTree.parentOf(proj.layers, it) }
+        val name = if (topmost.type == LayerType.GROUP && layers.size > 1) topmost.name else layers.filter { it.type != LayerType.GROUP }.joinToString(" + ") { it.name }.take(60)
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_merging_layers))
+            var historySaved = false
+            try {
+                val merged = withContext(Dispatchers.Default) {
+                    LayerRenderer.renderCompositeCanvas(getApplication(), layers, proj.width, proj.height,
+                        includeBackground = false, backgroundColor = null, maxPreviewDimension = null)
+                }
+                val n = Layer(
+                    id = java.util.UUID.randomUUID().toString(),
+                    name = name.ifBlank { tr(R.string.layer_name_merged) },
+                    type = LayerType.IMAGE,
+                    contentWidth = proj.width.toFloat(),
+                    contentHeight = proj.height.toFloat(),
+                    parentId = parent
+                )
+                if (!commitDestructiveBitmap(proj, n, merged, proj.width.toFloat(), proj.height.toFloat(), "merge")) throw java.io.IOException("Save failed")
+                if (merged !== n.bitmap && !merged.isRecycled) merged.recycle()
+                saveHistoryState()
+                historySaved = true
+                val at = proj.layers.indexOf(topmost) + 1
+                proj.layers.add(at, n)
+                proj.layers.removeAll { it.id in ids }
+                commitStructure(proj, n.id, done, pick = emptySet())
+                _uiState.value = _uiState.value.copy(isProcessing = false, isLayerMultiSelect = false)
+            } catch (e: OutOfMemoryError) {
+                if (historySaved) rollbackToLastHistoryState()
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_merge_failed))
+            } catch (e: Exception) {
+                if (historySaved) rollbackToLastHistoryState()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_merge_failed))
+            }
+        }
+    }
+
+    /**
+     * Moves the layer at [from] (a group with its contents) so it ends up at [to]; dropped among
+     * a group's members it joins that group, dropped outside it leaves it.
+     */
+    private fun moveBlock(proj: Project, from: Int, to: Int) {
+        val layer = proj.layers[from]
+        val inside = if (layer.type == LayerType.GROUP) com.example.engine.LayerTree.descendants(proj.layers, layer.id) else emptySet()
+        val target = proj.layers[to]
+        if (target.id in inside) return
+        val block = proj.layers.filter { it.id == layer.id || it.id in inside }
+        proj.layers.removeAll { it.id == layer.id || it.id in inside }
+        val tIdx = proj.layers.indexOf(target)
+        // Moving up lands above the target, moving down below it.
+        val at = if (to > from) tIdx + 1 else tIdx
+        proj.layers.addAll(at, block)
+        val below = proj.layers.getOrNull(at - 1)
+        val above = proj.layers.getOrNull(at + block.size)
+        // The group the drop point is in, seen from the layer above and from the layer below;
+        // where they differ (at a group's edge) the outer one wins.
+        val fromAbove = above?.let { if (it.type == LayerType.GROUP) it.id else com.example.engine.LayerTree.parentOf(proj.layers, it) }
+        val fromBelow = below?.let { com.example.engine.LayerTree.parentOf(proj.layers, it) }
+        fun depthOf(id: String?): Int = id?.let { g -> proj.layers.firstOrNull { it.id == g } }?.let { com.example.engine.LayerTree.depth(proj.layers, it) + 1 } ?: 0
+        layer.parentId = when {
+            above == null -> null
+            below == null -> fromAbove
+            fromAbove == fromBelow -> fromAbove
+            depthOf(fromAbove) <= depthOf(fromBelow) -> fromAbove
+            else -> fromBelow
+        }
+        if (layer.parentId == layer.id || layer.parentId in inside) layer.parentId = null
+    }
+
+    // --- Align and distribute -------------------------------------------------------------
+
+    enum class LayerAlign { LEFT, H_CENTER, RIGHT, TOP, V_CENTER, BOTTOM, DISTRIBUTE_H, DISTRIBUTE_V }
+
+    /** Box of [layer] on the document (rotation included), or null for layers with no pixels. */
+    private fun docBounds(proj: Project, layer: Layer): android.graphics.RectF? {
+        if (layer.type == LayerType.GROUP) {
+            var out: android.graphics.RectF? = null
+            for (id in com.example.engine.LayerTree.descendants(proj.layers, layer.id)) {
+                val l = proj.layers.firstOrNull { it.id == id } ?: continue
+                if (l.type == LayerType.GROUP) continue
+                val b = docBounds(proj, l) ?: continue
+                out = out?.apply { union(b) } ?: android.graphics.RectF(b)
+            }
+            return out
+        }
+        val (w, h) = when {
+            layer.type == LayerType.ADJUSTMENT -> return null
+            layer.bitmap != null || layer.contentWidth > 0f -> layer.intrinsicDocumentWidth() to layer.intrinsicDocumentHeight()
+            layer.type == LayerType.TEXT -> LayerRenderer.measureTextLayer(getApplication(), layer, proj.width.toFloat())
+            else -> proj.width.toFloat() to proj.height.toFloat()
+        }
+        val m = Matrix().apply {
+            postTranslate(-w / 2f, -h / 2f)
+            postScale(layer.scaleX, layer.scaleY)
+            postRotate(layer.rotation)
+            postTranslate(proj.width / 2f + layer.positionX, proj.height / 2f + layer.positionY)
+        }
+        return android.graphics.RectF(0f, 0f, w, h).also { m.mapRect(it) }
+    }
+
+    /** Moves [layer] (a group: everything in it) by (dx, dy) document pixels. */
+    private fun shiftLayer(proj: Project, layer: Layer, dx: Float, dy: Float) {
+        val moving = if (layer.type == LayerType.GROUP)
+            com.example.engine.LayerTree.descendants(proj.layers, layer.id).mapNotNull { id -> proj.layers.firstOrNull { it.id == id } }
+        else listOf(layer)
+        for (l in moving) {
+            if (l.type == LayerType.GROUP) continue
+            l.ensureMaskAnchor()
+            l.positionX += dx; l.positionY += dy
+        }
+    }
+
+    /**
+     * Aligns the picked layers to each other (one layer: to the canvas), or spaces three or more
+     * evenly, like Photoshop's Align / Distribute.
+     */
+    fun alignLayers(mode: LayerAlign) {
+        val proj = _uiState.value.currentProject ?: return
+        val items = rootsOf(proj, targetLayers(proj)).mapNotNull { l -> docBounds(proj, l)?.let { l to it } }
+        if (items.isEmpty()) return
+        if (anyLocked(proj, items.map { it.first })) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_layer_locked)); return }
+        val distribute = mode == LayerAlign.DISTRIBUTE_H || mode == LayerAlign.DISTRIBUTE_V
+        if (distribute && items.size < 3) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_distribute_needs_three)); return }
+        val ref = if (items.size == 1) android.graphics.RectF(0f, 0f, proj.width.toFloat(), proj.height.toFloat())
+            else android.graphics.RectF(items[0].second).apply { items.forEach { union(it.second) } }
+        saveHistoryState()
+        when (mode) {
+            LayerAlign.DISTRIBUTE_H -> {
+                val sorted = items.sortedBy { it.second.centerX() }
+                val first = sorted.first().second.centerX(); val last = sorted.last().second.centerX()
+                sorted.forEachIndexed { i, (l, b) -> shiftLayer(proj, l, first + (last - first) * i / (sorted.size - 1) - b.centerX(), 0f) }
+            }
+            LayerAlign.DISTRIBUTE_V -> {
+                val sorted = items.sortedBy { it.second.centerY() }
+                val first = sorted.first().second.centerY(); val last = sorted.last().second.centerY()
+                sorted.forEachIndexed { i, (l, b) -> shiftLayer(proj, l, 0f, first + (last - first) * i / (sorted.size - 1) - b.centerY()) }
+            }
+            else -> for ((l, b) in items) {
+                val dx = when (mode) {
+                    LayerAlign.LEFT -> ref.left - b.left
+                    LayerAlign.H_CENTER -> ref.centerX() - b.centerX()
+                    LayerAlign.RIGHT -> ref.right - b.right
+                    else -> 0f
+                }
+                val dy = when (mode) {
+                    LayerAlign.TOP -> ref.top - b.top
+                    LayerAlign.V_CENTER -> ref.centerY() - b.centerY()
+                    LayerAlign.BOTTOM -> ref.bottom - b.bottom
+                    else -> 0f
+                }
+                shiftLayer(proj, l, dx, dy)
+            }
+        }
+        commitProjectMutation(statusMessage = tr(R.string.status_layers_aligned))
+    }
+
+    // --- Transforming several layers together ----------------------------------------------
+
+    /** Layers that move with the selected one: the other picked layers, or a group's contents. */
+    private fun transformFollowers(proj: Project, primary: Layer): List<Layer> {
+        val st = _uiState.value
+        val picked = if (st.isLayerMultiSelect && st.selectedLayerIds.size > 1 && primary.id in st.selectedLayerIds)
+            proj.layers.filter { it.id in st.selectedLayerIds } else listOf(primary)
+        if (picked.size == 1 && primary.type != LayerType.GROUP) return emptyList()
+        return expandedTargets(proj, rootsOf(proj, picked)).filter { it.id != primary.id && it.type != LayerType.GROUP && it.type != LayerType.ADJUSTMENT }
+    }
+
+    /** Rotates by [degrees] and scales by ([sx], [sy]) [layers] around the centre of all of them. */
+    private fun turnTogether(proj: Project, layers: List<Layer>, degrees: Float, sx: Float, sy: Float) {
+        val boxes = layers.filter { it.type != LayerType.GROUP }.mapNotNull { docBounds(proj, it) }
+        val all = boxes.firstOrNull()?.let { f -> android.graphics.RectF(f).apply { boxes.forEach { union(it) } } } ?: return
+        val px = all.centerX() - proj.width / 2f; val py = all.centerY() - proj.height / 2f
+        val zero = Placement(px, py, 1f, 1f, 0f)
+        follow(layers.filter { it.type != LayerType.GROUP && it.type != LayerType.ADJUSTMENT }, zero, Placement(px, py, sx, sy, degrees), px, py)
+    }
+
+    private class Placement(val x: Float, val y: Float, val sx: Float, val sy: Float, val rot: Float)
+    private fun placementOf(l: Layer) = Placement(l.positionX, l.positionY, l.scaleX, l.scaleY, l.rotation)
+
+    /**
+     * Gives [followers] the same move / scale / rotation that the selected layer just got
+     * ([before] to [after]), around [pivot] (document offsets from the centre).
+     */
+    private fun follow(followers: List<Layer>, before: Placement, after: Placement, pivotX: Float = before.x, pivotY: Float = before.y) {
+        if (followers.isEmpty()) return
+        val dsx = if (kotlin.math.abs(before.sx) > 1e-6f) after.sx / before.sx else 1f
+        val dsy = if (kotlin.math.abs(before.sy) > 1e-6f) after.sy / before.sy else 1f
+        val dr = after.rot - before.rot
+        val tx = after.x - before.x; val ty = after.y - before.y
+        if (dsx == 1f && dsy == 1f && dr == 0f && tx == 0f && ty == 0f) return
+        val rad = Math.toRadians(dr.toDouble())
+        val c = kotlin.math.cos(rad).toFloat(); val s = kotlin.math.sin(rad).toFloat()
+        for (f in followers) {
+            f.ensureMaskAnchor()
+            val rx = (f.positionX - pivotX) * dsx; val ry = (f.positionY - pivotY) * dsy
+            f.positionX = pivotX + tx + rx * c - ry * s
+            f.positionY = pivotY + ty + rx * s + ry * c
+            f.scaleX *= dsx; f.scaleY *= dsy
+            f.rotation = (f.rotation + dr) % 360f
+        }
+    }
+
     fun deleteSelectedLayer() {
         val proj = _uiState.value.currentProject ?: return
         val idx = _uiState.value.selectedLayerIndex
@@ -1703,6 +2147,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             if (layer.isLocked) {
                 _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_locked_delete))
                 return
+            }
+            if (layer.type == LayerType.GROUP) {
+                // A group goes with everything in it.
+                deleteLayers(); return
             }
             saveHistoryState()
             proj.layers.removeAt(idx)
@@ -1723,6 +2171,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 return
             }
 
+            if (layer.type == LayerType.GROUP) { duplicateLayers(); return }
             val copyName = uniqueLayerName(tr(R.string.layer_name_copy, layer.name), proj)
             viewModelScope.launch {
                 _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_duplicating_layer))
@@ -1770,6 +2219,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (from !in proj.layers.indices || to !in proj.layers.indices || from == to) return
         saveHistoryState()
         val selectedId = proj.layers.getOrNull(_uiState.value.selectedLayerIndex)?.id
+        if (proj.layers.any { it.type == LayerType.GROUP || it.parentId != null }) {
+            // Groups move with their contents; a layer dropped among a group's members joins it.
+            moveBlock(proj, from, to)
+            commitStructure(proj, selectedId ?: proj.layers.getOrNull(to)?.id)
+            return
+        }
         val layer = proj.layers.removeAt(from)
         proj.layers.add(to, layer)
         // A clipped layer moved to the bottom has nothing to clip to.
@@ -1801,6 +2256,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val layer = proj.layers.getOrNull(index) ?: return
         saveHistoryState()
         layer.isLocked = !layer.isLocked
+        // A group locks (or unlocks) everything in it.
+        if (layer.type == LayerType.GROUP) com.example.engine.LayerTree.descendants(proj.layers, layer.id)
+            .forEach { id -> proj.layers.firstOrNull { it.id == id }?.isLocked = layer.isLocked }
         commitProjectMutation(
             statusMessage = if (layer.isLocked) tr(R.string.status_layer_locked) else tr(R.string.status_layer_unlocked)
         )
@@ -1858,6 +2316,18 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun mergeSelectedLayerDown() {
         val proj = _uiState.value.currentProject ?: return
         val idx = _uiState.value.selectedLayerIndex
+        val sel = proj.layers.getOrNull(idx)
+        if (sel != null && (sel.type == LayerType.GROUP || proj.layers.any { it.type == LayerType.GROUP })) {
+            // Merge Group, or this layer with the one below it at the same level.
+            if (sel.type == LayerType.GROUP) { mergeIntoOne(proj, expandedTargets(proj, listOf(sel)), R.string.status_layers_merged); return }
+            val level = com.example.engine.LayerTree.level(proj.layers, com.example.engine.LayerTree.parentOf(proj.layers, sel))
+            val below = level.getOrNull(level.indexOf(sel) - 1) ?: return
+            if (below.type == LayerType.ADJUSTMENT) {
+                _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_merge_into_adjustment)); return
+            }
+            mergeIntoOne(proj, expandedTargets(proj, listOf(below, sel)), R.string.status_layers_merged)
+            return
+        }
         if (idx in 1 until proj.layers.size) {
             val topLayer = proj.layers[idx]
             val bottomLayer = proj.layers[idx - 1]
@@ -2019,6 +2489,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
             saveHistoryState()
             layer.ensureMaskAnchor()
+            val followers = transformFollowers(proj, layer)
+            if (followers.isNotEmpty()) {
+                // Several layers turn together around the middle of all of them.
+                turnTogether(proj, listOf(layer) + followers, degrees, 1f, 1f)
+                commitProjectMutation(); return
+            }
             layer.rotation = (layer.rotation + degrees) % 360f
             commitProjectMutation()
         }
@@ -2042,6 +2518,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 return
             }
             saveHistoryState()
+            val followers = transformFollowers(proj, layer)
+            if (followers.isNotEmpty()) {
+                turnTogether(proj, listOf(layer) + followers, 0f, if (horizontal) -1f else 1f, if (horizontal) 1f else -1f)
+                commitProjectMutation(); return
+            }
             if (horizontal) {
                 layer.scaleX *= -1f
             } else {

@@ -174,7 +174,13 @@ enum class LayerType {
     IMAGE,
     TEXT,
     COLOR_FILL,
-    ADJUSTMENT
+    ADJUSTMENT,
+    /**
+     * A layer group (Photoshop's folder): its members are the layers whose [Layer.parentId] is
+     * its id, kept directly below it in the list. Drawn as one unit with its own opacity, blend
+     * mode, mask and visibility.
+     */
+    GROUP
 }
 
 /** Direction of a layer-mask gradient (revealed -> hidden). */
@@ -486,7 +492,11 @@ data class Layer(
     var exifTags: Map<String, String>? = null,
     /** Adjustment layers: which Photoshop-style adjustment this is, and its own settings. */
     var adjustmentKind: AdjustmentKind = AdjustmentKind.GENERAL,
-    var adjustmentParams: AdjustmentLayerParams = AdjustmentLayerParams()
+    var adjustmentParams: AdjustmentLayerParams = AdjustmentLayerParams(),
+    /** The group this layer belongs to (id of a [LayerType.GROUP] layer), or null at the top level. */
+    var parentId: String? = null,
+    /** Groups: members hidden in the layers panel. */
+    var isCollapsed: Boolean = false
 ) {
     fun currentMaskAnchor(): MaskAnchor = MaskAnchor(positionX, positionY, scaleX, scaleY, rotation)
 

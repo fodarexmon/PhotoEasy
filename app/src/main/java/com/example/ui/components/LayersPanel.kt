@@ -8,6 +8,10 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import com.example.ui.theme.StudioBorder
 import com.example.ui.theme.IndigoLight
@@ -73,9 +77,53 @@ class LayerPanelActions(
     val onSelectLayerPixels: (Int) -> Unit = {},
     val onMaskGradient: (MaskGradient) -> Unit = {},
     val onMaskBrushHardnessChange: (Float) -> Unit = {},
-    val onMaskBrushOpacityChange: (Float) -> Unit = {}
+    val onMaskBrushOpacityChange: (Float) -> Unit = {},
+    // Several layers at once (long press a layer) and groups.
+    val multiSelect: Boolean = false,
+    val pickedIds: Set<String> = emptySet(),
+    val onSetMultiSelect: (Boolean) -> Unit = {},
+    val onTogglePicked: (String) -> Unit = {},
+    val onPickAll: (Boolean) -> Unit = {},
+    val onDeletePicked: () -> Unit = {},
+    val onDuplicatePicked: () -> Unit = {},
+    val onSetPickedVisible: (Boolean) -> Unit = {},
+    val onSetPickedLocked: (Boolean) -> Unit = {},
+    val onMergePicked: () -> Unit = {},
+    val onGroup: () -> Unit = {},
+    val onUngroup: () -> Unit = {},
+    val onToggleCollapsed: (String) -> Unit = {},
+    val onMergeVisible: () -> Unit = {},
+    val onFlatten: () -> Unit = {},
+    /** 0..5 = left, centre, right, top, middle, bottom; 6 / 7 = distribute horizontally / vertically. */
+    val onAlign: (Int) -> Unit = {}
 )
 
+/** Align / distribute choices, in [LayerPanelActions.onAlign] order. */
+private val alignChoices = listOf(
+    R.string.align_left to Icons.Default.AlignHorizontalLeft,
+    R.string.align_h_center to Icons.Default.AlignHorizontalCenter,
+    R.string.align_right to Icons.Default.AlignHorizontalRight,
+    R.string.align_top to Icons.Default.AlignVerticalTop,
+    R.string.align_v_center to Icons.Default.AlignVerticalCenter,
+    R.string.align_bottom to Icons.Default.AlignVerticalBottom,
+    R.string.distribute_h to Icons.Default.ViewColumn,
+    R.string.distribute_v to Icons.Default.TableRows
+)
+
+@Composable
+private fun AlignMenu(expanded: Boolean, onDismiss: () -> Unit, onAlign: (Int) -> Unit) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        alignChoices.forEachIndexed { i, (label, icon) ->
+            DropdownMenuItem(
+                text = { Text(stringResource(label)) },
+                leadingIcon = { Icon(icon, null) },
+                onClick = { onDismiss(); onAlign(i) }
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun LayersPanel(
     layers: List<Layer>,
@@ -124,6 +172,7 @@ fun LayersPanel(
     var showBlendMenu by remember { mutableStateOf(false) }
     var showActionsMenu by remember { mutableStateOf(false) }
     var showMaskMenu by remember { mutableStateOf(false) }
+    var showAlignMenu by remember { mutableStateOf(false) }
     var renameIndex by remember { mutableStateOf<Int?>(null) }
     val selectedLayer = layers.getOrNull(selectedIndex)
 
@@ -220,7 +269,9 @@ fun LayersPanel(
             }
         }
 
-        if (selectedLayer != null) {
+        if (actions.multiSelect) {
+            MultiSelectBar(layers, actions)
+        } else if (selectedLayer != null) {
             Spacer(Modifier.height(6.dp))
             Row(
                 Modifier.fillMaxWidth(),
@@ -418,6 +469,43 @@ fun LayersPanel(
                             enabled = selectedIndex > 0,
                             onClick = { showActionsMenu = false; onMergeDown() }
                         )
+                        HorizontalDivider()
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.layers_select_several)) },
+                            leadingIcon = { Icon(Icons.Default.DoneAll, null) },
+                            onClick = { showActionsMenu = false; actions.onSetMultiSelect(true) },
+                            modifier = Modifier.testTag("menu_layers_multi")
+                        )
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.layer_group)) },
+                            leadingIcon = { Icon(Icons.Default.CreateNewFolder, null) },
+                            onClick = { showActionsMenu = false; actions.onGroup() }
+                        )
+                        if (selectedLayer.type == LayerType.GROUP) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.layer_ungroup)) },
+                                leadingIcon = { Icon(Icons.Default.LayersClear, null) },
+                                onClick = { showActionsMenu = false; actions.onUngroup() }
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.layer_align_to_canvas)) },
+                            leadingIcon = { Icon(Icons.Default.AlignHorizontalCenter, null) },
+                            onClick = { showActionsMenu = false; showAlignMenu = true }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.layers_merge_visible)) },
+                            leadingIcon = { Icon(Icons.Default.CallMerge, null) },
+                            enabled = layers.size > 1,
+                            onClick = { showActionsMenu = false; actions.onMergeVisible() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.layers_flatten)) },
+                            leadingIcon = { Icon(Icons.Default.Layers, null) },
+                            enabled = layers.size > 1,
+                            onClick = { showActionsMenu = false; actions.onFlatten() }
+                        )
+                        HorizontalDivider()
                         DropdownMenuItem(
                             text = { Text(stringResource(R.string.layer_delete), color = MaterialTheme.colorScheme.error) },
                             leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
@@ -425,6 +513,7 @@ fun LayersPanel(
                             onClick = { showActionsMenu = false; onDelete() }
                         )
                     }
+                    AlignMenu(showAlignMenu, { showAlignMenu = false }, actions.onAlign)
                 }
             }
 
@@ -454,7 +543,7 @@ fun LayersPanel(
         if (layers.size > 1) {
             Spacer(Modifier.height(4.dp))
             Text(
-                stringResource(R.string.layer_reorder_hint),
+                stringResource(if (actions.multiSelect) R.string.layers_multi_hint else R.string.layer_reorder_hint),
                 color = Color.Gray,
                 fontSize = 10.sp,
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
@@ -467,6 +556,11 @@ fun LayersPanel(
         var rowPitchPx by remember { mutableFloatStateOf(0f) }
         val spacingPx = with(LocalDensity.current) { 6.dp.toPx() }
         val latestLayers by rememberUpdatedState(layers)
+        // Rows shown: top layer first; members of a folded group are hidden.
+        val rows = remember(layers, layers.map { it.isCollapsed to it.parentId }) {
+            layers.reversed().filter { !com.example.engine.LayerTree.insideCollapsed(layers, it) }
+        }
+        val latestRows by rememberUpdatedState(rows)
 
         LazyColumn(
             modifier = Modifier.fillMaxWidth().then(
@@ -475,9 +569,11 @@ fun LayersPanel(
             verticalArrangement = Arrangement.spacedBy(6.dp),
             contentPadding = PaddingValues(bottom = 8.dp)
         ) {
-            itemsIndexed(layers.reversed(), key = { _, layer -> layer.id }) { revIdx, layer ->
-                val actualIdx = layers.size - 1 - revIdx
-                val isSelected = actualIdx == selectedIndex
+            itemsIndexed(rows, key = { _, layer -> layer.id }) { _, layer ->
+                val actualIdx = layers.indexOf(layer)
+                val depth = com.example.engine.LayerTree.depth(layers, layer)
+                val isPicked = actions.multiSelect && layer.id in actions.pickedIds
+                val isSelected = if (actions.multiSelect) isPicked else actualIdx == selectedIndex
                 val isDragging = draggingId == layer.id
                 val layerId = layer.id
                 Row(
@@ -492,10 +588,17 @@ fun LayersPanel(
                         .clip(RoundedCornerShape(10.dp))
                         .background(if (isSelected || isDragging) StudioSurfaceVariant else Color.Transparent)
                         .border(if (isSelected) 1.5.dp else 0.dp, if (isSelected) IndigoPrimary else Color.Transparent, RoundedCornerShape(10.dp))
-                        .clickable { onSelectLayer(actualIdx) }
+                        .combinedClickable(
+                            onClick = { if (actions.multiSelect) actions.onTogglePicked(layer.id) else onSelectLayer(actualIdx) },
+                            // Long press: pick several layers.
+                            onLongClick = {
+                                if (!actions.multiSelect) { onSelectLayer(actualIdx); actions.onSetMultiSelect(true) }
+                                else actions.onTogglePicked(layer.id)
+                            }
+                        )
                         .padding(start = 0.dp, end = 4.dp, top = 6.dp, bottom = 6.dp)
-                        // Clipped layers are indented, as in Photoshop.
-                        .padding(start = if (layer.isClipped) 22.dp else 0.dp),
+                        // Group members and clipped layers are indented, as in Photoshop.
+                        .padding(start = (depth * 16).dp + if (layer.isClipped) 22.dp else 0.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     // Drag handle: drag up/down to reorder.
@@ -511,11 +614,14 @@ fun LayersPanel(
                                     },
                                     onDragEnd = {
                                         val list = latestLayers
+                                        val shown = latestRows
                                         val from = list.indexOfFirst { it.id == layerId }
                                         val pitch = if (rowPitchPx > 1f) rowPitchPx else 1f
-                                        // Screen order is reversed: dragging down moves the layer lower.
+                                        // Rows are top layer first: dragging down moves the layer lower.
                                         val steps = (dragOffset / pitch).roundToInt()
-                                        val to = (from - steps).coerceIn(0, list.size - 1)
+                                        val fromRow = shown.indexOfFirst { it.id == layerId }
+                                        val targetRow = (fromRow + steps).coerceIn(0, (shown.size - 1).coerceAtLeast(0))
+                                        val to = shown.getOrNull(targetRow)?.let { t -> list.indexOfFirst { it.id == t.id } } ?: from
                                         draggingId = null
                                         dragOffset = 0f
                                         if (from >= 0 && to != from) actions.onMoveLayer(from, to)
@@ -525,7 +631,25 @@ fun LayersPanel(
                             },
                         contentAlignment = Alignment.Center
                     ) {
-                        Icon(Icons.Default.DragHandle, contentDescription = stringResource(R.string.cd_layer_drag), tint = Color.Gray, modifier = Modifier.size(20.dp))
+                        if (actions.multiSelect) {
+                            Icon(
+                                if (isPicked) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
+                                contentDescription = stringResource(R.string.cd_selected),
+                                tint = if (isPicked) IndigoPrimary else Color.Gray, modifier = Modifier.size(22.dp)
+                            )
+                        } else {
+                            Icon(Icons.Default.DragHandle, contentDescription = stringResource(R.string.cd_layer_drag), tint = Color.Gray, modifier = Modifier.size(20.dp))
+                        }
+                    }
+                    if (layer.type == LayerType.GROUP) {
+                        // Fold / unfold the group.
+                        IconButton(onClick = { actions.onToggleCollapsed(layer.id) }, modifier = Modifier.size(width = 26.dp, height = 46.dp).testTag("btn_group_fold")) {
+                            Icon(
+                                if (layer.isCollapsed) Icons.Default.ChevronRight else Icons.Default.ExpandMore,
+                                contentDescription = stringResource(if (layer.isCollapsed) R.string.group_expand else R.string.group_collapse),
+                                tint = Color.LightGray, modifier = Modifier.size(20.dp)
+                            )
+                        }
                     }
 
                     if (layer.isClipped) {
@@ -634,6 +758,7 @@ fun LayersPanel(
                                     append(
                                         stringResource(
                                             when (layer.type) {
+                                                LayerType.GROUP -> R.string.layer_kind_group
                                                 LayerType.IMAGE -> R.string.layer_add_image
                                                 LayerType.TEXT -> R.string.layer_add_text
                                                 LayerType.ADJUSTMENT -> R.string.layer_add_adjustment
@@ -981,6 +1106,7 @@ private fun rememberMaskThumbnail(layer: Layer, docW: Int, docH: Int): ImageBitm
 private fun LayerThumbnailContent(layer: Layer, docW: Int, docH: Int) {
     when (layer.type) {
         LayerType.ADJUSTMENT -> Icon(Icons.Default.Tune, null, tint = IndigoPrimary)
+        LayerType.GROUP -> Icon(if (layer.isCollapsed) Icons.Default.Folder else Icons.Default.FolderOpen, null, tint = Color(0xFFFFC857))
         else -> {
             val thumb = rememberLayerThumbnail(layer, docW, docH)
             if (thumb != null) {
@@ -1050,4 +1176,77 @@ private fun ThinSlider(
             }
         }
     )
+}
+
+
+/** Multi-select mode: how many layers are picked and what to do with them. */
+@Composable
+private fun MultiSelectBar(layers: List<Layer>, actions: LayerPanelActions) {
+    val picked = layers.filter { it.id in actions.pickedIds }
+    val n = picked.size
+    var showAlign by remember { mutableStateOf(false) }
+    var confirmDelete by remember { mutableStateOf(false) }
+    if (confirmDelete) {
+        AlertDialog(
+            onDismissRequest = { confirmDelete = false },
+            title = { Text(stringResource(R.string.layers_delete_title, n)) },
+            text = { Text(stringResource(R.string.layers_delete_message)) },
+            confirmButton = {
+                TextButton(onClick = { confirmDelete = false; actions.onDeletePicked() }) {
+                    Text(stringResource(R.string.layer_delete), color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text(stringResource(R.string.action_cancel)) } }
+        )
+    }
+    Spacer(Modifier.height(6.dp))
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = { actions.onSetMultiSelect(false) }, modifier = Modifier.size(40.dp).testTag("btn_layers_multi_done")) {
+            Icon(Icons.Default.Close, contentDescription = stringResource(R.string.action_cancel), tint = Color.White)
+        }
+        Text(stringResource(R.string.layers_picked, n), color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, modifier = Modifier.weight(1f))
+        val all = n == layers.size
+        TextButton(onClick = { actions.onPickAll(!all) }) {
+            Text(stringResource(if (all) R.string.projects_select_none else R.string.projects_select_all), fontSize = 12.sp)
+        }
+    }
+    val enabled = n > 0
+    val allVisible = picked.all { it.isVisible }
+    val allLocked = picked.isNotEmpty() && picked.all { it.isLocked }
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        @Composable
+        fun Action(label: Int, icon: androidx.compose.ui.graphics.vector.ImageVector, tag: String, on: Boolean = enabled, tint: Color = Color.White, onClick: () -> Unit) {
+            OutlinedButton(
+                onClick = onClick, enabled = on,
+                shape = RoundedCornerShape(10.dp),
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                modifier = Modifier.height(38.dp).testTag(tag)
+            ) {
+                Icon(icon, null, modifier = Modifier.size(16.dp), tint = if (on) tint else Color.Gray)
+                Spacer(Modifier.width(4.dp))
+                Text(stringResource(label), fontSize = 12.sp, color = if (on) tint else Color.Gray)
+            }
+        }
+        Action(R.string.layer_group, Icons.Default.CreateNewFolder, "btn_layers_group") { actions.onGroup() }
+        Action(R.string.layers_merge, Icons.Default.CallMerge, "btn_layers_merge",
+            on = n >= 2 || picked.singleOrNull()?.type == LayerType.GROUP) { actions.onMergePicked() }
+        Action(R.string.layer_duplicate, Icons.Default.ContentCopy, "btn_layers_duplicate") { actions.onDuplicatePicked() }
+        Action(if (allVisible) R.string.layers_hide else R.string.layers_show,
+            if (allVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility, "btn_layers_visible") { actions.onSetPickedVisible(!allVisible) }
+        Action(if (allLocked) R.string.layers_unlock else R.string.layers_lock,
+            if (allLocked) Icons.Default.LockOpen else Icons.Default.Lock, "btn_layers_lock") { actions.onSetPickedLocked(!allLocked) }
+        Box {
+            Action(R.string.layers_align, Icons.Default.AlignHorizontalCenter, "btn_layers_align") { showAlign = true }
+            AlignMenu(showAlign, { showAlign = false }, actions.onAlign)
+        }
+        if (picked.any { it.type == LayerType.GROUP }) {
+            Action(R.string.layer_ungroup, Icons.Default.LayersClear, "btn_layers_ungroup") { actions.onUngroup() }
+        }
+        Action(R.string.layer_delete, Icons.Default.Delete, "btn_layers_delete", on = enabled && n < layers.size,
+            tint = MaterialTheme.colorScheme.error) { confirmDelete = true }
+    }
 }
