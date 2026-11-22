@@ -3,6 +3,7 @@ package com.example.engine
 import android.graphics.Bitmap
 import com.example.data.model.AdjustmentKind
 import com.example.data.model.AdjustmentLayerParams
+import com.example.data.model.LevelsChannel
 import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
@@ -28,13 +29,70 @@ object AdjustmentLayerEngine {
     /** True when [kind] with [p] leaves every pixel unchanged. */
     fun isIdentity(kind: AdjustmentKind, p: AdjustmentLayerParams): Boolean = when (kind) {
         AdjustmentKind.LEVELS -> p.levelsInBlack <= 0f && p.levelsInWhite >= 255f && p.levelsGamma == 1f &&
-            p.levelsOutBlack <= 0f && p.levelsOutWhite >= 255f
+            p.levelsOutBlack <= 0f && p.levelsOutWhite >= 255f &&
+            p.levelsRed.isIdentity() && p.levelsGreen.isIdentity() && p.levelsBlue.isIdentity()
         AdjustmentKind.EXPOSURE -> p.exposureEv == 0f && p.exposureOffset == 0f && p.exposureGamma == 1f
         AdjustmentKind.COLOR_BALANCE -> (p.balanceShadows + p.balanceMidtones + p.balanceHighlights).all { it == 0f }
         AdjustmentKind.PHOTO_FILTER -> p.photoFilterDensity <= 0f
         AdjustmentKind.BLACK_WHITE, AdjustmentKind.GRADIENT_MAP, AdjustmentKind.INVERT,
         AdjustmentKind.POSTERIZE, AdjustmentKind.THRESHOLD -> false
         else -> true
+    }
+
+    /**
+     * Photoshop's Hue/Saturation "Colorize": every pixel takes [p]'s hue and saturation, keeping
+     * its own lightness (shifted by the lightness slider). In place, unpremultiplied ARGB.
+     */
+    fun colorizePixels(px: IntArray, p: AdjustmentLayerParams) {
+        val hue = ((p.colorizeHue % 360f) + 360f) % 360f / 360f
+        val sat = (p.colorizeSaturation / 100f).coerceIn(0f, 1f)
+        val lig = (p.colorizeLightness / 100f).coerceIn(-1f, 1f)
+        fun hueToRgb(t0: Float, q: Float, pp: Float): Float {
+            var t = t0
+            if (t < 0f) t += 1f
+            if (t > 1f) t -= 1f
+            return when {
+                t < 1f / 6f -> pp + (q - pp) * 6f * t
+                t < 0.5f -> q
+                t < 2f / 3f -> pp + (q - pp) * (2f / 3f - t) * 6f
+                else -> pp
+            }
+        }
+        for (i in px.indices) {
+            val c = px[i]
+            val a = c ushr 24
+            if (a == 0) continue
+            val r = ((c shr 16) and 255) / 255f; val g = ((c shr 8) and 255) / 255f; val b = (c and 255) / 255f
+            // Lightness as Photoshop's HSL: (max + min) / 2, then the lightness slider.
+            var l = (maxOf(r, g, b) + minOf(r, g, b)) / 2f
+            l = if (lig >= 0f) l + (1f - l) * lig else l * (1f + lig)
+            val q = if (l < 0.5f) l * (1f + sat) else l + sat - l * sat
+            val pp = 2f * l - q
+            val nr = hueToRgb(hue + 1f / 3f, q, pp); val ng = hueToRgb(hue, q, pp); val nb = hueToRgb(hue - 1f / 3f, q, pp)
+            fun q8(v: Float) = (v * 255f + 0.5f).toInt().coerceIn(0, 255)
+            px[i] = (a shl 24) or (q8(nr) shl 16) or (q8(ng) shl 8) or q8(nb)
+        }
+    }
+
+    /** [source] colorized (see [colorizePixels]); a new bitmap. */
+    fun colorize(source: Bitmap, p: AdjustmentLayerParams): Bitmap {
+        val w = source.width; val h = source.height
+        val px = IntArray(w * h)
+        source.getPixels(px, 0, w, 0, 0, w, h)
+        colorizePixels(px, p)
+        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(px, 0, w, 0, 0, w, h) }
+    }
+
+    /** One channel's levels table: [channel] first, then [rgb]. */
+    fun levelsLut(channel: LevelsChannel, rgb: LevelsChannel): IntArray {
+        fun one(l: LevelsChannel, v: Float): Float {
+            val inB = l.inBlack.coerceIn(0f, 253f)
+            val inW = l.inWhite.coerceIn(inB + 2f, 255f)
+            val gamma = l.gamma.coerceIn(0.1f, 9.99f)
+            val t = ((v - inB) / (inW - inB)).coerceIn(0f, 1f).pow(1f / gamma)
+            return l.outBlack + (l.outWhite - l.outBlack) * t
+        }
+        return IntArray(256) { v -> one(rgb, one(channel, v.toFloat())).roundToInt().coerceIn(0, 255) }
     }
 
     /** Applies [kind] to [source]; returns a new bitmap, or [source] when nothing changes. */
@@ -81,15 +139,10 @@ object AdjustmentLayerEngine {
     /** A per-pixel function (input and output 0xRRGGBB in the low bits) for [kind]. */
     private fun pixelOp(kind: AdjustmentKind, p: AdjustmentLayerParams): (Int) -> Int = when (kind) {
         AdjustmentKind.LEVELS -> {
-            val lut = IntArray(256)
-            val inB = p.levelsInBlack.coerceIn(0f, 253f)
-            val inW = p.levelsInWhite.coerceIn(inB + 2f, 255f)
-            val gamma = p.levelsGamma.coerceIn(0.1f, 9.99f)
-            for (v in 0..255) {
-                val t = ((v - inB) / (inW - inB)).coerceIn(0f, 1f).pow(1f / gamma)
-                lut[v] = (p.levelsOutBlack + (p.levelsOutWhite - p.levelsOutBlack) * t).roundToInt().coerceIn(0, 255)
-            }
-            ({ c: Int -> (lut[(c shr 16) and 255] shl 16) or (lut[(c shr 8) and 255] shl 8) or lut[c and 255] })
+            // Each channel's own levels, then the RGB levels on top.
+            val rgb = LevelsChannel(p.levelsInBlack, p.levelsInWhite, p.levelsGamma, p.levelsOutBlack, p.levelsOutWhite)
+            val lr = levelsLut(p.levelsRed, rgb); val lg = levelsLut(p.levelsGreen, rgb); val lb = levelsLut(p.levelsBlue, rgb)
+            ({ c: Int -> (lr[(c shr 16) and 255] shl 16) or (lg[(c shr 8) and 255] shl 8) or lb[c and 255] })
         }
         AdjustmentKind.EXPOSURE -> {
             // In linear light, like Photoshop: exposure scales, offset shifts the shadows, gamma bends.
@@ -217,6 +270,14 @@ object AdjustmentLayerEngine {
         put("levelsInBlack", p.levelsInBlack.toDouble()); put("levelsInWhite", p.levelsInWhite.toDouble())
         put("levelsGamma", p.levelsGamma.toDouble()); put("levelsOutBlack", p.levelsOutBlack.toDouble())
         put("levelsOutWhite", p.levelsOutWhite.toDouble())
+        if (p.colorize) {
+            put("colorize", true); put("colorizeHue", p.colorizeHue.toDouble())
+            put("colorizeSaturation", p.colorizeSaturation.toDouble()); put("colorizeLightness", p.colorizeLightness.toDouble())
+        }
+        fun ch(l: LevelsChannel) = JSONArray().put(l.inBlack.toDouble()).put(l.inWhite.toDouble()).put(l.gamma.toDouble()).put(l.outBlack.toDouble()).put(l.outWhite.toDouble())
+        if (!p.levelsRed.isIdentity()) put("levelsRed", ch(p.levelsRed))
+        if (!p.levelsGreen.isIdentity()) put("levelsGreen", ch(p.levelsGreen))
+        if (!p.levelsBlue.isIdentity()) put("levelsBlue", ch(p.levelsBlue))
         put("exposureEv", p.exposureEv.toDouble()); put("exposureOffset", p.exposureOffset.toDouble())
         put("exposureGamma", p.exposureGamma.toDouble())
         put("balanceShadows", arr(p.balanceShadows)); put("balanceMidtones", arr(p.balanceMidtones))
@@ -233,10 +294,21 @@ object AdjustmentLayerEngine {
         val d = AdjustmentLayerParams()
         if (o == null) return d
         fun f(k: String, v: Float) = o.optDouble(k, v.toDouble()).toFloat()
+        fun chFrom(a: JSONArray?): LevelsChannel {
+            if (a == null || a.length() < 5) return LevelsChannel()
+            fun g(i: Int, def: Float) = a.optDouble(i, def.toDouble()).toFloat()
+            return LevelsChannel(g(0, 0f).coerceIn(0f, 253f), g(1, 255f).coerceIn(2f, 255f), g(2, 1f).coerceIn(0.1f, 9.99f),
+                g(3, 0f).coerceIn(0f, 255f), g(4, 255f).coerceIn(0f, 255f))
+        }
         return AdjustmentLayerParams(
             levelsInBlack = f("levelsInBlack", d.levelsInBlack), levelsInWhite = f("levelsInWhite", d.levelsInWhite),
             levelsGamma = f("levelsGamma", d.levelsGamma), levelsOutBlack = f("levelsOutBlack", d.levelsOutBlack),
             levelsOutWhite = f("levelsOutWhite", d.levelsOutWhite),
+            levelsRed = chFrom(o.optJSONArray("levelsRed")), levelsGreen = chFrom(o.optJSONArray("levelsGreen")),
+            levelsBlue = chFrom(o.optJSONArray("levelsBlue")),
+            colorize = o.optBoolean("colorize", false), colorizeHue = f("colorizeHue", d.colorizeHue).coerceIn(0f, 360f),
+            colorizeSaturation = f("colorizeSaturation", d.colorizeSaturation).coerceIn(0f, 100f),
+            colorizeLightness = f("colorizeLightness", d.colorizeLightness).coerceIn(-100f, 100f),
             exposureEv = f("exposureEv", d.exposureEv), exposureOffset = f("exposureOffset", d.exposureOffset),
             exposureGamma = f("exposureGamma", d.exposureGamma),
             balanceShadows = arr(o, "balanceShadows", d.balanceShadows), balanceMidtones = arr(o, "balanceMidtones", d.balanceMidtones),

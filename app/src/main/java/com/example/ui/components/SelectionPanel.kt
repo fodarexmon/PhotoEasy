@@ -63,6 +63,11 @@ fun SelectionPanel(
     onInvertClick: () -> Unit,
     onClearClick: () -> Unit,
     onCopyLayerClick: () -> Unit,
+    /** Pixel commands on the selection (null hides them). */
+    onCutLayerClick: (() -> Unit)? = null,
+    onDeletePixelsClick: (() -> Unit)? = null,
+    onFillClick: (() -> Unit)? = null,
+    onStrokeClick: (() -> Unit)? = null,
     onUndoSelection: () -> Unit,
     onRedoSelection: () -> Unit,
     onSelectSubject: () -> Unit = {},
@@ -428,6 +433,37 @@ fun SelectionPanel(
                 Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
                 Text(stringResource(R.string.select_copy_layer), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
+        // Edit commands on the selected pixels of the layer (Photoshop's Edit menu).
+        if (onCutLayerClick != null || onDeletePixelsClick != null || onFillClick != null || onStrokeClick != null) {
+            Row(
+                Modifier.horizontalScroll(rememberScrollState()).padding(start = 12.dp, end = 12.dp, bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                onCutLayerClick?.let {
+                    OutlinedButton(onClick = it, modifier = Modifier.heightIn(min = 44.dp).testTag("btn_sel_cut_layer")) {
+                        Icon(Icons.Default.ContentCut, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(stringResource(R.string.select_cut_layer), fontSize = 12.sp)
+                    }
+                }
+                onDeletePixelsClick?.let {
+                    OutlinedButton(onClick = it, modifier = Modifier.heightIn(min = 44.dp).testTag("btn_sel_delete")) {
+                        Text(stringResource(R.string.select_delete_pixels), fontSize = 12.sp)
+                    }
+                }
+                onFillClick?.let {
+                    OutlinedButton(onClick = it, modifier = Modifier.heightIn(min = 44.dp).testTag("btn_sel_fill")) {
+                        Text(stringResource(R.string.sel_fill_more), fontSize = 12.sp)
+                    }
+                }
+                onStrokeClick?.let {
+                    OutlinedButton(onClick = it, modifier = Modifier.heightIn(min = 44.dp).testTag("btn_sel_stroke")) {
+                        Text(stringResource(R.string.sel_stroke_more), fontSize = 12.sp)
+                    }
+                }
             }
         }
     }

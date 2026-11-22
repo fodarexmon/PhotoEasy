@@ -69,6 +69,8 @@ import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Transform
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -182,6 +184,8 @@ fun EditorScreen(
     val onSelectLayer: (Int) -> Unit = { viewModel.selectLayer(it) }
     val onUpdateLayer: ((Layer) -> Unit) -> Unit = { action -> viewModel.updateSelectedLayer(action) }
     val onUpdateLayerTransient: ((Layer) -> Unit) -> Unit = { action -> viewModel.updateSelectedLayerTransient(action) }
+    // Look edits (filters, LUTs, presets, adjustments): limited to the selection when there is one.
+    val onUpdateLookTransient: ((Layer) -> Unit) -> Unit = { action -> viewModel.updateLookTransient(action) }
     val onCommitHistoryState: () -> Unit = { viewModel.commitPendingHistory() }
     val onCancelHistoryState: () -> Unit = { viewModel.cancelHistoryTransaction() }
     val onOpacityChange: (Float) -> Unit = { op -> viewModel.updateSelectedLayerTransient { l -> l.opacity = op } }
@@ -376,6 +380,10 @@ fun EditorScreen(
     val transformSnap = uiState.transformSnap
     val onToggleTransformSnap: () -> Unit = { viewModel.toggleTransformSnap() }
     val maskBrushOpacity = uiState.maskBrushOpacity
+    // Blend If dialog for the selected layer.
+    var showBlendIf by remember { mutableStateOf(false) }
+    // Smart filter being edited: (layer id, filter id).
+    var editingSmartFilter by remember { mutableStateOf<Pair<String, String>?>(null) }
     val layerActions = com.example.ui.components.LayerPanelActions(
         onToggleVisibilityAt = { viewModel.toggleLayerVisibilityAt(it) },
         onToggleLockAt = { viewModel.toggleLayerLockAt(it) },
@@ -386,12 +394,43 @@ fun EditorScreen(
         onSelectLayerPixels = { viewModel.selectLayerPixels(it) },
         onMaskGradient = { viewModel.applyMaskGradient(it) },
         onMaskBrushHardnessChange = { viewModel.setMaskBrushHardness(it) },
-        onMaskBrushOpacityChange = { viewModel.setMaskBrushOpacity(it) }
+        onMaskBrushOpacityChange = { viewModel.setMaskBrushOpacity(it) },
+        multiSelect = uiState.isLayerMultiSelect,
+        pickedIds = uiState.selectedLayerIds,
+        onSetMultiSelect = { viewModel.setLayerMultiSelect(it) },
+        onTogglePicked = { viewModel.toggleLayerPicked(it) },
+        onPickAll = { viewModel.pickAllLayers(it) },
+        onDeletePicked = { viewModel.deleteLayers() },
+        onDuplicatePicked = { viewModel.duplicateLayers() },
+        onSetPickedVisible = { viewModel.setLayersVisible(it) },
+        onSetPickedLocked = { viewModel.setLayersLocked(it) },
+        onMergePicked = { viewModel.mergeLayers() },
+        onGroup = { viewModel.groupLayers() },
+        onUngroup = { viewModel.ungroupLayers() },
+        onToggleCollapsed = { viewModel.toggleGroupCollapsed(it) },
+        onMergeVisible = { viewModel.mergeVisibleLayers() },
+        onFlatten = { viewModel.flattenImage() },
+        onAlign = { viewModel.alignLayers(com.example.ui.viewmodel.EditorViewModel.LayerAlign.values()[it]) },
+        onBlendIf = { showBlendIf = true },
+        onEditAdjustment = { idx -> viewModel.selectLayer(idx); onToolSelect(ActiveTool.ADJUST) },
+        onConvertToSmartObject = { viewModel.convertToSmartObject() },
+        onRasterize = { viewModel.rasterizeSmartObject() },
+        onEditSmartFilter = { layerId, filterId -> editingSmartFilter = layerId to filterId },
+        onToggleSmartFilter = { layerId, filterId -> viewModel.setSmartFilter(layerId, filterId, transient = false) { it.copy(enabled = !it.enabled) } },
+        onRemoveSmartFilter = { layerId, filterId -> viewModel.removeSmartFilter(layerId, filterId) },
+        onSetSmartFiltersVisible = { layerId, v -> viewModel.setSmartFiltersVisible(layerId, v) },
+        onSmartMaskFromSelection = { viewModel.smartFilterMaskFromSelection(it) },
+        onInvertSmartMask = { viewModel.invertSmartFilterMask(it) },
+        onClearSmartMask = { viewModel.clearSmartFilterMask(it) },
+        onOpenEffects = { onToolSelect(ActiveTool.EFFECTS) },
+        onMoveSmartFilterUp = { layerId, filterId -> viewModel.moveSmartFilter(layerId, filterId, up = true) }
     )
     var currentCropRect by remember { mutableStateOf<android.graphics.RectF?>(null) }
     var showExportDialog by remember { mutableStateOf(false) }
     var showTopMenu by remember { mutableStateOf(false) }
     var showRenameDialog by remember { mutableStateOf(false) }
+    // Edit > Fill (1) / Edit > Stroke (2) dialog for the selection, 0 = closed.
+    var selectionFillStroke by remember { mutableIntStateOf(0) }
     var showLiquify by remember { mutableStateOf(false) }
     var liquifyFaceTab by remember { mutableStateOf(false) }
     var showFrequencySeparation by remember { mutableStateOf(false) }
@@ -819,10 +858,10 @@ fun EditorScreen(
                                 kind = adjKind,
                                 adjustments = selectedLayer.adjustments,
                                 params = selectedLayer.adjustmentParams,
-                                onChange = { a, p -> onUpdateLayerTransient { l -> l.adjustments = a; l.adjustmentParams = p } },
+                                onChange = { a, p -> onUpdateLookTransient { l -> l.adjustments = a; l.adjustmentParams = p } },
                                 onCommit = onCommitHistoryState,
                                 onReset = {
-                                    onUpdateLayerTransient { l ->
+                                    onUpdateLookTransient { l ->
                                         l.adjustments = ColorAdjustments()
                                         l.adjustmentParams = com.example.data.model.AdjustmentLayerParams()
                                     }
@@ -839,19 +878,19 @@ fun EditorScreen(
                                 },
                                 adjustments = layer.adjustments,
                                 onAdjustmentsChange = { newAdj ->
-                                    onUpdateLayerTransient { l -> l.adjustments = newAdj }
+                                    onUpdateLookTransient { l -> l.adjustments = newAdj }
                                 },
                                 onAdjustmentsCommit = onCommitHistoryState,
                                 onSmartAutoClick = onSmartAutoClick,
                                 onResetAll = {
-                                    onUpdateLayerTransient { l -> l.adjustments = ColorAdjustments() }
+                                    onUpdateLookTransient { l -> l.adjustments = ColorAdjustments() }
                                     onCommitHistoryState()
                                 },
                                 onCompareChange = { compareOriginal = it },
                                 smartAutoStrength = smartAutoStrength,
                                 onSmartAutoStrengthChange = onSmartAutoStrengthChange,
                                 onSmartAutoStrengthCommit = onCommitHistoryState,
-                                onCreateAdjustmentLayerFromSelection = onCreateAdjustmentLayerFromSelection,
+                                onCreateAdjustmentLayerFromSelection = null,
                                 sourceBitmap = layer.bitmap,
                                 curvePickMode = curvePickMode,
                                 onCurvePickModeChange = { curvePickMode = it },
@@ -862,7 +901,14 @@ fun EditorScreen(
                                 onHslTargetPropertyChange = { hslTargetProperty = it; if (it != null) { curvePickMode = null; replacePick = null } },
                                 onReplacePickChange = { replacePick = it; if (it != null) curvePickMode = null },
                                 hasActiveSelection = hasSel,
-                                onClearSelection = onClearSelection
+                                onClearSelection = onClearSelection,
+                                hslHeader = if (adjKind == com.example.data.model.AdjustmentKind.HUE_SATURATION) ({
+                                    com.example.ui.components.ColorizeControls(
+                                        params = layer.adjustmentParams,
+                                        onChange = { p -> onUpdateLookTransient { l -> l.adjustmentParams = p } },
+                                        onCommit = onCommitHistoryState
+                                    )
+                                }) else null
                             )
                         }
                     }
@@ -905,9 +951,10 @@ fun EditorScreen(
                                 }
                             }
                             FiltersPanel(
-                                onOpenLiquify = { if (viewModel.canLiquifySelectedLayer()) { liquifyFaceTab = false; showLiquify = true } },
-                                onOpenFaceLiquify = { if (viewModel.canLiquifySelectedLayer()) { liquifyFaceTab = true; showLiquify = true } },
-                                onOpenFrequencySeparation = { if (viewModel.canLiquifySelectedLayer()) showFrequencySeparation = true },
+                                onOpenLiquify = { if (viewModel.canLiquifySelectedLayer() && viewModel.requireRasterized { liquifyFaceTab = false; showLiquify = true }) { liquifyFaceTab = false; showLiquify = true } },
+                                onOpenFaceLiquify = { if (viewModel.canLiquifySelectedLayer() && viewModel.requireRasterized { liquifyFaceTab = true; showLiquify = true }) { liquifyFaceTab = true; showLiquify = true } },
+                                onOpenAiColorize = { viewModel.openAiColorize() },
+                                onOpenFrequencySeparation = { if (viewModel.canLiquifySelectedLayer() && viewModel.requireRasterized { showFrequencySeparation = true }) showFrequencySeparation = true },
                                 hasSelection = hasActiveSelectionCached,
                                 onSmoothSelection = { viewModel.smoothSelectionOnLayer() },
                                 initialTab = if (activeTool == ActiveTool.EFFECTS) com.example.ui.components.FilterPanelTab.PRO_EFFECTS else com.example.ui.components.FilterPanelTab.PRESETS,
@@ -916,14 +963,14 @@ fun EditorScreen(
                                 sourceBitmap = previewSource,
                                 adjustments = layer.adjustments,
                                 // A preset filter and an imported LUT are alternative looks.
-                                onPreviewFilter = { filter -> onUpdateLayerTransient { l -> l.filter = filter; l.lutId = null } },
+                                onPreviewFilter = { filter -> onUpdateLookTransient { l -> l.filter = filter; l.lutId = null } },
                                 selectedLutId = layer.lutId,
                                 luts = luts,
                                 customPresets = customPresets,
                                 favorites = favoriteFilters,
-                                onPreviewLut = { id -> onUpdateLayerTransient { l -> l.filter = FilterType.NONE; l.lutId = id } },
+                                onPreviewLut = { id -> onUpdateLookTransient { l -> l.filter = FilterType.NONE; l.lutId = id } },
                                 onApplyCustomPreset = { p ->
-                                    onUpdateLayerTransient { l ->
+                                    onUpdateLookTransient { l ->
                                         l.adjustments = p.adjustments.copy()
                                         l.filter = p.filter
                                         l.filterIntensity = p.intensity
@@ -936,7 +983,22 @@ fun EditorScreen(
                                 onCountLutUsage = { id -> viewModel.countProjectsUsingLut(id) },
                                 onSaveLook = onSaveLook,
                                 onDeleteCustomPreset = onDeleteCustomPreset,
-                                onIntensityChange = { intensity -> onUpdateLayerTransient { l -> l.filterIntensity = intensity } },
+                                onIntensityChange = { intensity -> onUpdateLookTransient { l -> l.filterIntensity = intensity } },
+                                onEditPresetAsSliders = {
+                                    val converted = com.example.engine.PresetSliders.toAdjustments(layer.filter, layer.filterIntensity)
+                                    if (converted != null) {
+                                        onUpdateLookTransient { l ->
+                                            l.adjustments = com.example.engine.PresetSliders.merge(l.adjustments, converted.adjustments)
+                                            l.filter = FilterType.NONE
+                                            l.filterIntensity = 1f
+                                        }
+                                        onCommitHistoryState()
+                                        if (!converted.exact) {
+                                            android.widget.Toast.makeText(context, context.getString(R.string.preset_to_sliders_partial), android.widget.Toast.LENGTH_LONG).show()
+                                        }
+                                        onToolSelect(ActiveTool.ADJUST)
+                                    }
+                                },
                                 onCompareChange = { compareOriginal = it },
                                 onApply = { onCommitHistoryState(); onToolSelect(ActiveTool.NONE) },
                                 onCancel = { onCancelHistoryState(); onToolSelect(ActiveTool.NONE) },
@@ -1047,6 +1109,10 @@ fun EditorScreen(
                             onInvertClick = onInvertSelection,
                             onClearClick = onClearSelection,
                             onCopyLayerClick = onCopySelectionToLayer,
+                            onCutLayerClick = { viewModel.cutSelectionToNewLayer() },
+                            onDeletePixelsClick = { viewModel.deleteSelectedPixels() },
+                            onFillClick = { selectionFillStroke = 1 },
+                            onStrokeClick = { selectionFillStroke = 2 },
                             onUndoSelection = onUndoSelection,
                             onRedoSelection = onRedoSelection,
                             onSelectSubject = onSelectSubject,
@@ -1718,17 +1784,75 @@ fun EditorScreen(
         )
     }
 
+    uiState.aiColorize?.let { st ->
+        com.example.ui.components.AiColorizeDialog(
+            state = st,
+            onDownload = { viewModel.downloadAiModel() },
+            onColorize = { viewModel.runAiColorize(it) },
+            onDeleteModel = { viewModel.deleteAiModel() },
+            onDismiss = { viewModel.closeAiColorize() }
+        )
+    }
+    if (uiState.askRasterize) {
+        AlertDialog(
+            onDismissRequest = { viewModel.answerRasterize(false) },
+            title = { Text(stringResource(R.string.rasterize_title)) },
+            text = { Text(stringResource(R.string.rasterize_message)) },
+            confirmButton = { TextButton(onClick = { viewModel.answerRasterize(true) }, modifier = Modifier.testTag("btn_rasterize_ok")) { Text(stringResource(R.string.rasterize_ok)) } },
+            dismissButton = { TextButton(onClick = { viewModel.answerRasterize(false) }) { Text(stringResource(R.string.action_cancel)) } }
+        )
+    }
+    editingSmartFilter?.let { (layerId, filterId) ->
+        val f = project.layers.firstOrNull { it.id == layerId }?.smartFilters?.firstOrNull { it.id == filterId }
+        if (f == null) editingSmartFilter = null else {
+            com.example.ui.components.SmartFilterDialog(
+                filter = f,
+                onChange = { nf -> viewModel.setSmartFilter(layerId, filterId, transient = true) { nf } },
+                onDone = { editingSmartFilter = null; onCommitHistoryState() },
+                onCancel = { editingSmartFilter = null; onCancelHistoryState() }
+            )
+        }
+    }
+
+    if (showBlendIf) {
+        val biLayer = project.layers.getOrNull(selectedLayerIndex)
+        if (biLayer == null) showBlendIf = false else {
+            com.example.ui.components.BlendIfDialog(
+                initial = biLayer.blendIf,
+                onChange = { b -> onUpdateLayerTransient { l -> l.blendIf = b } },
+                onApply = { showBlendIf = false; onCommitHistoryState() },
+                onCancel = { showBlendIf = false; onCancelHistoryState() }
+            )
+        }
+    }
+
+    if (selectionFillStroke != 0) {
+        com.example.ui.components.SelectionFillStrokeDialog(
+            stroke = selectionFillStroke == 2,
+            initialColor = uiState.retouchBrush.fillColor,
+            onDismiss = { selectionFillStroke = 0 },
+            onFill = { c, o -> selectionFillStroke = 0; viewModel.fillSelection(c, o) },
+            onStroke = { c, w, p, o -> selectionFillStroke = 0; viewModel.strokeSelection(c, w, p, o) }
+        )
+    }
+
     if (showLiquify) {
         val liqLayer = project.layers.getOrNull(selectedLayerIndex)
         val liqSource = liqLayer?.bitmap?.takeIf { !it.isRecycled && liqLayer.type == com.example.data.model.LayerType.IMAGE }
         if (liqSource == null) {
             showLiquify = false
         } else {
+            // Outside the selection is frozen (Photoshop's Liquify on a selection).
+            val liqSelection = remember(liqSource, uiState.selectionMask, hasActiveSelectionCached) {
+                if (!hasActiveSelectionCached) null else viewModel.selectionOnLayerPreview(liqLayer!!)
+            }
+            DisposableEffect(liqSelection) { onDispose { liqSelection?.let { if (!it.isRecycled) it.recycle() } } }
             com.example.ui.components.LiquifyDialog(
                 source = liqSource,
                 onDismiss = { showLiquify = false },
                 onApply = { engine -> showLiquify = false; viewModel.applyLiquify(engine) },
-                startOnFaceTab = liquifyFaceTab
+                startOnFaceTab = liquifyFaceTab,
+                selection = liqSelection
             )
         }
     }

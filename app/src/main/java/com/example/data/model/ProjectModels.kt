@@ -79,7 +79,24 @@ enum class FilterType(val displayName: String, val resId: Int) {
     FUJI_FILM("Fuji Film", R.string.filter_fuji_film),
     TRI_X_BW("Tri-X B&W", R.string.filter_tri_x_bw),
     FADED_MATTE("Faded Matte", R.string.filter_faded_matte),
-    LIGHT_LEAK("Light Leak", R.string.filter_light_leak)
+    LIGHT_LEAK("Light Leak", R.string.filter_light_leak),
+    BRIGHT_AIRY("Bright & Airy", R.string.filter_bright_airy),
+    CLEAN_PORTRAIT("Clean Portrait", R.string.filter_clean_portrait),
+    MOODY_FOREST("Moody Forest", R.string.filter_moody_forest),
+    VELVIA("Velvia", R.string.filter_velvia),
+    DESERT_EARTH("Desert Earth", R.string.filter_desert_earth),
+    SUNSET_BOOST("Sunset Boost", R.string.filter_sunset_boost),
+    KODAK_GOLD("Kodak Gold", R.string.filter_kodak_gold),
+    CLASSIC_CHROME("Classic Chrome", R.string.filter_classic_chrome),
+    CINESTILL_800T("CineStill 800T", R.string.filter_cinestill_800t),
+    EKTAR("Ektar", R.string.filter_ektar),
+    URBAN_STREET("Urban Street", R.string.filter_urban_street),
+    NEON_NIGHT("Neon Night", R.string.filter_neon_night),
+    BW_RED_FILTER("B&W Red Filter", R.string.filter_bw_red),
+    INFRARED("Infrared", R.string.filter_infrared),
+    FOOD("Food", R.string.filter_food),
+    OIL_PAINTING("Oil Painting", R.string.filter_oil_painting),
+    CHARCOAL("Charcoal Drawing", R.string.filter_charcoal)
 }
 
 /**
@@ -110,6 +127,27 @@ enum class AdjustmentKind(val labelRes: Int) {
 }
 
 /** Settings of the adjustment kinds that are not plain [ColorAdjustments]. Immutable. */
+/** One Smart Filter: a Pro effect with its settings, shown or hidden, with its own opacity and blend mode. */
+data class SmartFilter(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val effect: ProFilterType,
+    val params: com.example.engine.ProEffectParams,
+    val enabled: Boolean = true,
+    val opacity: Float = 1f,
+    val blendMode: BlendModeType = BlendModeType.NORMAL
+)
+
+/** Levels of one colour channel: input black / gamma / white and output black / white (0..255). */
+data class LevelsChannel(
+    val inBlack: Float = 0f,
+    val inWhite: Float = 255f,
+    val gamma: Float = 1f,
+    val outBlack: Float = 0f,
+    val outWhite: Float = 255f
+) {
+    fun isIdentity(): Boolean = inBlack <= 0f && inWhite >= 255f && gamma == 1f && outBlack <= 0f && outWhite >= 255f
+}
+
 data class AdjustmentLayerParams(
     // Levels (0..255 input / output, gamma 0.1..9.99)
     val levelsInBlack: Float = 0f,
@@ -141,7 +179,16 @@ data class AdjustmentLayerParams(
     val gradientReverse: Boolean = false,
     // Posterize levels 2..255, threshold level 1..255
     val posterizeLevels: Int = 4,
-    val thresholdLevel: Int = 128
+    val thresholdLevel: Int = 128,
+    // Levels per channel (applied before the RGB levels above, as in Photoshop).
+    val levelsRed: LevelsChannel = LevelsChannel(),
+    val levelsGreen: LevelsChannel = LevelsChannel(),
+    val levelsBlue: LevelsChannel = LevelsChannel(),
+    // Hue/Saturation "Colorize": one hue (0..360), saturation 0..100, lightness -100..100.
+    val colorize: Boolean = false,
+    val colorizeHue: Float = 0f,
+    val colorizeSaturation: Float = 25f,
+    val colorizeLightness: Float = 0f
 ) {
     // FloatArray fields: compare by content (used to skip redundant renders and undo steps).
     override fun equals(other: Any?): Boolean {
@@ -156,7 +203,10 @@ data class AdjustmentLayerParams(
             bwTintSaturation == other.bwTintSaturation && photoFilterColor == other.photoFilterColor &&
             photoFilterDensity == other.photoFilterDensity && photoFilterPreserveLuminosity == other.photoFilterPreserveLuminosity &&
             gradientStart == other.gradientStart && gradientEnd == other.gradientEnd && gradientReverse == other.gradientReverse &&
-            posterizeLevels == other.posterizeLevels && thresholdLevel == other.thresholdLevel
+            posterizeLevels == other.posterizeLevels && thresholdLevel == other.thresholdLevel &&
+            levelsRed == other.levelsRed && levelsGreen == other.levelsGreen && levelsBlue == other.levelsBlue &&
+            colorize == other.colorize && colorizeHue == other.colorizeHue &&
+            colorizeSaturation == other.colorizeSaturation && colorizeLightness == other.colorizeLightness
     }
 
     override fun hashCode(): Int =
@@ -170,11 +220,34 @@ data class AdjustmentLayerParams(
  */
 class LayerBefore(val bitmap: Bitmap, val contentWidth: Float, val contentHeight: Float)
 
+/**
+ * Blend If: the layer shows only where its own pixels ([thisLow]..[thisHigh]) and the pixels
+ * under it ([underLow]..[underHigh]) are in range, measured on [channel] (0 = grey / luminosity,
+ * 1 = red, 2 = green, 3 = blue), 0..255. Each end is a pair: equal values give a hard edge, a
+ * split pair (Alt-drag in Photoshop) fades between its two values.
+ */
+data class BlendIf(
+    val channel: Int = 0,
+    val thisLow0: Float = 0f, val thisLow1: Float = 0f, val thisHigh0: Float = 255f, val thisHigh1: Float = 255f,
+    val underLow0: Float = 0f, val underLow1: Float = 0f, val underHigh0: Float = 255f, val underHigh1: Float = 255f
+) {
+    val thisIsDefault: Boolean get() = thisLow1 <= 0f && thisHigh0 >= 255f
+    val underIsDefault: Boolean get() = underLow1 <= 0f && underHigh0 >= 255f
+    /** True when it hides nothing. */
+    fun isIdentity(): Boolean = thisIsDefault && underIsDefault
+}
+
 enum class LayerType {
     IMAGE,
     TEXT,
     COLOR_FILL,
-    ADJUSTMENT
+    ADJUSTMENT,
+    /**
+     * A layer group (Photoshop's folder): its members are the layers whose [Layer.parentId] is
+     * its id, kept directly below it in the list. Drawn as one unit with its own opacity, blend
+     * mode, mask and visibility.
+     */
+    GROUP
 }
 
 /** Direction of a layer-mask gradient (revealed -> hidden). */
@@ -297,6 +370,21 @@ data class ColorAdjustments(
     val vibrance: Float = 0f,      // -100 to 100 (saturation that protects skin and saturated colours)
     val clarity: Float = 0f,       // -100 to 100 (local mid-tone contrast)
     val dehaze: Float = 0f,        // -100 to 100
+    /** Noise reduction 0..100 (luminance, edge preserving, and colour noise). */
+    val noiseReduction: Float = 0f,
+    /** Film grain (Camera Raw): amount 0..100, size 0..100, roughness 0..100. */
+    val grainAmount: Float = 0f,
+    val grainSize: Float = 25f,
+    val grainRoughness: Float = 50f,
+    /**
+     * Color Grading (Camera Raw / Lightroom): a hue (0..360) and saturation (0..100) for the
+     * shadows, midtones and highlights; balance (-100..100) moves the split towards shadows or
+     * highlights, blending (0..100) widens the overlap.
+     */
+    val gradeShadowHue: Float = 220f, val gradeShadowSat: Float = 0f,
+    val gradeMidHue: Float = 30f, val gradeMidSat: Float = 0f,
+    val gradeHighHue: Float = 45f, val gradeHighSat: Float = 0f,
+    val gradeBalance: Float = 0f, val gradeBlending: Float = 50f,
     // Curves (control points in [0..255] range)
     val curvesRgb: List<PointF> = listOf(PointF(0f, 0f), PointF(255f, 255f)),
     val curvesRed: List<PointF> = listOf(PointF(0f, 0f), PointF(255f, 255f)),
@@ -338,6 +426,8 @@ data class ColorAdjustments(
                 temperature == 0f && tint == 0f && exposure == 0f &&
                 highlights == 0f && shadows == 0f && sharpness == 0f && vignette == 0f &&
                 whites == 0f && blacks == 0f && vibrance == 0f && clarity == 0f && dehaze == 0f &&
+                noiseReduction == 0f && grainAmount == 0f &&
+                gradeShadowSat == 0f && gradeMidSat == 0f && gradeHighSat == 0f &&
                 !hasCurves() && !hasHsl() && effectiveReplacements().none { it.enabled } && !replacePreviewMask && !colorizeEnabled
 
     fun hasHsl(): Boolean = effectiveHslBands().values.any { !it.isIdentity() } || colorizeEnabled
@@ -486,7 +576,22 @@ data class Layer(
     var exifTags: Map<String, String>? = null,
     /** Adjustment layers: which Photoshop-style adjustment this is, and its own settings. */
     var adjustmentKind: AdjustmentKind = AdjustmentKind.GENERAL,
-    var adjustmentParams: AdjustmentLayerParams = AdjustmentLayerParams()
+    var adjustmentParams: AdjustmentLayerParams = AdjustmentLayerParams(),
+    /** The group this layer belongs to (id of a [LayerType.GROUP] layer), or null at the top level. */
+    var parentId: String? = null,
+    /** Groups: members hidden in the layers panel. */
+    var isCollapsed: Boolean = false,
+    /** Photoshop's Blend If (Layer Style > Blending Options). */
+    var blendIf: BlendIf = BlendIf(),
+    /**
+     * Smart Object: pixel effects become [smartFilters] (editable, drawn on every render)
+     * instead of changing the pixels, and pixel tools ask to rasterize first.
+     */
+    var isSmartObject: Boolean = false,
+    var smartFilters: List<SmartFilter> = emptyList(),
+    var smartFiltersVisible: Boolean = true,
+    /** Where the smart filters show (ALPHA_8 over the layer's own pixels, any size), or null = everywhere. */
+    var smartFilterMask: Bitmap? = null
 ) {
     fun currentMaskAnchor(): MaskAnchor = MaskAnchor(positionX, positionY, scaleX, scaleY, rotation)
 

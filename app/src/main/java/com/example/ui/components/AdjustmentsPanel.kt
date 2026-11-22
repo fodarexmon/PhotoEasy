@@ -1,6 +1,9 @@
 package com.example.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
@@ -75,6 +78,8 @@ fun AdjustmentsPanel(
     hslTargetProperty: String? = null,
     onHslTargetPropertyChange: (String?) -> Unit = {},
     onReplacePickChange: (Pair<Int, Boolean>?) -> Unit = {},
+    /** Extra controls at the top of the Hue/Saturation tab (an adjustment layer's Colorize). */
+    hslHeader: (@Composable () -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var activeTab by remember(initialTab) { mutableStateOf(initialTab) }
@@ -179,7 +184,8 @@ fun AdjustmentsPanel(
                         brightness = 0f, contrast = 0f, saturation = 0f,
                         temperature = 0f, tint = 0f, exposure = 0f,
                         highlights = 0f, shadows = 0f, sharpness = 0f, vignette = 0f,
-                        whites = 0f, blacks = 0f, vibrance = 0f, clarity = 0f, dehaze = 0f
+                        whites = 0f, blacks = 0f, vibrance = 0f, clarity = 0f, dehaze = 0f,
+                        noiseReduction = 0f, grainAmount = 0f
                     )
                 )
             } else {
@@ -301,9 +307,16 @@ fun AdjustmentsPanel(
                 AdjustmentSlider(stringResource(R.string.adj_clarity), adjustments.clarity, onValueChange = { set { copy(clarity = it) } }, onValueChangeFinished = onAdjustmentsCommit)
                 AdjustmentSlider(stringResource(R.string.adj_dehaze), adjustments.dehaze, onValueChange = { set { copy(dehaze = it) } }, onValueChangeFinished = onAdjustmentsCommit)
                 AdjustmentSlider(stringResource(R.string.adj_sharpness), adjustments.sharpness, 0f..100f, onValueChange = { set { copy(sharpness = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                AdjustmentSlider(stringResource(R.string.adj_noise_reduction), adjustments.noiseReduction, 0f..100f, onValueChange = { set { copy(noiseReduction = it) } }, onValueChangeFinished = onAdjustmentsCommit)
 
                 AdjustmentGroupTitle(stringResource(R.string.adj_group_effects))
                 AdjustmentSlider(stringResource(R.string.adj_vignette), adjustments.vignette, onValueChange = { set { copy(vignette = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                // Grain (Camera Raw): amount, then its size and roughness.
+                AdjustmentSlider(stringResource(R.string.adj_grain_amount), adjustments.grainAmount, 0f..100f, onValueChange = { set { copy(grainAmount = it) } }, onValueChangeFinished = onAdjustmentsCommit)
+                if (adjustments.grainAmount > 0f) {
+                    AdjustmentSlider(stringResource(R.string.adj_grain_size), adjustments.grainSize, 0f..100f, onValueChange = { set { copy(grainSize = it) } }, onValueChangeFinished = onAdjustmentsCommit, defaultValue = 25f)
+                    AdjustmentSlider(stringResource(R.string.adj_grain_roughness), adjustments.grainRoughness, 0f..100f, onValueChange = { set { copy(grainRoughness = it) } }, onValueChangeFinished = onAdjustmentsCommit, defaultValue = 50f)
+                }
                 Text(
                     stringResource(R.string.adj_double_tap_reset_hint),
                     color = Color.Gray,
@@ -340,6 +353,7 @@ fun AdjustmentsPanel(
             }
 
             AdjustmentsTab.HSL -> {
+                hslHeader?.invoke()
                 OutlinedButton(
                     onClick = {},
                     interactionSource = hslCompareInteraction,
@@ -361,6 +375,8 @@ fun AdjustmentsPanel(
                     targetProperty = hslTargetProperty,
                     onTargetPropertyChange = onHslTargetPropertyChange
                 )
+                Spacer(Modifier.height(10.dp))
+                ColorGradingSection(adjustments, onAdjustmentsChange, onAdjustmentsCommit)
             }
 
             AdjustmentsTab.REPLACE -> {
@@ -497,4 +513,48 @@ private fun AdjustmentGroupTitle(text: String) {
         modifier = Modifier.padding(top = 10.dp, bottom = 2.dp)
     )
     HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
+}
+
+
+/** Color Grading (Lightroom / Camera Raw): a colour for shadows, midtones and highlights. */
+@Composable
+private fun ColorGradingSection(adjustments: ColorAdjustments, onChange: (ColorAdjustments) -> Unit, onCommit: () -> Unit) {
+    var zone by remember { mutableIntStateOf(0) }
+    Column(Modifier.fillMaxWidth()) {
+        HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
+        Spacer(Modifier.height(6.dp))
+        Text(stringResource(R.string.color_grading), color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+        Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf(R.string.grade_shadows, R.string.grade_midtones, R.string.grade_highlights).forEachIndexed { i, label ->
+                val sat = when (i) { 0 -> adjustments.gradeShadowSat; 1 -> adjustments.gradeMidSat; else -> adjustments.gradeHighSat }
+                val hue = when (i) { 0 -> adjustments.gradeShadowHue; 1 -> adjustments.gradeMidHue; else -> adjustments.gradeHighHue }
+                FilterChip(
+                    selected = zone == i, onClick = { zone = i },
+                    label = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(Modifier.size(10.dp).clip(CircleShape).background(
+                                if (sat > 0f) Color(android.graphics.Color.HSVToColor(floatArrayOf(hue, (sat / 100f).coerceIn(0.15f, 1f), 1f))) else Color.Gray))
+                            Spacer(Modifier.width(4.dp))
+                            Text(stringResource(label), fontSize = 12.sp)
+                        }
+                    },
+                    modifier = Modifier.weight(1f).testTag("grade_zone_$i")
+                )
+            }
+        }
+        val hue = when (zone) { 0 -> adjustments.gradeShadowHue; 1 -> adjustments.gradeMidHue; else -> adjustments.gradeHighHue }
+        val sat = when (zone) { 0 -> adjustments.gradeShadowSat; 1 -> adjustments.gradeMidSat; else -> adjustments.gradeHighSat }
+        fun setZone(h: Float, s: Float) = onChange(when (zone) {
+            0 -> adjustments.copy(gradeShadowHue = h, gradeShadowSat = s)
+            1 -> adjustments.copy(gradeMidHue = h, gradeMidSat = s)
+            else -> adjustments.copy(gradeHighHue = h, gradeHighSat = s)
+        })
+        // Hue over a rainbow.
+        Box(Modifier.fillMaxWidth().height(8.dp).padding(horizontal = 8.dp).clip(RoundedCornerShape(4.dp))
+            .background(Brush.horizontalGradient((0..12).map { Color(android.graphics.Color.HSVToColor(floatArrayOf(it * 30f, 0.85f, 0.95f))) })))
+        AdjustmentSlider(stringResource(R.string.grade_hue), hue, 0f..360f, onValueChange = { setZone(it, sat) }, onValueChangeFinished = onCommit, defaultValue = hue, showCompare = false)
+        AdjustmentSlider(stringResource(R.string.grade_saturation), sat, 0f..100f, onValueChange = { setZone(hue, it) }, onValueChangeFinished = onCommit)
+        AdjustmentSlider(stringResource(R.string.grade_balance), adjustments.gradeBalance, -100f..100f, onValueChange = { onChange(adjustments.copy(gradeBalance = it)) }, onValueChangeFinished = onCommit)
+        AdjustmentSlider(stringResource(R.string.grade_blending), adjustments.gradeBlending, 0f..100f, onValueChange = { onChange(adjustments.copy(gradeBlending = it)) }, onValueChangeFinished = onCommit, defaultValue = 50f)
+    }
 }

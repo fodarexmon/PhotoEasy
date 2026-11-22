@@ -142,18 +142,34 @@ fun AdjustmentLayerPanel(
                 AdjSlider(R.string.adj_saturation, adjustments.saturation, -100f..100f, onCommit) { setA(adjustments.copy(saturation = it)) }
             }
             AdjustmentKind.LEVELS -> {
+                // Channel: RGB together (0) or red / green / blue alone (1..3), as in Photoshop.
+                var channel by remember { mutableIntStateOf(0) }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(R.string.levels_channel_rgb, R.string.channel_red, R.string.channel_green, R.string.channel_blue).forEachIndexed { i, label ->
+                        val edited = when (i) { 1 -> !params.levelsRed.isIdentity(); 2 -> !params.levelsGreen.isIdentity(); 3 -> !params.levelsBlue.isIdentity(); else -> false }
+                        FilterChip(
+                            selected = channel == i, onClick = { channel = i },
+                            label = { Text(stringResource(label) + if (edited) " •" else "", fontSize = 12.sp) },
+                            modifier = Modifier.testTag("levels_channel_$i")
+                        )
+                    }
+                }
+                val cur = when (channel) {
+                    1 -> params.levelsRed; 2 -> params.levelsGreen; 3 -> params.levelsBlue
+                    else -> com.example.data.model.LevelsChannel(params.levelsInBlack, params.levelsInWhite, params.levelsGamma, params.levelsOutBlack, params.levelsOutWhite)
+                }
+                fun setL(l: com.example.data.model.LevelsChannel) = setP(when (channel) {
+                    1 -> params.copy(levelsRed = l); 2 -> params.copy(levelsGreen = l); 3 -> params.copy(levelsBlue = l)
+                    else -> params.copy(levelsInBlack = l.inBlack, levelsInWhite = l.inWhite, levelsGamma = l.gamma, levelsOutBlack = l.outBlack, levelsOutWhite = l.outWhite)
+                })
                 Text(stringResource(R.string.adjk_levels_input), color = Color.LightGray, fontSize = 12.sp)
-                AdjSlider(R.string.adjk_levels_shadows, params.levelsInBlack, 0f..253f, onCommit) { v ->
-                    setP(params.copy(levelsInBlack = v.coerceAtMost(params.levelsInWhite - 2f)))
-                }
-                AdjSlider(R.string.adjk_levels_gamma, params.levelsGamma, 0.1f..9.99f, onCommit, decimals = 2, logScale = true) { setP(params.copy(levelsGamma = it)) }
-                AdjSlider(R.string.adjk_levels_highlights, params.levelsInWhite, 2f..255f, onCommit) { v ->
-                    setP(params.copy(levelsInWhite = v.coerceAtLeast(params.levelsInBlack + 2f)))
-                }
+                AdjSlider(R.string.adjk_levels_shadows, cur.inBlack, 0f..253f, onCommit) { v -> setL(cur.copy(inBlack = v.coerceAtMost(cur.inWhite - 2f))) }
+                AdjSlider(R.string.adjk_levels_gamma, cur.gamma, 0.1f..9.99f, onCommit, decimals = 2, logScale = true) { setL(cur.copy(gamma = it)) }
+                AdjSlider(R.string.adjk_levels_highlights, cur.inWhite, 2f..255f, onCommit) { v -> setL(cur.copy(inWhite = v.coerceAtLeast(cur.inBlack + 2f))) }
                 Spacer(Modifier.height(6.dp))
                 Text(stringResource(R.string.adjk_levels_output), color = Color.LightGray, fontSize = 12.sp)
-                AdjSlider(R.string.adjk_levels_out_black, params.levelsOutBlack, 0f..255f, onCommit) { setP(params.copy(levelsOutBlack = it)) }
-                AdjSlider(R.string.adjk_levels_out_white, params.levelsOutWhite, 0f..255f, onCommit) { setP(params.copy(levelsOutWhite = it)) }
+                AdjSlider(R.string.adjk_levels_out_black, cur.outBlack, 0f..255f, onCommit) { setL(cur.copy(outBlack = it)) }
+                AdjSlider(R.string.adjk_levels_out_white, cur.outWhite, 0f..255f, onCommit) { setL(cur.copy(outWhite = it)) }
             }
             AdjustmentKind.EXPOSURE -> {
                 AdjSlider(R.string.adjk_exposure_ev, params.exposureEv, -5f..5f, onCommit, decimals = 2) { setP(params.copy(exposureEv = it)) }
@@ -360,4 +376,24 @@ private fun ColorPairSlider(left: Int, right: Int, leftColor: Color, rightColor:
         valueRange = -100f..100f,
         colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = rightColor, inactiveTrackColor = leftColor)
     )
+}
+
+
+/** Hue/Saturation "Colorize" (Photoshop): one hue over the whole image, keeping its lightness. */
+@Composable
+fun ColorizeControls(params: AdjustmentLayerParams, onChange: (AdjustmentLayerParams) -> Unit, onCommit: () -> Unit) {
+    Column(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(stringResource(R.string.adj_colorize), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Switch(checked = params.colorize, onCheckedChange = { onChange(params.copy(colorize = it)); onCommit() },
+                modifier = Modifier.testTag("switch_colorize"))
+        }
+        if (params.colorize) {
+            AdjSlider(R.string.adj_colorize_hue, params.colorizeHue, 0f..360f, onCommit, unit = "°",
+                accent = Color(android.graphics.Color.HSVToColor(floatArrayOf(params.colorizeHue, 0.8f, 1f)))) { onChange(params.copy(colorizeHue = it)) }
+            AdjSlider(R.string.adj_colorize_saturation, params.colorizeSaturation, 0f..100f, onCommit) { onChange(params.copy(colorizeSaturation = it)) }
+            AdjSlider(R.string.adj_colorize_lightness, params.colorizeLightness, -100f..100f, onCommit) { onChange(params.copy(colorizeLightness = it)) }
+        }
+        HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
+    }
 }

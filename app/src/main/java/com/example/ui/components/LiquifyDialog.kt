@@ -106,7 +106,9 @@ fun LiquifyDialog(
     onDismiss: () -> Unit,
     onApply: (LiquifyEngine) -> Unit,
     /** Open on the Face-Aware Liquify tab. */
-    startOnFaceTab: Boolean = false
+    startOnFaceTab: Boolean = false,
+    /** The selection on [source]'s pixels (ALPHA_8, same size): everything outside it is frozen. */
+    selection: Bitmap? = null
 ) {
     // Working copy small enough for live editing; Apply re-samples the field at full resolution.
     val engine by produceState<LiquifyEngine?>(null, source) {
@@ -115,7 +117,17 @@ fun LiquifyDialog(
             val s = min(1f, maxDim.toFloat() / maxOf(source.width, source.height))
             val work = if (s < 1f) Bitmap.createScaledBitmap(source, (source.width * s).roundToInt().coerceAtLeast(1), (source.height * s).roundToInt().coerceAtLeast(1), true)
             else source.copy(Bitmap.Config.ARGB_8888, false)
-            LiquifyEngine(work).also { if (work !== source) work.recycle() }
+            LiquifyEngine(work).also { e ->
+                if (work !== source) work.recycle()
+                selection?.takeIf { !it.isRecycled }?.let { sel ->
+                    val m = Bitmap.createBitmap(e.width, e.height, Bitmap.Config.ALPHA_8)
+                    android.graphics.Canvas(m).drawBitmap(sel, android.graphics.Rect(0, 0, sel.width, sel.height),
+                        android.graphics.Rect(0, 0, e.width, e.height), android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
+                    val (bytes, stride) = com.example.engine.SelectionEngine.readAlphaBytes(m)
+                    m.recycle()
+                    e.freezeOutside(bytes, stride)
+                }
+            }
         }
     }
     var display by remember { mutableStateOf<Bitmap?>(null) }
@@ -153,7 +165,16 @@ fun LiquifyDialog(
     LaunchedEffect(engine) {
         val e = engine ?: return@LaunchedEffect
         display = Bitmap.createBitmap(e.width, e.height, Bitmap.Config.ARGB_8888).apply { setPixels(e.output, 0, e.width, 0, 0, e.width, e.height) }
-        maskOverlay = Bitmap.createBitmap(e.width, e.height, Bitmap.Config.ARGB_8888)
+        maskOverlay = Bitmap.createBitmap(e.width, e.height, Bitmap.Config.ARGB_8888).also { m ->
+            // Show what the selection froze.
+            if (selection != null) {
+                val row = IntArray(e.width)
+                for (y in 0 until e.height) {
+                    for (x in 0 until e.width) row[x] = ((e.frozenAt(y * e.width + x) * 110f).toInt() shl 24) or 0xFF2040
+                    m.setPixels(row, 0, e.width, 0, y, e.width, 1)
+                }
+            }
+        }
         version++
         // Find the faces on the untouched image (on-device, may take a moment).
         val probe = Bitmap.createBitmap(e.width, e.height, Bitmap.Config.ARGB_8888).apply { setPixels(e.output, 0, e.width, 0, 0, e.width, e.height) }

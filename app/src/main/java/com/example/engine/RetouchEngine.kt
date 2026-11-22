@@ -109,7 +109,25 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
     private var smY = Float.NaN
     private var dabIndex = 0
 
-    fun beginStroke(tool: RetouchTool, brush: RetouchBrush, cloneOffsetX: Float = 0f, cloneOffsetY: Float = 0f) {
+    /** Selection (alpha bytes, row stride [selStride]) the current stroke stays inside; null = everywhere. */
+    private var sel: ByteArray? = null
+    private var selStride = width
+
+    /** Selection weight at (x, y): 1 without a selection, the soft-edged mask value inside one. */
+    private fun selAt(x: Int, y: Int): Float {
+        val m = sel ?: return 1f
+        return (m[y * selStride + x].toInt() and 255) / 255f
+    }
+
+    /**
+     * Starts a stroke. With a [selection] (alpha bytes, row stride [selectionStride]) every tool
+     * only changes pixels inside it, softly at its feathered edge, as in Photoshop.
+     */
+    fun beginStroke(
+        tool: RetouchTool, brush: RetouchBrush, cloneOffsetX: Float = 0f, cloneOffsetY: Float = 0f,
+        selection: ByteArray? = null, selectionStride: Int = width
+    ) {
+        sel = selection; selStride = selectionStride
         this.tool = tool; this.brush = brush
         cloneDx = cloneOffsetX; cloneDy = cloneOffsetY
         clearTiles()
@@ -120,7 +138,7 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
     }
 
     fun endStroke() {
-        clearTiles(); smudgeBuf = null
+        clearTiles(); smudgeBuf = null; sel = null
     }
 
     private fun tileKey(x: Int, y: Int) = (y / tile) * tilesX + (x / tile)
@@ -230,7 +248,8 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
         val dx = x + 0.5f - cx; val dy = y + 0.5f - cy
         val d2 = (dx * dx + dy * dy) * invR2
         if (d2 >= 1f) return 0f
-        return lut[(d2 * 1024f).toInt()]
+        val w = lut[(d2 * 1024f).toInt()]
+        return if (sel == null) w else w * selAt(x, y)
     }
 
     private fun dab(cx: Float, cy: Float, r: Float): Rect? {
@@ -276,11 +295,11 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
             // A flat nib at 45°: thin one way, wide the other.
             val dx = x + 0.5f - cx; val dy = y + 0.5f - cy
             val u = (dx + dy) * 0.7071f; val v = (dy - dx) * 0.7071f
-            weight(sqrt(u * u + (v / 0.28f) * (v / 0.28f)), r)
+            weight(sqrt(u * u + (v / 0.28f) * (v / 0.28f)), r) * selAt(x, y)
         }
         BrushTip.SPRAY -> {
             val w = wAt(x, y, cx, cy)
-            if (w > 0f && hash(x, y, dabIndex) < 0.07f + 0.1f * brush.hardness) 1f else 0f
+            if (w > 0f && hash(x, y, dabIndex) < 0.07f + 0.1f * brush.hardness) selAt(x, y) else 0f
         }
         BrushTip.CHALK -> {
             // Fixed grain on the image: repeated dabs leave the gaps, like chalk on paper.
@@ -541,7 +560,7 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
      * (chosen automatically), its colour blended in seamlessly (see [patch]). Returns the changed
      * area, or null.
      */
-    fun heal(pts: FloatArray, r: Float): Rect? {
+    fun heal(pts: FloatArray, r: Float, selection: ByteArray? = null, selectionStride: Int = width): Rect? {
         if (pts.size < 2) return null
         val rad = r.coerceAtLeast(1.5f)
         // Painted area (soft edge), dabs every third of the radius along the path.
@@ -583,6 +602,20 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
                 if (v > (m[j].toInt() and 255)) m[j] = v.toByte()
             }
             k += 2
+        }
+        // Only inside the selection (softly at its edge).
+        if (selection != null) {
+            var anyLeft = false
+            for (y in 0 until bh) for (x in 0 until bw) {
+                val j = y * bw + x
+                val v = m[j].toInt() and 255
+                if (v == 0) continue
+                val sv = selection[(y + t) * selectionStride + x + l].toInt() and 255
+                val nv = v * sv / 255
+                m[j] = nv.toByte()
+                if (nv > 8) anyLeft = true
+            }
+            if (!anyLeft) return null
         }
         val off = bestSource(m, l, t, bw, bh, rad) ?: return null
         // patch() works on a full-image mask: build it only inside the box.
@@ -673,6 +706,18 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
     ): Rect? {
         if (x !in 0 until width || y !in 0 until height || opacity <= 0f) return null
         if (mask != null && (mask[y * maskStride + x].toInt() and 255) <= 8) return null
+        // A click inside the previous fill (left untouched since) replaces it, like Photoshop:
+        // the old colour or pattern comes off and the new one goes on the same area.
+        lastFill?.let { lf ->
+            if (x in lf.l until lf.l + lf.w && y in lf.t until lf.t + lf.h &&
+                (lf.cov[(y - lf.t) * lf.w + (x - lf.l)].toInt() and 255) > 0 && rectHash(lf.l, lf.t, lf.w, lf.h) == lf.afterHash) {
+                for (ry in 0 until lf.h) System.arraycopy(lf.before, ry * lf.w, pix, (lf.t + ry) * width + lf.l, lf.w)
+                val changed = applyCoverage(lf.cov, lf.l, lf.t, lf.w, lf.h, paint, opacity.coerceIn(0f, 1f))
+                lf.afterHash = rectHash(lf.l, lf.t, lf.w, lf.h)
+                return Rect(lf.l, lf.t, lf.l + lf.w, lf.t + lf.h).takeIf { changed }
+            }
+        }
+        lastFill = null
         val seed = pix[y * width + x]
         val tol = tolerance.coerceIn(0, 255)
         val sa = seed ushr 24; val sr = (seed shr 16) and 255; val sg = (seed shr 8) and 255; val sb = seed and 255
@@ -731,8 +776,8 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
         // One pixel of soft edge (anti-aliasing) around the region.
         val gl = if (antiAlias) max(0, l - 1) else l; val gt = if (antiAlias) max(0, t - 1) else t
         val gr = if (antiAlias) min(width - 1, r + 1) else r; val gb = if (antiAlias) min(height - 1, b + 1) else b
-        val op = opacity.coerceIn(0f, 1f)
-        var any = false
+        val gw = gr - gl + 1; val gh = gb - gt + 1
+        val covBytes = ByteArray(gw * gh)
         for (py in gt..gb) for (px in gl..gr) {
             val i = py * width + px
             var cov = if (region[i].toInt() != 0) 1f else 0f
@@ -745,11 +790,45 @@ class RetouchCanvas(val width: Int, val height: Int, val pix: IntArray) {
                 cov = n / 9f
             }
             if (mask != null) cov *= (mask[py * maskStride + px].toInt() and 255) / 255f
-            if (cov <= 0f) continue
-            pix[i] = over(pix[i], paint(px, py), cov * op)
+            covBytes[(py - gt) * gw + (px - gl)] = (cov * 255f + 0.5f).toInt().coerceIn(0, 255).toByte()
+        }
+        // Keep what was under the fill so a later fill on it can replace it.
+        val before = try {
+            IntArray(gw * gh).also { bf -> for (ry in 0 until gh) System.arraycopy(pix, (gt + ry) * width + gl, bf, ry * gw, gw) }
+        } catch (e: OutOfMemoryError) { null }
+        val any = applyCoverage(covBytes, gl, gt, gw, gh, paint, opacity.coerceIn(0f, 1f))
+        if (!any) return null
+        if (before != null) lastFill = LastFill(gl, gt, gw, gh, covBytes, before, rectHash(gl, gt, gw, gh))
+        return Rect(gl, gt, gr + 1, gb + 1)
+    }
+
+    /** The last fill: its area, coverage, the pixels it covered and a hash of the result. */
+    private class LastFill(val l: Int, val t: Int, val w: Int, val h: Int, val cov: ByteArray, val before: IntArray, var afterHash: Long)
+
+    private var lastFill: LastFill? = null
+
+    /** Forgets the last fill (it can no longer be replaced). */
+    fun forgetLastFill() { lastFill = null }
+
+    private fun applyCoverage(cov: ByteArray, l: Int, t: Int, w: Int, h: Int, paint: (Int, Int) -> Int, op: Float): Boolean {
+        var any = false
+        for (ry in 0 until h) for (rx in 0 until w) {
+            val c = (cov[ry * w + rx].toInt() and 255) / 255f
+            if (c <= 0f) continue
+            val i = (t + ry) * width + l + rx
+            pix[i] = over(pix[i], paint(l + rx, t + ry), c * op)
             any = true
         }
-        return if (any) Rect(gl, gt, gr + 1, gb + 1) else null
+        return any
+    }
+
+    private fun rectHash(l: Int, t: Int, w: Int, h: Int): Long {
+        var hsh = 1125899906842597L
+        for (ry in 0 until h) {
+            val row = (t + ry) * width + l
+            for (rx in 0 until w) hsh = 31 * hsh + pix[row + rx]
+        }
+        return hsh
     }
 
     // --- Preview -----------------------------------------------------------------------------

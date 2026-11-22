@@ -25,6 +25,7 @@ import com.example.data.model.TextLayerConfig
 import java.io.File
 import kotlin.coroutines.coroutineContext
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -149,6 +150,57 @@ object LayerRenderer {
         return result
     }
 
+    /**
+     * [input] (the layer's pixels, possibly a reduced copy of a layer whose full size is
+     * [fullResMax] on its long side) with the layer's Smart Filters applied in order, each with
+     * its opacity and blend mode, shown through the filter mask. Returns a new bitmap.
+     */
+    suspend fun applySmartFilters(input: Bitmap, layer: Layer, fullResMax: Int, isCancelled: () -> Boolean = { false }): Bitmap {
+        val ratio = if (fullResMax > 0) (max(input.width, input.height).toFloat() / fullResMax).coerceAtMost(1f) else 1f
+        var cur = input.copy(Bitmap.Config.ARGB_8888, true)
+        for (f in layer.smartFilters) {
+            if (!f.enabled) continue
+            coroutineContext.ensureActive()
+            val params = ProEffects.scaleForPreview(f.effect, f.params, ratio)
+            val out = ProEffects.apply(cur, f.effect, params, isCancelled)
+            if (out === cur) continue
+            if (f.opacity >= 0.999f && f.blendMode == BlendModeType.NORMAL) {
+                cur.recycle(); cur = out
+            } else {
+                // Filter blending options: the result over what came before.
+                val base = cur
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+                drawBlendedPlain(Canvas(base), base, out, f.blendMode, f.opacity, paint)
+                out.recycle()
+                cur = base
+            }
+        }
+        // Filter mask: the unfiltered pixels where the mask is dark.
+        val mask = layer.smartFilterMask?.takeIf { !it.isRecycled }
+        if (mask != null) {
+            val w = cur.width; val h = cur.height
+            val m = Bitmap.createScaledBitmap(mask, w, h, true)
+            val (mb, stride) = SelectionEngine.readAlphaBytes(m)
+            if (m !== mask) m.recycle()
+            val orig = IntArray(w * h); input.getPixels(orig, 0, w, 0, 0, minOf(w, input.width), minOf(h, input.height))
+            val px = IntArray(w * h); cur.getPixels(px, 0, w, 0, 0, w, h)
+            for (y in 0 until h) for (x in 0 until w) {
+                val k = (mb[y * stride + x].toInt() and 255)
+                if (k == 255) continue
+                val i = y * w + x
+                px[i] = mixArgb(orig[i], px[i], k / 255f)
+            }
+            cur.setPixels(px, 0, w, 0, 0, w, h)
+        }
+        return cur
+    }
+
+    /** [a] to [b] by [t] (unpremultiplied ARGB, all channels). */
+    private fun mixArgb(a: Int, b: Int, t: Float): Int {
+        fun ch(sh: Int) = ((((a shr sh) and 255) * (1f - t) + ((b shr sh) and 255) * t) + 0.5f).toInt().coerceIn(0, 255)
+        return (ch(24) shl 24) or (ch(16) shl 16) or (ch(8) shl 8) or ch(0)
+    }
+
     /** True when [preview] targets [layer] and still matches its current pixels. */
     private fun previewApplies(preview: ProEffectPreview?, layer: Layer): Boolean =
         preview != null && preview.layerId == layer.id && layer.type == LayerType.IMAGE &&
@@ -174,10 +226,17 @@ object LayerRenderer {
         selectedLayerId: String? = null,
         proEffectPreview: ProEffectPreview? = null,
         /** Document-space selection limiting [proEffectPreview], as the real effect is limited. */
-        proEffectMask: Bitmap? = null
+        proEffectMask: Bitmap? = null,
+        /** Renders only the members of this group (internal: groups are drawn as one unit). */
+        groupLevel: String? = null
     ): Bitmap {
         coroutineContext.ensureActive()
         FilterLibrary.ensureLoaded(context)
+        // With groups, this pass draws one level; each group is rendered on its own first.
+        val allLayers = layers
+        @Suppress("NAME_SHADOWING")
+        val layers = if (groupLevel != null || allLayers.any { it.type == LayerType.GROUP || it.parentId != null })
+            LayerTree.level(allLayers, groupLevel) else allLayers
         val currentJob = coroutineContext[Job]
 
         var targetW = width
@@ -231,18 +290,48 @@ object LayerRenderer {
                 // A hidden base hides its clipped layers too (as in Photoshop).
                 if (!layer.isVisible || layer.opacity <= 0.01f) continue
 
+                if (layer.type == LayerType.GROUP) {
+                    // The group's members composited on their own, then drawn as one layer with
+                    // the group's mask, opacity and blend mode (Photoshop's group in Normal mode).
+                    val sub = renderCompositeCanvas(
+                        context, allLayers, width, height, includeBackground = false, backgroundColor = null,
+                        maxPreviewDimension = maxPreviewDimension, activeSelectionMask = activeSelectionMask,
+                        selectedLayerId = selectedLayerId, proEffectPreview = proEffectPreview,
+                        proEffectMask = proEffectMask, groupLevel = layer.id
+                    )
+                    var groupBmp = sub
+                    try {
+                        coroutineContext.ensureActive()
+                        // A look set on the group (adjustments, filter, LUT) applies to all of it.
+                        groupBmp = applyLook(sub, layer, currentJob, scaleRatio.coerceAtMost(1f))
+                        if (groupBmp !== sub) { sub.recycle() }
+                        applyLayerMask(Canvas(groupBmp), layer, groupBmp.width, groupBmp.height, docW, docH)
+                        for (c in clipped) {
+                            coroutineContext.ensureActive()
+                            if (!c.isVisible || c.opacity <= 0.01f) continue
+                            drawClippedLayer(context, groupBmp, c, targetW, targetH, scaleRatio, docW, docH, currentJob,
+                                if (c.id == selectedLayerId) activeSelectionMask else null)
+                        }
+                        drawBlended(canvas, composite, groupBmp, layer.blendMode, layer.opacity, paint, layer.blendIf)
+                    } finally {
+                        if (!sub.isRecycled) sub.recycle()
+                        if (!groupBmp.isRecycled) groupBmp.recycle()
+                    }
+                    continue
+                }
+
                 if (layer.type == LayerType.ADJUSTMENT) {
                     // Non-destructive Adjustment Layer: applies adjustments/filters to accumulated composite
                     if (composite.width > 0 && composite.height > 0) {
                         val copy = composite.copy(Bitmap.Config.ARGB_8888, true)
                         var adjustedComposite = copy
                         try {
-                            adjustedComposite = applyLook(copy, layer, currentJob)
+                            adjustedComposite = applyLook(copy, layer, currentJob, scaleRatio.coerceAtMost(1f))
                             coroutineContext.ensureActive()
                             // A masked adjustment layer only affects the revealed area; the hidden
                             // area becomes transparent and the composite below shows through unchanged.
                             applyLayerMask(Canvas(adjustedComposite), layer, adjustedComposite.width, adjustedComposite.height, docW, docH)
-                            drawBlended(canvas, composite, adjustedComposite, layer.blendMode, layer.opacity, paint)
+                            drawBlended(canvas, composite, adjustedComposite, layer.blendMode, layer.opacity, paint, layer.blendIf)
                         } finally {
                             if (!copy.isRecycled) copy.recycle()
                             if (!adjustedComposite.isRecycled) adjustedComposite.recycle()
@@ -269,7 +358,7 @@ object LayerRenderer {
                             if (c.id == selectedLayerId) activeSelectionMask else null)
                     }
                     coroutineContext.ensureActive()
-                    drawBlended(canvas, composite, layerBitmap, layer.blendMode, layer.opacity, paint)
+                    drawBlended(canvas, composite, layerBitmap, layer.blendMode, layer.opacity, paint, layer.blendIf)
                 } finally {
                     if (pooled) releaseScratch(layerBitmap)
                     else if (!layerBitmap.isRecycled) layerBitmap.recycle()
@@ -312,7 +401,12 @@ object LayerRenderer {
      * Renders a single layer (Image, Text, Color Fill) to a canvas sized bitmap
      */
     /** Applies [layer]'s adjustments, filter and LUT to [input]; returns [input] or a new bitmap. */
-    private suspend fun applyLook(input: Bitmap, layer: Layer, currentJob: Job?): Bitmap {
+    /**
+     * [pixelScale]: pixels of [input] per pixel of the full-resolution image it stands for (a
+     * preview is < 1), so detail-size adjustments (noise reduction) look the same in the preview
+     * and in the export.
+     */
+    private suspend fun applyLook(input: Bitmap, layer: Layer, currentJob: Job?, pixelScale: Float = 1f): Bitmap {
         val isCancelled: () -> Boolean = { currentJob?.isActive == false }
         var bmp = input
         fun swap(next: Bitmap) {
@@ -321,7 +415,7 @@ object LayerRenderer {
         }
         if (!layer.adjustments.isIdentity()) {
             coroutineContext.ensureActive()
-            swap(ImageProcessor.applyAdjustments(bmp, layer.adjustments, isCancelled))
+            swap(ImageProcessor.applyAdjustments(bmp, layer.adjustments, isCancelled, pixelScale))
         }
         if (layer.filter != com.example.data.model.FilterType.NONE) {
             coroutineContext.ensureActive()
@@ -330,6 +424,12 @@ object LayerRenderer {
         FilterLibrary.lut(layer.lutId)?.let { lut ->
             coroutineContext.ensureActive()
             swap(ImageProcessor.applyLut(bmp, lut, layer.filterIntensity, isCancelled))
+        }
+        // Hue/Saturation with Colorize: the hue/saturation sliders first, then one colour.
+        if (layer.type == LayerType.ADJUSTMENT && layer.adjustmentKind == com.example.data.model.AdjustmentKind.HUE_SATURATION &&
+            layer.adjustmentParams.colorize) {
+            coroutineContext.ensureActive()
+            swap(AdjustmentLayerEngine.colorize(bmp, layer.adjustmentParams))
         }
         // Photoshop-style adjustment kinds (Levels, Black & White, Gradient Map...).
         if (layer.type == LayerType.ADJUSTMENT && !AdjustmentLayerEngine.usesColorAdjustments(layer.adjustmentKind)) {
@@ -363,10 +463,10 @@ object LayerRenderer {
             val copy = base.copy(Bitmap.Config.ARGB_8888, true)
             var adjusted = copy
             try {
-                adjusted = applyLook(copy, c, currentJob)
+                adjusted = applyLook(copy, c, currentJob, scaleRatio.coerceAtMost(1f))
                 applyLayerMask(Canvas(adjusted), c, adjusted.width, adjusted.height, docW, docH)
                 Canvas(adjusted).drawBitmap(base, 0f, 0f, keepBaseAlpha)
-                drawBlended(Canvas(base), base, adjusted, c.blendMode, c.opacity, paint)
+                drawBlended(Canvas(base), base, adjusted, c.blendMode, c.opacity, paint, c.blendIf)
             } finally {
                 if (!copy.isRecycled) copy.recycle()
                 if (!adjusted.isRecycled) adjusted.recycle()
@@ -376,7 +476,7 @@ object LayerRenderer {
         val cb = renderSingleLayerToBitmap(context, c, targetW, targetH, scaleRatio, selectionForLayer) ?: return
         try {
             Canvas(cb).drawBitmap(base, 0f, 0f, keepBaseAlpha)
-            drawBlended(Canvas(base), base, cb, c.blendMode, c.opacity, paint)
+            drawBlended(Canvas(base), base, cb, c.blendMode, c.opacity, paint, c.blendIf)
         } finally {
             if (!cb.isRecycled) cb.recycle()
         }
@@ -569,13 +669,15 @@ object LayerRenderer {
                         return null
                     }
                     var processedBmp: Bitmap = baseBmp
-                    val hasLook = !layer.adjustments.isIdentity() || layer.filter != com.example.data.model.FilterType.NONE || layer.lutId != null
+                    val smart = layer.isSmartObject && layer.smartFiltersVisible && layer.smartFilters.any { it.enabled }
+                    val hasLook = smart || !layer.adjustments.isIdentity() || layer.filter != com.example.data.model.FilterType.NONE || layer.lutId != null
                     val downscale = scaleRatio < 1.0f && (baseBmp.width > 800 || baseBmp.height > 800)
                     val lookKey = if (cacheLook && proEffect == null && (hasLook || downscale)) {
                         val pw = if (downscale) (baseBmp.width * scaleRatio).toInt().coerceAtLeast(1) else baseBmp.width
                         val ph = if (downscale) (baseBmp.height * scaleRatio).toInt().coerceAtLeast(1) else baseBmp.height
                         "look:${System.identityHashCode(baseBmp)}:${baseBmp.generationId}:${pw}x$ph:" +
-                            "${layer.adjustments}:${layer.adjustmentKind}:${layer.filter}:${layer.filterIntensity}:${layer.lutId}"
+                            "${layer.adjustments}:${layer.adjustmentKind}:${layer.filter}:${layer.filterIntensity}:${layer.lutId}" +
+                            (if (smart) ":sf:${layer.smartFilters}:${System.identityHashCode(layer.smartFilterMask)}" else "")
                     } else null
                     lookKey?.let { k -> lookGet(k)?.let { processedBmp = it; lookFromCache = true } }
 
@@ -598,11 +700,27 @@ object LayerRenderer {
                             processedBmp = effected
                         }
 
+                        // Smart Filters: the Smart Object's effects, in order, on its own pixels.
+                        if (!lookFromCache && smart) {
+                            coroutineContext.ensureActive()
+                            val fullMax = run {
+                                val original = max(layer.originalWidth, layer.originalHeight)
+                                val intrinsic = max(layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight()).toInt().coerceIn(64, 4096)
+                                if (original > 0) min(intrinsic, original) else intrinsic
+                            }
+                            val filtered = applySmartFilters(processedBmp, layer, fullMax) { currentJob?.isActive == false }
+                            if (processedBmp !== baseBmp && processedBmp !== filtered && !processedBmp.isRecycled) processedBmp.recycle()
+                            processedBmp = filtered
+                        }
+
                         // Apply color adjustments if present
                         if (!lookFromCache && !layer.adjustments.isIdentity()) {
                             coroutineContext.ensureActive()
                             val isCancelledCheck: () -> Boolean = { currentJob?.isActive == false }
-                            val adjusted = ImageProcessor.applyAdjustments(processedBmp, layer.adjustments, isCancelledCheck)
+                            // The layer's full-resolution width: what the export works on.
+                            val fullW = layer.originalWidth.takeIf { it > 0 }?.toFloat() ?: layer.intrinsicDocumentWidth()
+                            val pixelScale = (processedBmp.width / fullW.coerceAtLeast(1f)).coerceIn(0.02f, 1f)
+                            val adjusted = ImageProcessor.applyAdjustments(processedBmp, layer.adjustments, isCancelledCheck, pixelScale)
                             if (processedBmp !== baseBmp && processedBmp !== adjusted && !processedBmp.isRecycled) {
                                 processedBmp.recycle()
                             }
@@ -729,6 +847,10 @@ object LayerRenderer {
 
                 LayerType.ADJUSTMENT -> {
                     // Adjustment layer
+                }
+
+                LayerType.GROUP -> {
+                    // Drawn by renderCompositeCanvas from its members.
                 }
             }
 
@@ -964,7 +1086,20 @@ object LayerRenderer {
      * Draws canvas-sized [layerBitmap] onto [target] (drawn through [canvas]) with [mode] and
      * [opacity]. Blend modes Android lacks (Linear Light) are computed per pixel.
      */
-    private fun drawBlended(canvas: Canvas, target: Bitmap, layerBitmap: Bitmap, mode: BlendModeType, opacity: Float, paint: Paint) {
+    private fun drawBlended(
+        canvas: Canvas, target: Bitmap, layerBitmapIn: Bitmap, mode: BlendModeType, opacity: Float, paint: Paint,
+        blendIf: com.example.data.model.BlendIf = com.example.data.model.BlendIf()
+    ) {
+        // Blend If: the layer's pixels fade out by their own value and the value under them.
+        val layerBitmap = if (blendIf.isIdentity()) layerBitmapIn else BlendIfEngine.apply(layerBitmapIn, target, blendIf)
+        try {
+            drawBlendedPlain(canvas, target, layerBitmap, mode, opacity, paint)
+        } finally {
+            if (layerBitmap !== layerBitmapIn && !layerBitmap.isRecycled) layerBitmap.recycle()
+        }
+    }
+
+    private fun drawBlendedPlain(canvas: Canvas, target: Bitmap, layerBitmap: Bitmap, mode: BlendModeType, opacity: Float, paint: Paint) {
         if (mode == BlendModeType.LINEAR_LIGHT) {
             FrequencySeparation.linearLight(target, layerBitmap, opacity)
             return

@@ -205,7 +205,14 @@ data class EditorUiState(
     /** Where the Clone Stamp is currently sampling (shown as a cross-hair on the canvas). */
     val retouchMarkerDoc: PointF? = null,
     /** Pre-retouch pixels per layer id, for the Before view of Before/After. */
-    val compareBefore: Map<String, com.example.data.model.LayerBefore> = emptyMap()
+    val compareBefore: Map<String, com.example.data.model.LayerBefore> = emptyMap(),
+    /** Layers panel in multi-select mode, and the layers picked there. */
+    val isLayerMultiSelect: Boolean = false,
+    val selectedLayerIds: Set<String> = emptySet(),
+    /** A pixel tool was used on a Smart Object: ask to rasterize it (true = dialog shown). */
+    val askRasterize: Boolean = false,
+    /** AI Colorize dialog, or null when closed. */
+    val aiColorize: EditorViewModel.AiColorizeState? = null
 )
 
 data class EditableShape(
@@ -463,13 +470,20 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         transformState: (EditorUiState) -> EditorUiState = { it }
     ) {
         val proj = _uiState.value.currentProject ?: return
+        // Keep groups whole when a layer was added among a group's members.
+        val selId = proj.layers.getOrNull(selectedLayerIndex ?: _uiState.value.selectedLayerIndex)?.id
+        var reIndexed: Int? = null
+        if (proj.layers.any { it.type == LayerType.GROUP }) {
+            com.example.engine.LayerTree.adoptStrays(proj.layers)
+            reIndexed = proj.layers.indexOfFirst { it.id == selId }.takeIf { it >= 0 }
+        }
         proj.markDirty()
         markDirty()
         val newState = transformState(
             _uiState.value.copy(
                 currentProject = proj.copy(layers = ArrayList(proj.layers)),
                 renderRevision = proj.renderRevision,
-                selectedLayerIndex = selectedLayerIndex ?: _uiState.value.selectedLayerIndex,
+                selectedLayerIndex = reIndexed ?: selectedLayerIndex ?: _uiState.value.selectedLayerIndex,
                 statusMessage = statusMessage ?: _uiState.value.statusMessage
             )
         )
@@ -728,7 +742,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         retouchSession = null
         retouchPending = 0
         retouchStepOpen = false
-        _uiState.value = _uiState.value.copy(compareBefore = emptyMap())
+        _uiState.value = _uiState.value.copy(compareBefore = emptyMap(), isLayerMultiSelect = false, selectedLayerIds = emptySet())
         com.example.engine.LayerRenderer.clearLookCache()
         cloneOffsetDoc = null
         undoStack.clear()
@@ -760,6 +774,15 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             val saved = repository.loadSelection(project.id, project.width, project.height) ?: return@launch
             if (_uiState.value.currentProject?.id == project.id) publishSelection(saved)
+        }
+        // Before/After of pixel edits made in earlier sessions.
+        viewModelScope.launch {
+            val ids = project.layers.map { it.id }.toSet()
+            val loaded = repository.loadBeforeImages(project.id, ids)
+            if (loaded.isEmpty()) return@launch
+            if (_uiState.value.currentProject?.id != project.id) { loaded.values.forEach { it.bitmap.recycle() }; return@launch }
+            // Edits made meanwhile in this session keep their own "before".
+            _uiState.value = _uiState.value.copy(compareBefore = loaded + _uiState.value.compareBefore)
         }
     }
 
@@ -818,9 +841,17 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun selectTool(tool: ActiveTool) {
+        // Painting tools change pixels: a Smart Object is rasterized first (after asking).
+        if ((tool == ActiveTool.RETOUCH || tool == ActiveTool.OBJECT_REMOVAL) && _uiState.value.activeTool != tool &&
+            !requireRasterized { selectTool(tool) }) return
         val previous = _uiState.value.activeTool
         // Leaving the retouch brushes frees the full-resolution pixels they keep.
         if (previous == ActiveTool.RETOUCH && tool != ActiveTool.RETOUCH && !retouchStrokeActive) retouchSession = null
+        // Leaving the Adjust panel: an untouched selection adjustment layer goes away (no undo step).
+        if (previous == ActiveTool.ADJUST && tool != ActiveTool.ADJUST) endSelectionLook()
+        // Leaving the layers panel ends picking several layers.
+        if (previous == ActiveTool.LAYERS && tool != ActiveTool.LAYERS && _uiState.value.isLayerMultiSelect)
+            _uiState.value = _uiState.value.copy(isLayerMultiSelect = false, selectedLayerIds = emptySet())
         // Leaving a transient editor (filters/adjustments/text/transform) should never
         // leave a half-open history transaction. Commit what the user can currently see.
         if (previous != tool && pendingTransactionSnapshot != null) {
@@ -835,12 +866,21 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             cropTargetWidth = if (tool == ActiveTool.CROP_PERSPECTIVE) _uiState.value.cropTargetWidth else 0,
             cropTargetHeight = if (tool == ActiveTool.CROP_PERSPECTIVE) _uiState.value.cropTargetHeight else 0
         )
+        if (previous != tool) when (tool) {
+            // With a selection: Adjust works on a clipped adjustment layer masked by it...
+            ActiveTool.ADJUST -> beginSelectionLook()
+            // ...and Transform moves only the selected pixels (cut to their own layer first).
+            ActiveTool.TRANSFORM -> floatSelectionForTransform()
+            else -> {}
+        }
     }
 
     /** Restore the state captured at the beginning of the current transient edit. */
     fun cancelHistoryTransaction() {
         val snapshot = pendingTransactionSnapshot ?: return
         val proj = _uiState.value.currentProject ?: run { pendingTransactionSnapshot = null; return }
+        val prevIdx = _uiState.value.selectedLayerIndex
+        val prevId = proj.layers.getOrNull(prevIdx)?.id
         proj.width = snapshot.width
         proj.height = snapshot.height
         restoreLayers(proj, snapshot.layers.map { it.snapshotLayer() })
@@ -848,9 +888,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         pendingTransactionSnapshot = null
         val wasDirty = pendingTransactionWasDirty
         pendingTransactionWasDirty = false
+        // A layer added during the edit (e.g. a selection adjustment) is gone: select the one below it.
+        val keptIdx = proj.layers.indexOfFirst { it.id == prevId }.takeIf { it >= 0 }
+            ?: (prevIdx - 1).coerceIn(0, (proj.layers.size - 1).coerceAtLeast(0))
         _uiState.value = _uiState.value.copy(
             currentProject = proj.copy(layers = ArrayList(proj.layers)),
             renderRevision = proj.renderRevision,
+            selectedLayerIndex = keptIdx,
             isProjectDirty = wasDirty
         )
         if (wasDirty) scheduleAutosave()
@@ -1123,7 +1167,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private fun historyProtectedFileNames(): Set<String> {
         val names = mutableSetOf<String>()
         fun collect(snapshot: ProjectSnapshot?) {
-            snapshot?.layers?.forEach { l -> l.sourceAssetPath?.let { names.add(File(it).name) } }
+            snapshot?.layers?.forEach { l ->
+                l.sourceAssetPath?.let { names.add(File(it).name) }
+                // A layer that undo / redo can bring back keeps its saved Before image.
+                names.add(com.example.data.repository.ProjectRepository.BEFORE_KEEP_PREFIX + l.id)
+            }
         }
         undoStack.forEach { collect(it) }
         redoStack.forEach { collect(it) }
@@ -1529,9 +1577,100 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
             saveHistoryState()
             layer.ensureMaskAnchor()
+            val followers = transformFollowers(proj, layer)
+            val before = placementOf(layer)
             action(layer)
+            follow(followers, before, placementOf(layer))
             commitProjectMutation()
         }
+    }
+
+    /**
+     * A new Adjustment layer above [idx], clipped to it and masked by the selection, so a look
+     * (filter, LUT, adjustments) changes only the selected area of that layer, like Photoshop's
+     * Image > Adjustments on a selection. Null without a selection or for a non-pixel layer.
+     */
+    private fun selectionLookLayer(proj: Project, idx: Int): Layer? {
+        val layer = proj.layers.getOrNull(idx) ?: return null
+        if (layer.type != LayerType.IMAGE && layer.type != LayerType.TEXT) return null
+        val selection = _uiState.value.selectionMask?.takeIf { !it.isRecycled && SelectionEngine.hasSelection(it) } ?: return null
+        val mask = documentSizedMask(selection, proj.width, proj.height).let { if (it === selection) it.copy(Bitmap.Config.ALPHA_8, true) else it }
+        return Layer(
+            id = java.util.UUID.randomUUID().toString(),
+            name = uniqueLayerName(tr(R.string.layer_name_selection_look), proj),
+            type = LayerType.ADJUSTMENT,
+            adjustments = ColorAdjustments(),
+            maskBitmap = mask,
+            isClipped = true
+        ).also { it.maskAnchor = it.currentMaskAnchor() }
+    }
+
+    /** Adjustment layer added when the Adjust panel opened over a selection (removed if left unused). */
+    private var selectionLookId: String? = null
+    private var selectionLookBaseIndex = -1
+
+    /**
+     * Opening the Adjust panel with a selection on an image or text layer: its sliders work on
+     * a new clipped Adjustment layer masked by the selection (they start at zero instead of the
+     * layer's own values, so nothing is applied twice).
+     */
+    fun beginSelectionLook() {
+        if (selectionLookId != null) return
+        val proj = _uiState.value.currentProject ?: return
+        val idx = _uiState.value.selectedLayerIndex
+        val layer = proj.layers.getOrNull(idx) ?: return
+        if (layer.isLocked) return
+        val look = selectionLookLayer(proj, idx) ?: return
+        beginHistoryTransaction()
+        proj.layers.add(idx + 1, look)
+        selectionLookId = look.id
+        selectionLookBaseIndex = idx
+        clearSmartAutoSession()
+        commitProjectMutation(selectedLayerIndex = idx + 1, statusMessage = tr(R.string.status_look_in_selection))
+    }
+
+    /** Closing the Adjust panel: an untouched selection Adjustment layer is taken away again. */
+    fun endSelectionLook() {
+        val id = selectionLookId ?: return
+        selectionLookId = null
+        val proj = _uiState.value.currentProject ?: return
+        val i = proj.layers.indexOfFirst { it.id == id }
+        if (i < 0) return
+        val l = proj.layers[i]
+        val unused = l.adjustments.isIdentity() && !l.adjustments.hasCurves() && l.filter == FilterType.NONE && l.lutId == null
+        if (!unused) return
+        val base = selectionLookBaseIndex.coerceIn(0, proj.layers.size - 2)
+        if (pendingTransactionSnapshot != null) {
+            cancelHistoryTransaction()
+        } else {
+            saveHistoryState()
+            proj.layers.removeAt(i)
+            commitProjectMutation(selectedLayerIndex = base)
+        }
+    }
+
+    /**
+     * Changes the selected layer's look (filter, LUT, preset, adjustments). With an active
+     * selection on an image or text layer the change goes to a new clipped Adjustment layer
+     * masked by the selection (one per edit session), so only the selected area changes.
+     */
+    fun updateLookTransient(action: (Layer) -> Unit) {
+        val proj = _uiState.value.currentProject ?: return
+        val idx = _uiState.value.selectedLayerIndex
+        val layer = proj.layers.getOrNull(idx) ?: return
+        if (!layer.isLocked) {
+            if (pendingTransactionSnapshot == null) beginHistoryTransaction()
+            val look = selectionLookLayer(proj, idx)
+            if (look != null) {
+                proj.layers.add(idx + 1, look)
+                clearSmartAutoSession()
+                _uiState.value = _uiState.value.copy(
+                    selectedLayerIndex = idx + 1,
+                    statusMessage = tr(R.string.status_look_in_selection)
+                )
+            }
+        }
+        updateSelectedLayerTransient(action)
     }
 
     fun updateSelectedLayerTransient(action: (Layer) -> Unit) {
@@ -1544,7 +1683,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 beginHistoryTransaction()
             }
             layer.ensureMaskAnchor()
+            // Picked layers / a group's contents move, scale and rotate with the selected layer.
+            val followers = transformFollowers(proj, layer)
+            val before = placementOf(layer)
             action(layer)
+            follow(followers, before, placementOf(layer))
             proj.markDirty()
             _uiState.value = _uiState.value.copy(
                 currentProject = proj.copy(layers = ArrayList(proj.layers)),
@@ -1579,6 +1722,430 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    // --- Several layers at once and layer groups ------------------------------------------
+
+    fun setLayerMultiSelect(enabled: Boolean) {
+        val proj = _uiState.value.currentProject
+        val current = proj?.layers?.getOrNull(_uiState.value.selectedLayerIndex)?.id
+        _uiState.value = _uiState.value.copy(
+            isLayerMultiSelect = enabled,
+            // Starts with the layer that was selected.
+            selectedLayerIds = if (enabled && current != null) setOf(current) else emptySet()
+        )
+    }
+
+    fun toggleLayerPicked(id: String) {
+        val proj = _uiState.value.currentProject ?: return
+        val ids = _uiState.value.selectedLayerIds
+        val next = if (id in ids) ids - id else ids + id
+        val idx = proj.layers.indexOfFirst { it.id == id }
+        _uiState.value = _uiState.value.copy(
+            selectedLayerIds = next,
+            // The last picked layer is the one the tools work on.
+            selectedLayerIndex = if (id !in ids && idx >= 0) idx else _uiState.value.selectedLayerIndex
+        )
+    }
+
+    fun pickAllLayers(all: Boolean) {
+        val proj = _uiState.value.currentProject ?: return
+        _uiState.value = _uiState.value.copy(selectedLayerIds = if (all) proj.layers.map { it.id }.toSet() else emptySet())
+    }
+
+    /** The layers an action applies to: the picked ones in multi-select, else the selected one. */
+    private fun targetLayers(proj: Project): List<Layer> {
+        val st = _uiState.value
+        val ids = if (st.isLayerMultiSelect) st.selectedLayerIds
+            else setOfNotNull(proj.layers.getOrNull(st.selectedLayerIndex)?.id)
+        return proj.layers.filter { it.id in ids }
+    }
+
+    /** [targets] without those already inside a picked group (the group carries them). */
+    private fun rootsOf(proj: Project, targets: List<Layer>): List<Layer> {
+        val ids = targets.map { it.id }.toSet()
+        return targets.filter { t -> com.example.engine.LayerTree.ancestors(proj.layers, t).none { it.id in ids } }
+    }
+
+    /** [targets] plus everything inside the picked groups, in layer order. */
+    private fun expandedTargets(proj: Project, targets: List<Layer>): List<Layer> {
+        val ids = HashSet<String>()
+        for (t in targets) {
+            ids.add(t.id)
+            if (t.type == LayerType.GROUP) ids.addAll(com.example.engine.LayerTree.descendants(proj.layers, t.id))
+        }
+        return proj.layers.filter { it.id in ids }
+    }
+
+    private fun anyLocked(proj: Project, layers: List<Layer>): Boolean =
+        layers.any { com.example.engine.LayerTree.effectivelyLocked(proj.layers, it) }
+
+    /** After a change of the layer structure: group layout restored, selection kept on [keepId]. */
+    private fun commitStructure(proj: Project, keepId: String?, @StringRes status: Int? = null, pick: Set<String>? = null) {
+        com.example.engine.LayerTree.normalize(proj.layers)
+        proj.layers.firstOrNull()?.isClipped = false
+        val idx = proj.layers.indexOfFirst { it.id == keepId }.takeIf { it >= 0 }
+            ?: _uiState.value.selectedLayerIndex.coerceIn(0, (proj.layers.size - 1).coerceAtLeast(0))
+        val live = proj.layers.map { it.id }.toSet()
+        commitProjectMutation(
+            selectedLayerIndex = idx,
+            statusMessage = status?.let { tr(it) },
+            transformState = { it.copy(selectedLayerIds = (pick ?: it.selectedLayerIds).filter { id -> id in live }.toSet()) }
+        )
+    }
+
+    /** Deletes the picked layers (groups with their contents). */
+    fun deleteLayers() {
+        val proj = _uiState.value.currentProject ?: return
+        val targets = expandedTargets(proj, targetLayers(proj))
+        if (targets.isEmpty()) return
+        if (anyLocked(proj, targets)) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_locked_delete)); return }
+        if (targets.size >= proj.layers.size) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_cannot_delete_all_layers)); return }
+        saveHistoryState()
+        val ids = targets.map { it.id }.toSet()
+        val lowest = proj.layers.indexOfFirst { it.id in ids }
+        proj.layers.removeAll { it.id in ids }
+        val keep = proj.layers.getOrNull((lowest - 1).coerceAtLeast(0))?.id
+        commitStructure(proj, keep, R.string.status_layers_deleted, pick = emptySet())
+        if (_uiState.value.isLayerMultiSelect) _uiState.value = _uiState.value.copy(isLayerMultiSelect = false)
+    }
+
+    /** Duplicates the picked layers (groups with their contents) above the topmost of them. */
+    fun duplicateLayers() {
+        val proj = _uiState.value.currentProject ?: return
+        val targets = expandedTargets(proj, targetLayers(proj))
+        if (targets.isEmpty()) return
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_duplicating_layer))
+            try {
+                val idMap = targets.associate { it.id to java.util.UUID.randomUUID().toString() }
+                val copies = withContext(Dispatchers.Default) {
+                    targets.map { t ->
+                        t.duplicateLayer(uniqueLayerName(tr(R.string.layer_name_copy, t.name), proj))
+                    }
+                }
+                // Copies keep their structure: ids remapped, parents inside the copy follow.
+                val fixed = copies.mapIndexed { i, c ->
+                    val orig = targets[i]
+                    c.copy(id = idMap.getValue(orig.id), parentId = orig.parentId?.let { idMap[it] ?: it })
+                }
+                saveHistoryState()
+                val top = proj.layers.indexOfLast { l -> targets.any { it.id == l.id } }
+                proj.layers.addAll(top + 1, fixed)
+                val newIds = fixed.map { it.id }.toSet()
+                commitStructure(proj, fixed.last().id, R.string.status_layers_duplicated,
+                    pick = if (_uiState.value.isLayerMultiSelect) newIds else null)
+                _uiState.value = _uiState.value.copy(isProcessing = false)
+            } catch (e: OutOfMemoryError) {
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_duplicate_failed))
+            } catch (e: Exception) {
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_duplicate_failed))
+            }
+        }
+    }
+
+    fun setLayersVisible(visible: Boolean) {
+        val proj = _uiState.value.currentProject ?: return
+        val targets = targetLayers(proj)
+        if (targets.isEmpty()) return
+        saveHistoryState()
+        targets.forEach { it.isVisible = visible }
+        commitProjectMutation()
+    }
+
+    fun setLayersLocked(locked: Boolean) {
+        val proj = _uiState.value.currentProject ?: return
+        val targets = targetLayers(proj)
+        if (targets.isEmpty()) return
+        saveHistoryState()
+        expandedTargets(proj, targets).forEach { it.isLocked = locked }
+        commitProjectMutation()
+    }
+
+    /** Puts the picked layers into a new group (Ctrl+G). */
+    fun groupLayers() {
+        val proj = _uiState.value.currentProject ?: return
+        val roots = rootsOf(proj, targetLayers(proj))
+        if (roots.isEmpty()) return
+        if (anyLocked(proj, roots)) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_layer_locked)); return }
+        saveHistoryState()
+        val topmost = roots.last()
+        val group = Layer(
+            id = java.util.UUID.randomUUID().toString(),
+            name = uniqueLayerName(tr(R.string.layer_name_group, proj.layers.count { it.type == LayerType.GROUP } + 1), proj),
+            type = LayerType.GROUP,
+            parentId = com.example.engine.LayerTree.parentOf(proj.layers, topmost)
+        )
+        roots.forEach { it.parentId = group.id; it.isClipped = false }
+        proj.layers.add(proj.layers.indexOf(topmost) + 1, group)
+        commitStructure(proj, group.id, R.string.status_layers_grouped, pick = setOf(group.id))
+        if (_uiState.value.isLayerMultiSelect) _uiState.value = _uiState.value.copy(isLayerMultiSelect = false, selectedLayerIds = emptySet())
+    }
+
+    /** Takes the members out of the selected group(s) and removes the group (Shift+Ctrl+G). */
+    fun ungroupLayers() {
+        val proj = _uiState.value.currentProject ?: return
+        val groups = targetLayers(proj).filter { it.type == LayerType.GROUP }
+        if (groups.isEmpty()) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_not_a_group)); return }
+        if (anyLocked(proj, groups)) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_layer_locked)); return }
+        saveHistoryState()
+        var keep: String? = null
+        for (g in groups) {
+            val members = proj.layers.filter { it.parentId == g.id }
+            members.forEach { it.parentId = g.parentId }
+            keep = keep ?: members.lastOrNull()?.id
+            proj.layers.remove(g)
+        }
+        commitStructure(proj, keep, R.string.status_layers_ungrouped, pick = emptySet())
+        if (_uiState.value.isLayerMultiSelect) _uiState.value = _uiState.value.copy(isLayerMultiSelect = false)
+    }
+
+    fun toggleGroupCollapsed(groupId: String) {
+        val proj = _uiState.value.currentProject ?: return
+        val g = proj.layers.firstOrNull { it.id == groupId && it.type == LayerType.GROUP } ?: return
+        g.isCollapsed = !g.isCollapsed
+        // Folding is a view setting: saved with the project but not an undo step.
+        commitProjectMutation()
+    }
+
+    /** Merges the picked layers (groups with their contents) into one image layer. */
+    fun mergeLayers() {
+        val proj = _uiState.value.currentProject ?: return
+        val picked = targetLayers(proj)
+        val single = picked.singleOrNull()
+        // One group selected: merge the group; otherwise at least two layers are needed.
+        if (picked.size < 2 && single?.type != LayerType.GROUP) {
+            _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_pick_two_layers)); return
+        }
+        mergeIntoOne(proj, expandedTargets(proj, picked), R.string.status_layers_merged)
+    }
+
+    /** Merges all visible layers into one; hidden layers stay as they are. */
+    fun mergeVisibleLayers() {
+        val proj = _uiState.value.currentProject ?: return
+        val visible = proj.layers.filter { !com.example.engine.LayerTree.effectivelyHidden(proj.layers, it) }
+        val visibleIds = visible.map { it.id }.toSet()
+        val withGroups = proj.layers.filter { l -> l.id in visibleIds }
+        if (withGroups.size < 2) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_pick_two_layers)); return }
+        mergeIntoOne(proj, withGroups, R.string.status_layers_merged)
+    }
+
+    /** Flatten Image: everything into one layer; hidden layers are discarded. */
+    fun flattenImage() {
+        val proj = _uiState.value.currentProject ?: return
+        if (proj.layers.size < 2) return
+        mergeIntoOne(proj, proj.layers.toList(), R.string.status_image_flattened)
+    }
+
+    private fun mergeIntoOne(proj: Project, layers: List<Layer>, @StringRes done: Int) {
+        if (layers.isEmpty() || _uiState.value.isProcessing) return
+        if (anyLocked(proj, layers)) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_locked_merge)); return }
+        val ids = layers.map { it.id }.toSet()
+        val topmost = layers.last()
+        // The merged layer sits where the topmost one was, in the group that held it.
+        var parent = com.example.engine.LayerTree.parentOf(proj.layers, topmost)
+        while (parent != null && parent in ids) parent = proj.layers.firstOrNull { it.id == parent }?.let { com.example.engine.LayerTree.parentOf(proj.layers, it) }
+        val name = if (topmost.type == LayerType.GROUP && layers.size > 1) topmost.name else layers.filter { it.type != LayerType.GROUP }.joinToString(" + ") { it.name }.take(60)
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_merging_layers))
+            var historySaved = false
+            try {
+                val merged = withContext(Dispatchers.Default) {
+                    LayerRenderer.renderCompositeCanvas(getApplication(), layers, proj.width, proj.height,
+                        includeBackground = false, backgroundColor = null, maxPreviewDimension = null)
+                }
+                val n = Layer(
+                    id = java.util.UUID.randomUUID().toString(),
+                    name = name.ifBlank { tr(R.string.layer_name_merged) },
+                    type = LayerType.IMAGE,
+                    contentWidth = proj.width.toFloat(),
+                    contentHeight = proj.height.toFloat(),
+                    parentId = parent
+                )
+                if (!commitDestructiveBitmap(proj, n, merged, proj.width.toFloat(), proj.height.toFloat(), "merge")) throw java.io.IOException("Save failed")
+                if (merged !== n.bitmap && !merged.isRecycled) merged.recycle()
+                saveHistoryState()
+                historySaved = true
+                val at = proj.layers.indexOf(topmost) + 1
+                proj.layers.add(at, n)
+                proj.layers.removeAll { it.id in ids }
+                commitStructure(proj, n.id, done, pick = emptySet())
+                _uiState.value = _uiState.value.copy(isProcessing = false, isLayerMultiSelect = false)
+            } catch (e: OutOfMemoryError) {
+                if (historySaved) rollbackToLastHistoryState()
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_merge_failed))
+            } catch (e: Exception) {
+                if (historySaved) rollbackToLastHistoryState()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_merge_failed))
+            }
+        }
+    }
+
+    /**
+     * Moves the layer at [from] (a group with its contents) so it ends up at [to]; dropped among
+     * a group's members it joins that group, dropped outside it leaves it.
+     */
+    private fun moveBlock(proj: Project, from: Int, to: Int) {
+        val layer = proj.layers[from]
+        val inside = if (layer.type == LayerType.GROUP) com.example.engine.LayerTree.descendants(proj.layers, layer.id) else emptySet()
+        val target = proj.layers[to]
+        if (target.id in inside) return
+        val block = proj.layers.filter { it.id == layer.id || it.id in inside }
+        proj.layers.removeAll { it.id == layer.id || it.id in inside }
+        val tIdx = proj.layers.indexOf(target)
+        // Moving up lands above the target, moving down below it.
+        val at = if (to > from) tIdx + 1 else tIdx
+        proj.layers.addAll(at, block)
+        val below = proj.layers.getOrNull(at - 1)
+        val above = proj.layers.getOrNull(at + block.size)
+        // The group the drop point is in, seen from the layer above and from the layer below;
+        // where they differ (at a group's edge) the outer one wins.
+        val fromAbove = above?.let { if (it.type == LayerType.GROUP) it.id else com.example.engine.LayerTree.parentOf(proj.layers, it) }
+        val fromBelow = below?.let { com.example.engine.LayerTree.parentOf(proj.layers, it) }
+        fun depthOf(id: String?): Int = id?.let { g -> proj.layers.firstOrNull { it.id == g } }?.let { com.example.engine.LayerTree.depth(proj.layers, it) + 1 } ?: 0
+        layer.parentId = when {
+            above == null -> null
+            below == null -> fromAbove
+            fromAbove == fromBelow -> fromAbove
+            depthOf(fromAbove) <= depthOf(fromBelow) -> fromAbove
+            else -> fromBelow
+        }
+        if (layer.parentId == layer.id || layer.parentId in inside) layer.parentId = null
+    }
+
+    // --- Align and distribute -------------------------------------------------------------
+
+    enum class LayerAlign { LEFT, H_CENTER, RIGHT, TOP, V_CENTER, BOTTOM, DISTRIBUTE_H, DISTRIBUTE_V }
+
+    /** Box of [layer] on the document (rotation included), or null for layers with no pixels. */
+    private fun docBounds(proj: Project, layer: Layer): android.graphics.RectF? {
+        if (layer.type == LayerType.GROUP) {
+            var out: android.graphics.RectF? = null
+            for (id in com.example.engine.LayerTree.descendants(proj.layers, layer.id)) {
+                val l = proj.layers.firstOrNull { it.id == id } ?: continue
+                if (l.type == LayerType.GROUP) continue
+                val b = docBounds(proj, l) ?: continue
+                out = out?.apply { union(b) } ?: android.graphics.RectF(b)
+            }
+            return out
+        }
+        val (w, h) = when {
+            layer.type == LayerType.ADJUSTMENT -> return null
+            layer.bitmap != null || layer.contentWidth > 0f -> layer.intrinsicDocumentWidth() to layer.intrinsicDocumentHeight()
+            layer.type == LayerType.TEXT -> LayerRenderer.measureTextLayer(getApplication(), layer, proj.width.toFloat())
+            else -> proj.width.toFloat() to proj.height.toFloat()
+        }
+        val m = Matrix().apply {
+            postTranslate(-w / 2f, -h / 2f)
+            postScale(layer.scaleX, layer.scaleY)
+            postRotate(layer.rotation)
+            postTranslate(proj.width / 2f + layer.positionX, proj.height / 2f + layer.positionY)
+        }
+        return android.graphics.RectF(0f, 0f, w, h).also { m.mapRect(it) }
+    }
+
+    /** Moves [layer] (a group: everything in it) by (dx, dy) document pixels. */
+    private fun shiftLayer(proj: Project, layer: Layer, dx: Float, dy: Float) {
+        val moving = if (layer.type == LayerType.GROUP)
+            com.example.engine.LayerTree.descendants(proj.layers, layer.id).mapNotNull { id -> proj.layers.firstOrNull { it.id == id } }
+        else listOf(layer)
+        for (l in moving) {
+            if (l.type == LayerType.GROUP) continue
+            l.ensureMaskAnchor()
+            l.positionX += dx; l.positionY += dy
+        }
+    }
+
+    /**
+     * Aligns the picked layers to each other (one layer: to the canvas), or spaces three or more
+     * evenly, like Photoshop's Align / Distribute.
+     */
+    fun alignLayers(mode: LayerAlign) {
+        val proj = _uiState.value.currentProject ?: return
+        val items = rootsOf(proj, targetLayers(proj)).mapNotNull { l -> docBounds(proj, l)?.let { l to it } }
+        if (items.isEmpty()) return
+        if (anyLocked(proj, items.map { it.first })) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_layer_locked)); return }
+        val distribute = mode == LayerAlign.DISTRIBUTE_H || mode == LayerAlign.DISTRIBUTE_V
+        if (distribute && items.size < 3) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_distribute_needs_three)); return }
+        val ref = if (items.size == 1) android.graphics.RectF(0f, 0f, proj.width.toFloat(), proj.height.toFloat())
+            else android.graphics.RectF(items[0].second).apply { items.forEach { union(it.second) } }
+        saveHistoryState()
+        when (mode) {
+            LayerAlign.DISTRIBUTE_H -> {
+                val sorted = items.sortedBy { it.second.centerX() }
+                val first = sorted.first().second.centerX(); val last = sorted.last().second.centerX()
+                sorted.forEachIndexed { i, (l, b) -> shiftLayer(proj, l, first + (last - first) * i / (sorted.size - 1) - b.centerX(), 0f) }
+            }
+            LayerAlign.DISTRIBUTE_V -> {
+                val sorted = items.sortedBy { it.second.centerY() }
+                val first = sorted.first().second.centerY(); val last = sorted.last().second.centerY()
+                sorted.forEachIndexed { i, (l, b) -> shiftLayer(proj, l, 0f, first + (last - first) * i / (sorted.size - 1) - b.centerY()) }
+            }
+            else -> for ((l, b) in items) {
+                val dx = when (mode) {
+                    LayerAlign.LEFT -> ref.left - b.left
+                    LayerAlign.H_CENTER -> ref.centerX() - b.centerX()
+                    LayerAlign.RIGHT -> ref.right - b.right
+                    else -> 0f
+                }
+                val dy = when (mode) {
+                    LayerAlign.TOP -> ref.top - b.top
+                    LayerAlign.V_CENTER -> ref.centerY() - b.centerY()
+                    LayerAlign.BOTTOM -> ref.bottom - b.bottom
+                    else -> 0f
+                }
+                shiftLayer(proj, l, dx, dy)
+            }
+        }
+        commitProjectMutation(statusMessage = tr(R.string.status_layers_aligned))
+    }
+
+    // --- Transforming several layers together ----------------------------------------------
+
+    /** Layers that move with the selected one: the other picked layers, or a group's contents. */
+    private fun transformFollowers(proj: Project, primary: Layer): List<Layer> {
+        val st = _uiState.value
+        val picked = if (st.isLayerMultiSelect && st.selectedLayerIds.size > 1 && primary.id in st.selectedLayerIds)
+            proj.layers.filter { it.id in st.selectedLayerIds } else listOf(primary)
+        if (picked.size == 1 && primary.type != LayerType.GROUP) return emptyList()
+        return expandedTargets(proj, rootsOf(proj, picked)).filter { it.id != primary.id && it.type != LayerType.GROUP && it.type != LayerType.ADJUSTMENT }
+    }
+
+    /** Rotates by [degrees] and scales by ([sx], [sy]) [layers] around the centre of all of them. */
+    private fun turnTogether(proj: Project, layers: List<Layer>, degrees: Float, sx: Float, sy: Float) {
+        val boxes = layers.filter { it.type != LayerType.GROUP }.mapNotNull { docBounds(proj, it) }
+        val all = boxes.firstOrNull()?.let { f -> android.graphics.RectF(f).apply { boxes.forEach { union(it) } } } ?: return
+        val px = all.centerX() - proj.width / 2f; val py = all.centerY() - proj.height / 2f
+        val zero = Placement(px, py, 1f, 1f, 0f)
+        follow(layers.filter { it.type != LayerType.GROUP && it.type != LayerType.ADJUSTMENT }, zero, Placement(px, py, sx, sy, degrees), px, py)
+    }
+
+    private class Placement(val x: Float, val y: Float, val sx: Float, val sy: Float, val rot: Float)
+    private fun placementOf(l: Layer) = Placement(l.positionX, l.positionY, l.scaleX, l.scaleY, l.rotation)
+
+    /**
+     * Gives [followers] the same move / scale / rotation that the selected layer just got
+     * ([before] to [after]), around [pivot] (document offsets from the centre).
+     */
+    private fun follow(followers: List<Layer>, before: Placement, after: Placement, pivotX: Float = before.x, pivotY: Float = before.y) {
+        if (followers.isEmpty()) return
+        val dsx = if (kotlin.math.abs(before.sx) > 1e-6f) after.sx / before.sx else 1f
+        val dsy = if (kotlin.math.abs(before.sy) > 1e-6f) after.sy / before.sy else 1f
+        val dr = after.rot - before.rot
+        val tx = after.x - before.x; val ty = after.y - before.y
+        if (dsx == 1f && dsy == 1f && dr == 0f && tx == 0f && ty == 0f) return
+        val rad = Math.toRadians(dr.toDouble())
+        val c = kotlin.math.cos(rad).toFloat(); val s = kotlin.math.sin(rad).toFloat()
+        for (f in followers) {
+            f.ensureMaskAnchor()
+            val rx = (f.positionX - pivotX) * dsx; val ry = (f.positionY - pivotY) * dsy
+            f.positionX = pivotX + tx + rx * c - ry * s
+            f.positionY = pivotY + ty + rx * s + ry * c
+            f.scaleX *= dsx; f.scaleY *= dsy
+            f.rotation = (f.rotation + dr) % 360f
+        }
+    }
+
     fun deleteSelectedLayer() {
         val proj = _uiState.value.currentProject ?: return
         val idx = _uiState.value.selectedLayerIndex
@@ -1587,6 +2154,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             if (layer.isLocked) {
                 _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_locked_delete))
                 return
+            }
+            if (layer.type == LayerType.GROUP) {
+                // A group goes with everything in it.
+                deleteLayers(); return
             }
             saveHistoryState()
             proj.layers.removeAt(idx)
@@ -1607,6 +2178,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 return
             }
 
+            if (layer.type == LayerType.GROUP) { duplicateLayers(); return }
             val copyName = uniqueLayerName(tr(R.string.layer_name_copy, layer.name), proj)
             viewModelScope.launch {
                 _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_duplicating_layer))
@@ -1654,6 +2226,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (from !in proj.layers.indices || to !in proj.layers.indices || from == to) return
         saveHistoryState()
         val selectedId = proj.layers.getOrNull(_uiState.value.selectedLayerIndex)?.id
+        if (proj.layers.any { it.type == LayerType.GROUP || it.parentId != null }) {
+            // Groups move with their contents; a layer dropped among a group's members joins it.
+            moveBlock(proj, from, to)
+            commitStructure(proj, selectedId ?: proj.layers.getOrNull(to)?.id)
+            return
+        }
         val layer = proj.layers.removeAt(from)
         proj.layers.add(to, layer)
         // A clipped layer moved to the bottom has nothing to clip to.
@@ -1685,6 +2263,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val layer = proj.layers.getOrNull(index) ?: return
         saveHistoryState()
         layer.isLocked = !layer.isLocked
+        // A group locks (or unlocks) everything in it.
+        if (layer.type == LayerType.GROUP) com.example.engine.LayerTree.descendants(proj.layers, layer.id)
+            .forEach { id -> proj.layers.firstOrNull { it.id == id }?.isLocked = layer.isLocked }
         commitProjectMutation(
             statusMessage = if (layer.isLocked) tr(R.string.status_layer_locked) else tr(R.string.status_layer_unlocked)
         )
@@ -1742,6 +2323,18 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun mergeSelectedLayerDown() {
         val proj = _uiState.value.currentProject ?: return
         val idx = _uiState.value.selectedLayerIndex
+        val sel = proj.layers.getOrNull(idx)
+        if (sel != null && (sel.type == LayerType.GROUP || proj.layers.any { it.type == LayerType.GROUP })) {
+            // Merge Group, or this layer with the one below it at the same level.
+            if (sel.type == LayerType.GROUP) { mergeIntoOne(proj, expandedTargets(proj, listOf(sel)), R.string.status_layers_merged); return }
+            val level = com.example.engine.LayerTree.level(proj.layers, com.example.engine.LayerTree.parentOf(proj.layers, sel))
+            val below = level.getOrNull(level.indexOf(sel) - 1) ?: return
+            if (below.type == LayerType.ADJUSTMENT) {
+                _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_merge_into_adjustment)); return
+            }
+            mergeIntoOne(proj, expandedTargets(proj, listOf(below, sel)), R.string.status_layers_merged)
+            return
+        }
         if (idx in 1 until proj.layers.size) {
             val topLayer = proj.layers[idx]
             val bottomLayer = proj.layers[idx - 1]
@@ -1903,6 +2496,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
             saveHistoryState()
             layer.ensureMaskAnchor()
+            val followers = transformFollowers(proj, layer)
+            if (followers.isNotEmpty()) {
+                // Several layers turn together around the middle of all of them.
+                turnTogether(proj, listOf(layer) + followers, degrees, 1f, 1f)
+                commitProjectMutation(); return
+            }
             layer.rotation = (layer.rotation + degrees) % 360f
             commitProjectMutation()
         }
@@ -1926,6 +2525,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 return
             }
             saveHistoryState()
+            val followers = transformFollowers(proj, layer)
+            if (followers.isNotEmpty()) {
+                turnTogether(proj, listOf(layer) + followers, 0f, if (horizontal) -1f else 1f, if (horizontal) 1f else -1f)
+                commitProjectMutation(); return
+            }
             if (horizontal) {
                 layer.scaleX *= -1f
             } else {
@@ -2426,6 +3030,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
      * adjustments (curves, HSL, colour replacement and the user's own slider values are kept).
      * The strength can then be tuned with [setSmartAutoStrength].
      */
+    /** The last Smart Auto found visible noise. */
+    private var smartAutoNoisy = false
+
     fun applySmartAutoCorrection() {
         val proj = _uiState.value.currentProject ?: return
         val idx = _uiState.value.selectedLayerIndex
@@ -2445,26 +3052,58 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             try {
                 // A small image is enough for analysis. An adjustment layer is analysed on what is
                 // below it; an image layer on its own pixels.
+                val own = layer.bitmap?.takeIf { layer.type == LayerType.IMAGE && !it.isRecycled }
                 src = withContext(Dispatchers.Default) {
-                    val own = layer.bitmap?.takeIf { layer.type == LayerType.IMAGE && !it.isRecycled }
-                    own?.let { ImageProcessor.scaleBitmapToMaxDimension(it, 512) } ?: LayerRenderer.renderCompositeCanvas(
+                    own?.let { ImageProcessor.scaleBitmapToMaxDimension(it, 1024) } ?: LayerRenderer.renderCompositeCanvas(
                         getApplication(),
                         proj.layers.subList(0, idx),
                         proj.width,
                         proj.height,
                         includeBackground = true,
-                        maxPreviewDimension = 512
+                        maxPreviewDimension = 1024
                     )
                 }
-                val delta = withContext(Dispatchers.Default) {
-                    ImageProcessor.computeSmartAutoAdjustments(src!!, layer.adjustments)
+                // Faces: exposure and white balance are judged on them first.
+                val faces = try {
+                    com.example.engine.FaceWarp.detect(src!!).map { f ->
+                        android.graphics.RectF(f.box.left / src!!.width, f.box.top / src!!.height, f.box.right / src!!.width, f.box.bottom / src!!.height)
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Throwable) { emptyList() }
+                // Noise is measured at full detail: a crop from the middle of the layer's pixels.
+                val detailSource = own ?: src!!
+                val result = withContext(Dispatchers.Default) {
+                    val cw = minOf(768, detailSource.width); val ch = minOf(768, detailSource.height)
+                    val detail = Bitmap.createBitmap(detailSource, (detailSource.width - cw) / 2, (detailSource.height - ch) / 2, cw, ch)
+                    try {
+                        com.example.engine.SmartAuto.analyze(src!!, layer.adjustments, faces, detail)
+                    } finally {
+                        if (detail !== detailSource && !detail.isRecycled) detail.recycle()
+                    }
                 }
+                val delta = result.delta
+                smartAutoNoisy = result.noisy
                 saveHistoryState()
-                layer.adjustments = ImageProcessor.combineSmartAuto(layer.adjustments, delta, 1f)
-                smartAutoSession = SmartAutoSession(layer.id, delta, 1f)
+                // With a selection the correction goes to a clipped adjustment layer masked by it.
+                val curIdx = proj.layers.indexOf(layer)
+                val look = if (curIdx >= 0) selectionLookLayer(proj, curIdx) else null
+                val target = if (look != null) {
+                    look.adjustments = ImageProcessor.combineSmartAuto(ColorAdjustments(), delta, 1f)
+                    proj.layers.add(curIdx + 1, look)
+                    look
+                } else {
+                    layer.adjustments = ImageProcessor.combineSmartAuto(layer.adjustments, delta, 1f)
+                    layer
+                }
+                smartAutoSession = SmartAutoSession(target.id, delta, 1f)
                 commitProjectMutation(
-                    statusMessage = tr(if (delta.isIdentity()) R.string.status_smart_auto_nothing else R.string.status_smart_auto_applied),
-                    transformState = { it.copy(isProcessing = false, smartAutoStrength = if (delta.isIdentity()) null else 1f) }
+                    selectedLayerIndex = if (look != null) curIdx + 1 else _uiState.value.selectedLayerIndex,
+                    statusMessage = when {
+                        delta.isIdentity() && !delta.hasCurves() -> tr(R.string.status_smart_auto_nothing)
+                        // Noisy photo: sharpening was left out; suggest noise reduction.
+                        result.noisy -> tr(R.string.status_smart_auto_noisy)
+                        else -> tr(R.string.status_smart_auto_applied)
+                    },
+                    transformState = { it.copy(isProcessing = false, smartAutoStrength = if (delta.isIdentity() && !delta.hasCurves()) null else 1f) }
                 )
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
@@ -4107,10 +4746,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         class Start(
             val layer: Layer, val docW: Int, val docH: Int, val tool: com.example.engine.RetouchTool,
             val brush: com.example.engine.RetouchBrush, val cloneOffsetDoc: PointF?,
-            val points: List<PointF>, val docRadius: Float
+            val points: List<PointF>, val docRadius: Float, val selection: Bitmap? = null
         ) : RetouchEvent()
         class Move(val points: List<PointF>, val docRadius: Float) : RetouchEvent()
-        class Heal(val layer: Layer, val docW: Int, val docH: Int, val points: List<PointF>, val docRadius: Float) : RetouchEvent()
+        class Heal(val layer: Layer, val docW: Int, val docH: Int, val points: List<PointF>, val docRadius: Float, val selection: Bitmap? = null) : RetouchEvent()
         class Fill(
             val layer: Layer, val docW: Int, val docH: Int, val pointDoc: PointF, val endDoc: PointF?,
             val brush: com.example.engine.RetouchBrush, val selection: Bitmap?
@@ -4141,7 +4780,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     /** The stroke being processed has recorded its undo step (roll it back if it fails). */
     private var retouchStepOpen = false
     private class GradientDrag(val layer: Layer, val start: PointF, val selection: Bitmap?)
-    private class HealStroke(val layer: Layer, val points: MutableList<PointF>, val docRadius: Float)
+    private class HealStroke(val layer: Layer, val points: MutableList<PointF>, val docRadius: Float, val selection: Bitmap?)
     /** Spot Healing stroke being painted (document coordinates). */
     private var healStroke: HealStroke? = null
     /** Fill in gradient mode: where the drag started. */
@@ -4266,7 +4905,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             if (tool == com.example.engine.RetouchTool.PATCH) { patchStartDoc = points.firstOrNull(); return }
             if (tool == com.example.engine.RetouchTool.HEAL) {
                 // Spot Healing: the stroke is collected and healed when the finger lifts.
-                healStroke = HealStroke(layer!!, points.toMutableList(), docRadius)
+                healStroke = HealStroke(layer!!, points.toMutableList(), docRadius, st.selectionMask?.takeIf { hasSelection })
                 return
             }
             val first = points.firstOrNull() ?: return
@@ -4295,7 +4934,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }
             queueRetouch(RetouchEvent.Start(
                 layer!!, proj.width, proj.height, tool, st.retouchBrush,
-                if (tool == com.example.engine.RetouchTool.CLONE) cloneOffsetDoc else null, points.toList(), docRadius
+                if (tool == com.example.engine.RetouchTool.CLONE) cloneOffsetDoc else null, points.toList(), docRadius,
+                // Every brush stays inside the selection, as in Photoshop.
+                st.selectionMask?.takeIf { hasSelection }
             ))
             return
         }
@@ -4305,7 +4946,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             heal.points.addAll(points)
             if (phase == StrokePhase.END) {
                 healStroke = null
-                queueRetouch(RetouchEvent.Heal(heal.layer, proj.width, proj.height, heal.points.toList(), heal.docRadius))
+                queueRetouch(RetouchEvent.Heal(heal.layer, proj.width, proj.height, heal.points.toList(), heal.docRadius, heal.selection))
             }
             return
         }
@@ -4402,9 +5043,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (known != null && !known.bitmap.isRecycled &&
             known.contentWidth == layer.contentWidth && known.contentHeight == layer.contentHeight) return
         val copy = try { current.copy(Bitmap.Config.ARGB_8888, false) } catch (e: OutOfMemoryError) { null } ?: return
-        _uiState.value = _uiState.value.copy(
-            compareBefore = _uiState.value.compareBefore + (layer.id to com.example.data.model.LayerBefore(copy, layer.contentWidth, layer.contentHeight))
-        )
+        val before = com.example.data.model.LayerBefore(copy, layer.contentWidth, layer.contentHeight)
+        _uiState.value = _uiState.value.copy(compareBefore = _uiState.value.compareBefore + (layer.id to before))
+        // Saved with the project, so Before/After still works after the app is closed.
+        val projectId = _uiState.value.currentProject?.id ?: return
+        viewModelScope.launch { repository.saveBeforeImage(projectId, layer.id, before) }
     }
 
     private fun onRetouchFailed(@StringRes msg: Int) {
@@ -4479,6 +5122,15 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
+    /** The document selection [sel] on the layer's own pixels (alpha bytes and row stride), or null. */
+    private fun localSelectionBytes(c: com.example.engine.RetouchCanvas, sel: Bitmap?): Pair<ByteArray?, Int> {
+        val s = sel?.takeIf { !it.isRecycled } ?: return null to c.width
+        val m = Bitmap.createBitmap(c.width, c.height, Bitmap.Config.ALPHA_8)
+        android.graphics.Canvas(m).drawBitmap(s, strokeToLocal!!, Paint(Paint.FILTER_BITMAP_FLAG))
+        val r = SelectionEngine.readAlphaBytes(m); m.recycle()
+        return r.first to r.second
+    }
+
     private suspend fun handleRetouchEvent(ev: RetouchEvent) {
         when (ev) {
             is RetouchEvent.Start -> {
@@ -4491,7 +5143,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 val off = ev.cloneOffsetDoc?.let { o ->
                     val v = floatArrayOf(o.x, o.y); strokeToLocal!!.mapVectors(v); v
                 } ?: floatArrayOf(0f, 0f)
-                withContext(retouchDispatcher) { session.canvas.beginStroke(ev.tool, ev.brush, off[0], off[1]) }
+                withContext(retouchDispatcher) {
+                    val (selBytes, selStride) = localSelectionBytes(session.canvas, ev.selection)
+                    session.canvas.beginStroke(ev.tool, ev.brush, off[0], off[1], selBytes, selStride)
+                }
                 paintRetouch(session.canvas, ev.points, ev.docRadius)
             }
             is RetouchEvent.Move -> {
@@ -4520,7 +5175,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 val local = toLocalPoints(ev.points)
                 val r = ev.docRadius * strokeLocalScale
                 val changed = withContext(retouchDispatcher) {
-                    c.heal(local, r)?.also { area -> c.downsampleInto(preview, area) }
+                    val (selBytes, selStride) = localSelectionBytes(c, ev.selection)
+                    c.heal(local, r, selBytes, selStride)?.also { area -> c.downsampleInto(preview, area) }
                 }
                 if (changed == null) {
                     onRetouchFailed(R.string.heal_failed)
@@ -4547,13 +5203,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     else -> { _, _ -> b.fillColor or (0xFF shl 24) }
                 }
                 val changed = withContext(retouchDispatcher) {
-                    var bytes: ByteArray? = null; var stride = c.width
-                    ev.selection?.takeIf { !it.isRecycled }?.let { sel ->
-                        val m = Bitmap.createBitmap(c.width, c.height, Bitmap.Config.ALPHA_8)
-                        android.graphics.Canvas(m).drawBitmap(sel, strokeToLocal!!, Paint(Paint.FILTER_BITMAP_FLAG))
-                        val r = SelectionEngine.readAlphaBytes(m); m.recycle()
-                        bytes = r.first; stride = r.second
-                    }
+                    val (bytes, stride) = localSelectionBytes(c, ev.selection)
                     c.fill(
                         kotlin.math.floor(local[0]).toInt(), kotlin.math.floor(local[1]).toInt(), paint, b.fillOpacity,
                         b.fillTolerance, b.fillContiguous, b.fillAntiAlias, bytes, stride
@@ -4681,6 +5331,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     ) {
         val proj = _uiState.value.currentProject ?: return
         if (_uiState.value.isProcessing) return
+        if (!requireRasterized { createFrequencySeparation(radiusDoc, method, threshold, threeBand, detailRadiusDoc) }) return
         val idx = _uiState.value.selectedLayerIndex
         val layer = proj.layers.getOrNull(idx) ?: return
         if (layer.isLocked) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_layer_locked)); return }
@@ -4769,7 +5420,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /** True when Liquify can work on the selected layer; otherwise explains why in the status. */
-    fun canLiquifySelectedLayer(): Boolean {
+    /** The active selection on [layer]'s preview pixels (ALPHA_8, caller recycles), or null. */
+    fun selectionOnLayerPreview(layer: Layer): Bitmap? {
+        val proj = _uiState.value.currentProject ?: return null
+        val sel = _uiState.value.selectionMask?.takeIf { !it.isRecycled && SelectionEngine.hasSelection(it) } ?: return null
+        return try { SelectionEngine.mapDocumentMaskToLayerLocal(sel, layer, proj.width, proj.height) } catch (e: Throwable) { null }
+    }
+
+        fun canLiquifySelectedLayer(): Boolean {
         val layer = _uiState.value.currentProject?.layers?.getOrNull(_uiState.value.selectedLayerIndex) ?: return false
         val msg = when {
             layer.isLocked -> R.string.status_layer_locked
@@ -4834,6 +5492,284 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    // --- AI colorize (model downloaded on first use) --------------------------------------
+
+    /** The AI Colorize dialog: model state and download progress. */
+    data class AiColorizeState(
+        val installed: Boolean,
+        /** Download size in bytes, once known. */
+        val size: Long? = null,
+        val downloading: Boolean = false,
+        val progress: Float = 0f,
+        val error: Boolean = false
+    )
+
+    private var aiDownloadJob: Job? = null
+
+    fun openAiColorize() {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.getOrNull(_uiState.value.selectedLayerIndex) ?: return
+        if (layer.type != LayerType.IMAGE || layer.bitmap == null) {
+            _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.effect_needs_image_layer)); return
+        }
+        val ctx = getApplication<Application>()
+        val installed = com.example.engine.ai.ModelStore.installed(ctx, com.example.engine.ai.AiColorizer.MODEL) != null
+        _uiState.value = _uiState.value.copy(aiColorize = AiColorizeState(installed))
+        if (!installed) viewModelScope.launch {
+            // The size to show before downloading.
+            val size = try { com.example.engine.ai.ModelStore.fetchManifest(com.example.engine.ai.AiColorizer.MODEL).size } catch (e: Exception) { null }
+            _uiState.value.aiColorize?.let { s -> if (!s.installed) _uiState.value = _uiState.value.copy(aiColorize = s.copy(size = size)) }
+        }
+    }
+
+    fun closeAiColorize() {
+        aiDownloadJob?.cancel()
+        aiDownloadJob = null
+        _uiState.value = _uiState.value.copy(aiColorize = null)
+    }
+
+    fun downloadAiModel() {
+        if (aiDownloadJob?.isActive == true) return
+        val ctx = getApplication<Application>()
+        _uiState.value.aiColorize?.let { _uiState.value = _uiState.value.copy(aiColorize = it.copy(downloading = true, error = false, progress = 0f)) }
+        aiDownloadJob = viewModelScope.launch {
+            try {
+                val m = com.example.engine.ai.ModelStore.download(ctx, com.example.engine.ai.AiColorizer.MODEL) { done, total ->
+                    viewModelScope.launch(Dispatchers.Main) {
+                        _uiState.value.aiColorize?.let { s ->
+                            _uiState.value = _uiState.value.copy(aiColorize = s.copy(size = total, progress = if (total > 0) done.toFloat() / total else 0f))
+                        }
+                    }
+                }
+                _uiState.value.aiColorize?.let { _uiState.value = _uiState.value.copy(aiColorize = it.copy(installed = true, downloading = false, progress = 1f, size = m.size)) }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _uiState.value.aiColorize?.let { _uiState.value = _uiState.value.copy(aiColorize = it.copy(downloading = false, error = true)) }
+            }
+        }
+    }
+
+    /** Removes the downloaded model (frees its space; it is downloaded again when needed). */
+    fun deleteAiModel() {
+        com.example.engine.ai.ModelStore.delete(getApplication(), com.example.engine.ai.AiColorizer.MODEL)
+        _uiState.value = _uiState.value.copy(aiColorize = _uiState.value.aiColorize?.copy(installed = false, progress = 0f), statusMessage = tr(R.string.ai_model_deleted))
+    }
+
+    /**
+     * Colorizes the selected image layer (as it looks) into a new layer above it, at full
+     * resolution. [intensity] scales the predicted colour.
+     */
+    fun runAiColorize(intensity: Float) {
+        val proj = _uiState.value.currentProject ?: return
+        if (_uiState.value.isProcessing) return
+        val idx = _uiState.value.selectedLayerIndex
+        val layer = proj.layers.getOrNull(idx) ?: return
+        if (layer.type != LayerType.IMAGE || layer.bitmap == null) return
+        val ctx = getApplication<Application>()
+        _uiState.value = _uiState.value.copy(aiColorize = null)
+        if (pendingTransactionSnapshot != null) saveHistoryState()
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_ai_colorizing))
+            var full: Bitmap? = null
+            var looked: Bitmap? = null
+            var colored: Bitmap? = null
+            var historySaved = false
+            try {
+                full = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Image unavailable")
+                looked = withContext(Dispatchers.Default) { com.example.engine.LayerRenderer.applyLayerLook(full!!, layer) }
+                colored = withContext(Dispatchers.Default) { com.example.engine.ai.AiColorizer.colorize(ctx, looked!!, intensity) }
+                val n = layer.copy(
+                    id = java.util.UUID.randomUUID().toString(),
+                    name = uniqueLayerName(tr(R.string.layer_name_ai_colorized), proj),
+                    bitmap = null, sourceAssetPath = null,
+                    filter = FilterType.NONE, filterIntensity = 1f, lutId = null, adjustments = ColorAdjustments(),
+                    isVisible = true, isLocked = false, isEditingMask = false,
+                    isSmartObject = false, smartFilters = emptyList(), smartFilterMask = null,
+                    textConfig = layer.textConfig.copy(), distort = layer.distort?.copyOf()
+                )
+                if (!commitDestructiveBitmap(proj, n, colored!!, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "colorize")) {
+                    throw java.io.IOException("Save failed")
+                }
+                n.maskAnchor = layer.maskAnchor
+                saveHistoryState()
+                historySaved = true
+                proj.layers.add(idx + 1, n)
+                commitProjectMutation(selectedLayerIndex = idx + 1, statusMessage = tr(R.string.status_ai_colorized),
+                    transformState = { it.copy(isProcessing = false) })
+            } catch (e: OutOfMemoryError) {
+                if (historySaved) rollbackToLastHistoryState()
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_processing_failed_memory))
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                if (historySaved) rollbackToLastHistoryState()
+                _uiState.value = _uiState.value.copy(isProcessing = false)
+                throw e
+            } catch (e: Throwable) {
+                if (historySaved) rollbackToLastHistoryState()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_ai_colorize_failed))
+            } finally {
+                listOf(full, looked, colored).distinct().forEach { b -> b?.let { if (it !== layer.bitmap && !it.isRecycled) it.recycle() } }
+            }
+        }
+    }
+
+    // --- Smart Objects ------------------------------------------------------------------------
+
+    /** Action waiting for the user to agree to rasterize the selected Smart Object. */
+    private var afterRasterize: (() -> Unit)? = null
+
+    /**
+     * Pixel tools on a Smart Object: ask to rasterize it first (as Photoshop does). Returns true
+     * when [action] may run now; otherwise it runs after the user agrees.
+     */
+    fun requireRasterized(action: () -> Unit): Boolean {
+        val layer = _uiState.value.currentProject?.layers?.getOrNull(_uiState.value.selectedLayerIndex)
+        if (layer == null || !layer.isSmartObject) return true
+        afterRasterize = action
+        _uiState.value = _uiState.value.copy(askRasterize = true)
+        return false
+    }
+
+    fun answerRasterize(rasterize: Boolean) {
+        val then = afterRasterize
+        afterRasterize = null
+        _uiState.value = _uiState.value.copy(askRasterize = false)
+        if (rasterize) rasterizeSmartObject(then)
+    }
+
+    /** Convert to Smart Object: effects applied from now on stay editable. */
+    fun convertToSmartObject() {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.getOrNull(_uiState.value.selectedLayerIndex) ?: return
+        if (layer.type != LayerType.IMAGE) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.effect_needs_image_layer)); return }
+        if (layer.isSmartObject) return
+        saveHistoryState()
+        layer.isSmartObject = true
+        commitProjectMutation(statusMessage = tr(R.string.status_smart_object_created))
+    }
+
+    private fun updateSmartLayer(layerId: String, transient: Boolean = false, change: (Layer) -> Unit) {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.firstOrNull { it.id == layerId && it.isSmartObject } ?: return
+        if (layer.isLocked) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_layer_locked)); return }
+        if (transient) {
+            if (pendingTransactionSnapshot == null) beginHistoryTransaction()
+            change(layer)
+            proj.markDirty()
+            _uiState.value = _uiState.value.copy(currentProject = proj.copy(layers = ArrayList(proj.layers)), renderRevision = proj.renderRevision)
+        } else {
+            if (pendingTransactionSnapshot != null) commitPendingHistory() else saveHistoryState()
+            change(layer)
+            commitProjectMutation()
+        }
+    }
+
+    /** A Pro effect on a Smart Object becomes a Smart Filter (on the selection: with a filter mask from it). */
+    private fun addSmartFilter(effect: ProFilterType, params: com.example.engine.ProEffectParams) {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.getOrNull(_uiState.value.selectedLayerIndex) ?: return
+        val sel = _uiState.value.selectionMask?.takeIf { !it.isRecycled && SelectionEngine.hasSelection(it) }
+        val mask = if (sel != null && layer.smartFilterMask == null) try {
+            SelectionEngine.mapDocumentMaskToLayerLocal(sel, layer, proj.width, proj.height)
+        } catch (e: Throwable) { null } else null
+        saveHistoryState()
+        layer.smartFilters = layer.smartFilters + com.example.data.model.SmartFilter(effect = effect, params = params)
+        layer.smartFiltersVisible = true
+        if (mask != null) layer.smartFilterMask = mask
+        commitProjectMutation(statusMessage = tr(R.string.status_smart_filter_added))
+    }
+
+    /** Changes one Smart Filter; [transient] for live slider changes (commit with commitPendingHistory). */
+    fun setSmartFilter(layerId: String, filterId: String, transient: Boolean, change: (com.example.data.model.SmartFilter) -> com.example.data.model.SmartFilter) =
+        updateSmartLayer(layerId, transient) { l -> l.smartFilters = l.smartFilters.map { if (it.id == filterId) change(it) else it } }
+
+    fun removeSmartFilter(layerId: String, filterId: String) =
+        updateSmartLayer(layerId) { l ->
+            l.smartFilters = l.smartFilters.filter { it.id != filterId }
+            if (l.smartFilters.isEmpty()) l.smartFilterMask = null
+        }
+
+    /** Moves a filter one step up (later, on top) or down (earlier) in the order. */
+    fun moveSmartFilter(layerId: String, filterId: String, up: Boolean) =
+        updateSmartLayer(layerId) { l ->
+            val list = l.smartFilters.toMutableList()
+            val i = list.indexOfFirst { it.id == filterId }
+            val j = if (up) i + 1 else i - 1
+            if (i >= 0 && j in list.indices) { val t = list[i]; list[i] = list[j]; list[j] = t; l.smartFilters = list }
+        }
+
+    fun setSmartFiltersVisible(layerId: String, visible: Boolean) = updateSmartLayer(layerId) { it.smartFiltersVisible = visible }
+
+    /** Filter mask from the selection: the filters show only there. */
+    fun smartFilterMaskFromSelection(layerId: String) {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.firstOrNull { it.id == layerId } ?: return
+        val sel = _uiState.value.selectionMask?.takeIf { !it.isRecycled && SelectionEngine.hasSelection(it) }
+            ?: run { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_nothing_selected)); return }
+        val m = try { SelectionEngine.mapDocumentMaskToLayerLocal(sel, layer, proj.width, proj.height) } catch (e: Throwable) { return }
+        updateSmartLayer(layerId) { it.smartFilterMask = m }
+    }
+
+    fun invertSmartFilterMask(layerId: String) {
+        val layer = _uiState.value.currentProject?.layers?.firstOrNull { it.id == layerId } ?: return
+        val m = layer.smartFilterMask?.takeIf { !it.isRecycled } ?: return
+        val w = m.width; val h = m.height
+        val (bytes, stride) = SelectionEngine.readAlphaBytes(m)
+        val px = IntArray(w * h) { i -> (255 - (bytes[(i / w) * stride + i % w].toInt() and 255)) shl 24 }
+        val inv = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8).also { it.setPixels(px, 0, w, 0, 0, w, h) }
+        updateSmartLayer(layerId) { it.smartFilterMask = inv }
+    }
+
+    fun clearSmartFilterMask(layerId: String) = updateSmartLayer(layerId) { it.smartFilterMask = null }
+
+    /**
+     * Rasterize: the Smart Filters are applied to the full-resolution pixels and the layer
+     * becomes an ordinary image layer; then [then] runs.
+     */
+    fun rasterizeSmartObject(then: (() -> Unit)? = null) {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.getOrNull(_uiState.value.selectedLayerIndex) ?: return
+        if (!layer.isSmartObject || _uiState.value.isProcessing) return
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_processing))
+            var src: Bitmap? = null
+            var out: Bitmap? = null
+            var historySaved = false
+            try {
+                val active = layer.smartFiltersVisible && layer.smartFilters.any { it.enabled }
+                if (active) {
+                    src = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Image unavailable")
+                    out = withContext(Dispatchers.Default) { LayerRenderer.applySmartFilters(src!!, layer, 0) }
+                }
+                saveHistoryState()
+                historySaved = true
+                if (out != null && !commitDestructiveBitmap(proj, layer, out!!, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "raster", keepBefore = true)) {
+                    throw java.io.IOException("Save failed")
+                }
+                layer.isSmartObject = false
+                layer.smartFilters = emptyList()
+                layer.smartFilterMask = null
+                commitProjectMutation(statusMessage = tr(R.string.status_rasterized), transformState = { it.copy(isProcessing = false) })
+                then?.invoke()
+            } catch (e: OutOfMemoryError) {
+                if (historySaved) rollbackToLastHistoryState()
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_processing_failed_memory))
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                if (historySaved) rollbackToLastHistoryState()
+                _uiState.value = _uiState.value.copy(isProcessing = false)
+                throw e
+            } catch (e: Exception) {
+                if (historySaved) rollbackToLastHistoryState()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_effect_failed))
+            } finally {
+                src?.let { if (it !== layer.bitmap && !it.isRecycled) it.recycle() }
+                out?.let { if (it !== layer.bitmap && !it.isRecycled) it.recycle() }
+            }
+        }
+    }
+
     fun applyProFilter(effect: ProFilterType, params: com.example.engine.ProEffectParams) {
         val proj = _uiState.value.currentProject ?: return
         val idx = _uiState.value.selectedLayerIndex
@@ -4847,6 +5783,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         if (proEffectJob?.isActive == true) return
+        if (layer.isSmartObject) { addSmartFilter(effect, params); return }
 
         proEffectJob = viewModelScope.launch {
             _uiState.value = _uiState.value.copy(
@@ -5490,6 +6427,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun clearSelection() {
+        // Adjusting the whole layer now: an unused selection Adjustment layer goes away.
+        if (selectionLookId != null) {
+            endSelectionLook()
+            // Still open in the Adjust panel: it keeps working on the layer below.
+        }
         val proj = _uiState.value.currentProject ?: return
         val w = proj.width
         val h = proj.height
@@ -5497,7 +6439,98 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /** Copies the selected pixels of the selected image layer into a new layer placed exactly over them. */
-    fun copySelectionToNewLayer() {
+    /** Edit > Clear: the selected pixels of the selected image layer become transparent. */
+    fun deleteSelectedPixels() = selectionPixelEdit("clear", R.string.status_selection_cleared) { px, w, h, m, st, _ ->
+        com.example.engine.SelectionOps.erase(px, w, h, m, st)
+    }
+
+    /** Edit > Fill: [color] at [opacity] inside the selection. */
+    fun fillSelection(color: Int, opacity: Float) = selectionPixelEdit("fill", R.string.status_selection_filled) { px, w, h, m, st, _ ->
+        com.example.engine.SelectionOps.fill(px, w, h, m, st, color or (0xFF shl 24), opacity)
+    }
+
+    /** Edit > Stroke: a line [widthDoc] document pixels wide along the selection edge. */
+    fun strokeSelection(color: Int, widthDoc: Float, position: com.example.engine.StrokePosition, opacity: Float) =
+        selectionPixelEdit("stroke", R.string.status_selection_stroked) { px, w, h, m, st, perDoc ->
+            com.example.engine.SelectionOps.stroke(px, w, h, m, st, color or (0xFF shl 24), widthDoc * perDoc, position, opacity)
+        }
+
+    /**
+     * Runs [edit] on the selected image layer's full-resolution pixels with the selection on them
+     * (alpha bytes, stride, layer pixels per document pixel), as one undo step.
+     */
+    private fun selectionPixelEdit(
+        prefix: String, @StringRes done: Int,
+        edit: (IntArray, Int, Int, ByteArray, Int, Float) -> Unit
+    ) {
+        val proj = _uiState.value.currentProject ?: return
+        if (_uiState.value.isProcessing) return
+        val idx = _uiState.value.selectedLayerIndex
+        val layer = proj.layers.getOrNull(idx) ?: return
+        val mask = _uiState.value.selectionMask?.takeIf { !it.isRecycled && SelectionEngine.hasSelection(it) }
+        if (mask == null) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_nothing_selected)); return }
+        if (layer.isLocked) { _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_layer_locked)); return }
+        if (layer.type != LayerType.IMAGE || layer.bitmap == null) {
+            _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.effect_needs_image_layer)); return
+        }
+        if (!requireRasterized { selectionPixelEdit(prefix, done, edit) }) return
+        if (pendingTransactionSnapshot != null) saveHistoryState()
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_processing))
+            var src: Bitmap? = null
+            var local: Bitmap? = null
+            var out: Bitmap? = null
+            var historySaved = false
+            try {
+                src = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Image unavailable")
+                val work = workLayerFor(layer, src!!)
+                out = withContext(Dispatchers.Default) {
+                    local = SelectionEngine.mapDocumentMaskToLayerLocal(mask, work, proj.width, proj.height)
+                    val (mb, stride) = SelectionEngine.readAlphaBytes(local!!)
+                    val w = src!!.width; val h = src!!.height
+                    val px = IntArray(w * h); src!!.getPixels(px, 0, w, 0, 0, w, h)
+                    edit(px, w, h, mb, stride, w / layer.intrinsicDocumentWidth().coerceAtLeast(1f))
+                    Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(px, 0, w, 0, 0, w, h) }
+                }
+                saveHistoryState()
+                historySaved = true
+                if (!commitDestructiveBitmap(proj, layer, out!!, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), prefix, keepBefore = true)) {
+                    throw java.io.IOException("Save failed")
+                }
+                commitProjectMutation(statusMessage = tr(done), transformState = { it.copy(isProcessing = false) })
+            } catch (e: OutOfMemoryError) {
+                if (historySaved) rollbackToLastHistoryState()
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_processing_failed_memory))
+            } catch (e: Exception) {
+                if (historySaved) rollbackToLastHistoryState()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_effect_failed))
+            } finally {
+                local?.let { if (!it.isRecycled) it.recycle() }
+                src?.let { if (it !== layer.bitmap && !it.isRecycled) it.recycle() }
+                out?.let { if (it !== layer.bitmap && !it.isRecycled) it.recycle() }
+            }
+        }
+    }
+
+    fun copySelectionToNewLayer() = selectionToNewLayer(cut = false)
+
+    /** Layer via Cut: the selected pixels move to a new layer (and leave a hole in this one). */
+    fun cutSelectionToNewLayer() = selectionToNewLayer(cut = true)
+
+    /**
+     * Transforming with a selection on an image layer: the selected pixels are cut to their own
+     * layer first, so moving, scaling, rotating or flipping moves only them (as in Photoshop).
+     */
+    fun floatSelectionForTransform() {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.getOrNull(_uiState.value.selectedLayerIndex) ?: return
+        val sel = _uiState.value.selectionMask?.takeIf { !it.isRecycled && SelectionEngine.hasSelection(it) } ?: return
+        if (layer.type != LayerType.IMAGE || layer.isLocked || sel.isRecycled) return
+        selectionToNewLayer(cut = true, status = R.string.status_selection_floated)
+    }
+
+    private fun selectionToNewLayer(cut: Boolean, @StringRes status: Int = if (cut) R.string.status_cut_new_layer else R.string.status_copied_new_layer) {
         val proj = _uiState.value.currentProject ?: return
         val idx = _uiState.value.selectedLayerIndex
         if (idx !in proj.layers.indices) return
@@ -5507,6 +6540,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             _uiState.value = _uiState.value.copy(statusMessage = tr(R.string.status_nothing_selected))
             return
         }
+        if (cut && !requireRasterized { selectionToNewLayer(cut, status) }) return
         viewModelScope.launch {
             _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_copying_selection))
             var src: Bitmap? = null
@@ -5520,11 +6554,20 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 copy = withContext(Dispatchers.Default) { SelectionEngine.copySelectedToNewBitmap(src!!, local!!) }
                     ?: throw IllegalStateException("No pixels selected")
+                if (cut && layer.isLocked) throw IllegalStateException("Locked")
+                // Layer via Cut: what was copied is removed from the source layer.
+                val holed = if (cut) withContext(Dispatchers.Default) {
+                    val (mb, stride) = SelectionEngine.readAlphaBytes(local!!)
+                    val w = src!!.width; val h = src!!.height
+                    val px = IntArray(w * h); src!!.getPixels(px, 0, w, 0, 0, w, h)
+                    com.example.engine.SelectionOps.erase(px, w, h, mb, stride)
+                    Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(px, 0, w, 0, 0, w, h) }
+                } else null
                 // Same placement and look as the source layer (skew / distort included), so the
                 // copy sits exactly over the pixels it came from.
                 val n = Layer(
                     id = java.util.UUID.randomUUID().toString(),
-                    name = tr(R.string.layer_name_selection),
+                    name = tr(if (cut) R.string.layer_name_cut else R.string.layer_name_selection),
                     type = LayerType.IMAGE,
                     exifTags = layer.exifTags,
                     positionX = layer.positionX,
@@ -5548,10 +6591,15 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                     throw java.io.IOException("Save failed")
                 }
                 saveHistoryState()
+                if (holed != null) {
+                    val ok = commitDestructiveBitmap(proj, layer, holed, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "cut", keepBefore = true)
+                    if (holed !== layer.bitmap && !holed.isRecycled) holed.recycle()
+                    if (!ok) { rollbackToLastHistoryState(); throw java.io.IOException("Save failed") }
+                }
                 proj.layers.add(idx + 1, n)
                 commitProjectMutation(
                     selectedLayerIndex = idx + 1,
-                    statusMessage = tr(R.string.status_copied_new_layer),
+                    statusMessage = tr(status),
                     transformState = { it.copy(selectionMask = SelectionEngine.createBlankMask(proj.width, proj.height), isProcessing = false) }
                 )
                 clearSelectionHistory()

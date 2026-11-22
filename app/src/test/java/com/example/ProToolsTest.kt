@@ -6,6 +6,7 @@ import android.graphics.Color
 import androidx.test.core.app.ApplicationProvider
 import com.example.data.model.AdjustmentKind
 import com.example.data.model.AdjustmentLayerParams
+import com.example.data.model.ColorAdjustments
 import com.example.data.model.Layer
 import com.example.data.model.LayerType
 import com.example.data.model.Project
@@ -24,6 +25,7 @@ import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -81,6 +83,394 @@ class ProToolsTest {
         val loaded = runBlocking { repo.getProjectById("adjk_proj") }!!.layers.single()
         assertEquals(AdjustmentKind.LEVELS, loaded.adjustmentKind)
         assertEquals(p, loaded.adjustmentParams)
+    }
+
+    @Test
+    fun `before images survive closing the app and go with their layer`() {
+        val repo = ProjectRepository(context)
+        val proj = Project(id = "before_proj", name = "B", width = 20, height = 20)
+        proj.layers.add(Layer(id = "img-1", name = "Img", type = LayerType.IMAGE, bitmap = solid(20, 20, Color.BLUE), contentWidth = 20f, contentHeight = 20f))
+        runBlocking { assertTrue(repo.saveProject(proj)) }
+        val before = com.example.data.model.LayerBefore(solid(20, 20, Color.RED), 20f, 13.5f)
+        runBlocking { assertTrue(repo.saveBeforeImage("before_proj", "img-1", before)) }
+        val loaded = runBlocking { repo.loadBeforeImages("before_proj", setOf("img-1")) }
+        val b = loaded["img-1"]!!
+        assertEquals(Color.RED, b.bitmap.getPixel(5, 5))
+        assertEquals(20f, b.contentWidth, 0f); assertEquals(13.5f, b.contentHeight, 0f)
+        // Kept while undo can bring the layer back, removed once it is really gone.
+        proj.layers.clear()
+        runBlocking { assertTrue(repo.saveProject(proj, setOf(ProjectRepository.BEFORE_KEEP_PREFIX + "img-1"))) }
+        assertEquals(1, runBlocking { repo.loadBeforeImages("before_proj", setOf("img-1")) }.size)
+        runBlocking { assertTrue(repo.saveProject(proj)) }
+        assertTrue(runBlocking { repo.loadBeforeImages("before_proj", setOf("img-1")) }.isEmpty())
+    }
+
+    // --- Smart Auto ---------------------------------------------------------------------------
+
+    /** A natural-looking test scene: smooth tones over the full range, a few colours, some texture. */
+    private fun scene(w: Int = 96, h: Int = 96, f: (x: Int, y: Int, base: Int) -> Int): Bitmap {
+        val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val rnd = java.util.Random(11)
+        for (y in 0 until h) for (x in 0 until w) {
+            val base = (x * 255 / (w - 1) * 0.7 + y * 255 / (h - 1) * 0.3).toInt() + rnd.nextInt(5) - 2
+            b.setPixel(x, y, f(x, y, base.coerceIn(0, 255)))
+        }
+        return b
+    }
+
+    private fun grey(v: Int) = Color.rgb(v.coerceIn(0, 255), v.coerceIn(0, 255), v.coerceIn(0, 255))
+
+    private fun medianLuma(b: Bitmap): Int {
+        val l = ArrayList<Int>()
+        for (y in 0 until b.height) for (x in 0 until b.width) { val p = b.getPixel(x, y); l.add(com.example.engine.SmartAuto.luma(Color.red(p), Color.green(p), Color.blue(p))) }
+        l.sort(); return l[l.size / 2]
+    }
+
+    private fun meanRgb(b: Bitmap, r: android.graphics.Rect = android.graphics.Rect(0, 0, b.width, b.height)): FloatArray {
+        var sr = 0.0; var sg = 0.0; var sb = 0.0; var n = 0
+        for (y in r.top until r.bottom) for (x in r.left until r.right) { val p = b.getPixel(x, y); sr += Color.red(p); sg += Color.green(p); sb += Color.blue(p); n++ }
+        return floatArrayOf((sr / n).toFloat(), (sg / n).toFloat(), (sb / n).toFloat())
+    }
+
+    private fun corrected(src: Bitmap, faces: List<android.graphics.RectF> = emptyList()): Pair<com.example.engine.SmartAuto.Result, Bitmap> {
+        val res = com.example.engine.SmartAuto.analyze(src, ColorAdjustments(), faces, src)
+        return res to com.example.engine.ImageProcessor.applyAdjustments(src, com.example.engine.ImageProcessor.combineSmartAuto(ColorAdjustments(), res.delta, 1f))
+    }
+
+    @Test
+    fun `smart auto brightens an underexposed photo towards mid grey`() {
+        val img = scene { _, _, v -> grey((v * 0.3).toInt()) }
+        val (res, out) = corrected(img)
+        assertEquals(com.example.engine.SmartAuto.Scene.NORMAL, res.scene)
+        assertTrue("exposure ${res.delta.exposure}", res.delta.exposure > 15f)
+        assertTrue("median ${medianLuma(out)}", medianLuma(out) > medianLuma(img) + 30)
+    }
+
+    @Test
+    fun `smart auto removes a colour cast from a neutral scene`() {
+        val img = scene { _, _, v -> Color.rgb((v * 0.8).toInt(), (v * 0.9).toInt(), (v * 1.0 + 25).toInt().coerceAtMost(255)) }
+        val (res, out) = corrected(img)
+        assertTrue("warms a blue cast: ${res.delta.temperature}", res.delta.temperature > 5f)
+        val before = meanRgb(img); val after = meanRgb(out)
+        assertTrue("blue - red gap shrinks", (after[2] - after[0]) < (before[2] - before[0]) * 0.8f)
+    }
+
+    @Test
+    fun `smart auto leaves a balanced photo nearly alone`() {
+        val img = scene { _, _, v -> grey(v) }
+        val (res, _) = corrected(img)
+        val d = res.delta
+        assertTrue("exposure ${d.exposure}", kotlin.math.abs(d.exposure) < 10f)
+        assertTrue("temperature ${d.temperature}", kotlin.math.abs(d.temperature) < 5f)
+        assertTrue("tint ${d.tint}", kotlin.math.abs(d.tint) < 5f)
+    }
+
+    @Test
+    fun `smart auto keeps snow bright and a night scene dark`() {
+        // Snow: bright and colourless; must not be pulled down to grey.
+        val snow = scene { _, _, v -> grey(180 + v / 4) }
+        val (rs, outSnow) = corrected(snow)
+        assertEquals(com.example.engine.SmartAuto.Scene.HIGH_KEY, rs.scene)
+        assertTrue("snow not darkened: ${medianLuma(outSnow)} vs ${medianLuma(snow)}", medianLuma(outSnow) >= medianLuma(snow) - 3)
+        // Night: mostly dark with bright lights; may be lifted a little, not turned into day.
+        val night = scene { x, y, v -> if ((x / 12 + y / 12) % 7 == 0) grey(245) else grey(8 + v / 12) }
+        val (rn, outNight) = corrected(night)
+        assertEquals(com.example.engine.SmartAuto.Scene.NIGHT, rn.scene)
+        assertTrue("night stays dark: ${medianLuma(outNight)}", medianLuma(outNight) < 70)
+    }
+
+    @Test
+    fun `smart auto keeps the warmth of a sunset`() {
+        val sunset = scene { _, _, v -> Color.rgb(140 + v / 3, 60 + v / 3, 20 + v / 8) }
+        val (res, _) = corrected(sunset)
+        assertEquals(com.example.engine.SmartAuto.Scene.SUNSET, res.scene)
+        assertTrue("not cooled much: ${res.delta.temperature}", res.delta.temperature >= -6f)
+    }
+
+    @Test
+    fun `smart auto meters a backlit face`() {
+        // Bright background, dark face in the middle.
+        val face = android.graphics.RectF(0.3f, 0.25f, 0.7f, 0.75f)
+        val img = scene { x, y, v ->
+            val inFace = x in 29..67 && y in 24..72
+            if (inFace) Color.rgb(70 + v / 20, 50 + v / 20, 40 + v / 20) else grey(200 + v / 5)
+        }
+        val (res, out) = corrected(img, listOf(face))
+        assertEquals(com.example.engine.SmartAuto.Scene.BACKLIT, res.scene)
+        val faceBefore = meanRgb(img, android.graphics.Rect(38, 38, 58, 60))
+        val faceAfter = meanRgb(out, android.graphics.Rect(38, 38, 58, 60))
+        assertTrue("face brighter: ${faceAfter[0]} vs ${faceBefore[0]}", faceAfter[0] > faceBefore[0] + 15)
+    }
+
+    @Test
+    fun `smart auto adds a tone curve to a flat photo and the strength scales it`() {
+        val flat = scene { _, _, v -> grey(90 + v / 4) }
+        val (res, out) = corrected(flat)
+        assertTrue("curve added", res.delta.hasCurves())
+        fun std(b: Bitmap): Double {
+            val l = ArrayList<Int>()
+            for (y in 0 until b.height) for (x in 0 until b.width) l.add(Color.red(b.getPixel(x, y)))
+            val m = l.average(); return kotlin.math.sqrt(l.sumOf { (it - m) * (it - m) } / l.size)
+        }
+        assertTrue("more contrast", std(out) > std(flat) * 1.2)
+        // Strength: half the correction moves the curve points half as far, zero removes it.
+        val full = com.example.engine.ImageProcessor.combineSmartAuto(ColorAdjustments(), res.delta, 1f)
+        val back = com.example.engine.ImageProcessor.combineSmartAuto(full, res.delta, -1f)
+        assertFalse(back.hasCurves())
+        val half = com.example.engine.ImageProcessor.combineSmartAuto(ColorAdjustments(), res.delta, 0.5f)
+        val i = 2
+        assertEquals((full.curvesRgb[i].y - full.curvesRgb[i].x) / 2f, half.curvesRgb[i].y - half.curvesRgb[i].x, 0.01f)
+    }
+
+    @Test
+    fun `smart auto does not sharpen a noisy photo`() {
+        val rnd = java.util.Random(3)
+        val noisy = scene { _, _, v -> grey(v + (rnd.nextGaussian() * 12).toInt()) }
+        assertTrue(com.example.engine.SmartAuto.noiseSigma(noisy) > 3.2f)
+        val (res, _) = corrected(noisy)
+        assertTrue(res.noisy)
+        assertEquals(0f, res.delta.sharpness, 0f)
+        val clean = scene { _, _, v -> grey(v) }
+        assertTrue(com.example.engine.SmartAuto.noiseSigma(clean) < 3.2f)
+    }
+
+    // --- Levels per channel, noise reduction, grain -------------------------------------------
+
+    @Test
+    fun `smart filters render in order with opacity and mask and are saved`() {
+        // Left half black, right half white: a blur softens the edge.
+        val w = 40; val h = 10
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        for (y in 0 until h) for (x in 0 until w) bmp.setPixel(x, y, if (x < 20) Color.BLACK else Color.WHITE)
+        val blur = com.example.data.model.SmartFilter(effect = com.example.data.model.ProFilterType.GAUSSIAN_BLUR,
+            params = com.example.engine.ProEffects.defaults(com.example.data.model.ProFilterType.GAUSSIAN_BLUR).copy(p1 = 4f))
+        val layer = Layer(id = "so", name = "SO", type = LayerType.IMAGE, bitmap = bmp, contentWidth = w.toFloat(), contentHeight = h.toFloat(),
+            isSmartObject = true, smartFilters = listOf(blur))
+        val out = runBlocking { com.example.engine.LayerRenderer.applySmartFilters(bmp, layer, 0) }
+        assertTrue("blurred edge", Color.red(out.getPixel(19, 5)) > 20 && Color.red(out.getPixel(20, 5)) < 235)
+        // Disabled: nothing changes.
+        layer.smartFilters = listOf(blur.copy(enabled = false))
+        val off = runBlocking { com.example.engine.LayerRenderer.applySmartFilters(bmp, layer, 0) }
+        assertEquals(Color.BLACK, off.getPixel(19, 5))
+        // Half opacity: between the two.
+        layer.smartFilters = listOf(blur.copy(opacity = 0.5f))
+        val half = runBlocking { com.example.engine.LayerRenderer.applySmartFilters(bmp, layer, 0) }
+        assertTrue(Color.red(half.getPixel(19, 5)) in 1 until Color.red(out.getPixel(19, 5)))
+        // Filter mask hiding the edge area: the original shows there.
+        layer.smartFilters = listOf(blur)
+        layer.smartFilterMask = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
+        val masked = runBlocking { com.example.engine.LayerRenderer.applySmartFilters(bmp, layer, 0) }
+        assertEquals(Color.BLACK, masked.getPixel(19, 5))
+        // Saved with the project.
+        layer.smartFilterMask = null
+        val repo = ProjectRepository(context)
+        val proj = Project(id = "smart_proj", name = "SP", width = w, height = h)
+        proj.layers.add(layer)
+        runBlocking { assertTrue(repo.saveProject(proj)) }
+        val back = runBlocking { repo.getProjectById("smart_proj") }!!.layers.first { it.id == "so" }
+        assertTrue(back.isSmartObject)
+        assertEquals(listOf(blur), back.smartFilters)
+    }
+
+    @Test
+    fun `ai colorize keeps the lightness and uses the predicted colour`() {
+        val c = com.example.engine.ai.AiColorizer
+        // Lab round trip of greys.
+        for (v in listOf(0, 40, 128, 200, 255)) {
+            val l = c.lightness(Color.rgb(v, v, v))
+            val back = c.labToRgb(l, 0f, 0f)
+            assertTrue("grey $v -> ${Integer.toHexString(back)}", kotlin.math.abs(((back shr 8) and 255) - v) <= 1)
+        }
+        // A grey photo with a "predicted" warm colour: red above blue, lightness kept.
+        val src = Bitmap.createBitmap(30, 20, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 20) for (x in 0 until 30) src.setPixel(x, y, Color.rgb(60 + x * 4, 60 + x * 4, 60 + x * 4))
+        var seen = 0
+        val out = c.colorizeWith(src, 16, 1f) { l -> seen = l.size; FloatArray(2 * l.size) { if (it < l.size) 30f else 20f } }
+        assertEquals(16 * 16, seen)
+        val p = out.getPixel(15, 10)
+        assertTrue(Color.red(p) > Color.blue(p) + 20)
+        assertEquals(c.lightness(src.getPixel(15, 10)), c.lightness(p), 1.5f)
+        // Intensity 0: back to grey.
+        val grey = c.colorizeWith(src, 16, 0f) { l -> FloatArray(2 * l.size) { 30f } }.getPixel(15, 10)
+        assertTrue(kotlin.math.abs(Color.red(grey) - Color.blue(grey)) <= 1)
+        // Transparent pixels stay transparent.
+        src.setPixel(0, 0, Color.TRANSPARENT)
+        assertEquals(0, Color.alpha(c.colorizeWith(src, 16, 1f) { l -> FloatArray(2 * l.size) { 30f } }.getPixel(0, 0)))
+    }
+
+    @Test
+    fun `model manifest and checksum`() {
+        val m = com.example.engine.ai.ModelStore.parseManifest(
+            "{\"name\":\"colorize-v1\",\"file\":\"colorize-v1.tflite\",\"size\":3,\"sha256\":\"BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD\",\"inputSize\":256,\"layout\":\"NHWC\"}")
+        assertEquals(3L, m.size); assertEquals(256, m.inputSize)
+        val f = java.io.File.createTempFile("model", ".bin").apply { writeText("abc") }
+        assertEquals(m.sha256, com.example.engine.ai.ModelStore.sha256(f))
+        // Not installed yet.
+        assertNull(com.example.engine.ai.ModelStore.installed(context, "nothing-here"))
+    }
+
+    @Test
+    fun `colorize gives one hue and keeps lightness`() {
+        val p = AdjustmentLayerParams(colorize = true, colorizeHue = 0f, colorizeSaturation = 100f)
+        val px = intArrayOf(Color.rgb(128, 128, 128), Color.rgb(20, 200, 60), Color.WHITE, Color.BLACK)
+        AdjustmentLayerEngine.colorizePixels(px, p)
+        // Mid grey -> pure red at the same lightness.
+        assertEquals(Color.rgb(255, 1, 1), px[0].let { Color.rgb(Color.red(it), Color.green(it).coerceAtLeast(1), Color.blue(it).coerceAtLeast(1)) })
+        assertTrue(Color.red(px[1]) > Color.green(px[1]) && Color.green(px[1]) == Color.blue(px[1]))
+        assertEquals(Color.WHITE, px[2]); assertEquals(Color.BLACK, px[3])
+        assertEquals(p, AdjustmentLayerEngine.fromJson(JSONObject(AdjustmentLayerEngine.toJson(p).toString())))
+        // Rendered on a Hue/Saturation adjustment layer.
+        val base = Layer(id = "b", name = "B", type = LayerType.IMAGE, bitmap = solid(4, 4, Color.rgb(128, 128, 128)), contentWidth = 4f, contentHeight = 4f)
+        val adj = Layer(id = "a", name = "A", type = LayerType.ADJUSTMENT, adjustmentKind = AdjustmentKind.HUE_SATURATION,
+            adjustmentParams = AdjustmentLayerParams(colorize = true, colorizeHue = 240f, colorizeSaturation = 50f))
+        val out = runBlocking { com.example.engine.LayerRenderer.renderCompositeCanvas(context, listOf(base, adj), 4, 4, includeBackground = false) }
+        val c = out.getPixel(1, 1)
+        assertTrue("blue: ${Integer.toHexString(c)}", Color.blue(c) > Color.red(c) + 40 && Color.red(c) == Color.green(c))
+    }
+
+    @Test
+    fun `levels per channel change only their channel and survive json`() {
+        val p = AdjustmentLayerParams(levelsRed = com.example.data.model.LevelsChannel(inWhite = 200f), levelsBlue = com.example.data.model.LevelsChannel(outWhite = 128f))
+        assertFalse(AdjustmentLayerEngine.isIdentity(AdjustmentKind.LEVELS, p))
+        val src = solid(2, 2, Color.rgb(200, 200, 200))
+        val out = AdjustmentLayerEngine.apply(src, AdjustmentKind.LEVELS, p).getPixel(0, 0)
+        assertEquals(255, Color.red(out))
+        assertEquals(200, Color.green(out))
+        assertEquals(100, Color.blue(out))
+        // Channel first, then RGB.
+        val both = AdjustmentLayerEngine.levelsLut(com.example.data.model.LevelsChannel(inWhite = 200f), com.example.data.model.LevelsChannel(outWhite = 100f))
+        assertEquals(100, both[200])
+        assertEquals(p, AdjustmentLayerEngine.fromJson(JSONObject(AdjustmentLayerEngine.toJson(p).toString())))
+        assertTrue(AdjustmentLayerEngine.isIdentity(AdjustmentKind.LEVELS, AdjustmentLayerParams()))
+    }
+
+    @Test
+    fun `noise reduction smooths noise but keeps edges`() {
+        val w = 120; val h = 80; val rnd = java.util.Random(4)
+        val px = IntArray(w * h) { i ->
+            val v = if (i % w < 60) 60 else 190
+            val n = (rnd.nextGaussian() * 10).toInt(); val cn = (rnd.nextGaussian() * 12).toInt()
+            Color.rgb((v + n + cn).coerceIn(0, 255), (v + n).coerceIn(0, 255), (v + n - cn).coerceIn(0, 255))
+        }
+        fun std(a: IntArray): Double {
+            val l = (10 until 70).flatMap { y -> (10 until 50).map { x -> Color.green(a[y * w + x]) } }
+            val m = l.average(); return kotlin.math.sqrt(l.sumOf { (it - m) * (it - m) } / l.size)
+        }
+        val q = px.copyOf()
+        com.example.engine.NoiseAndGrain.reduceNoise(q, w, h, 60f)
+        assertTrue("less noise", std(q) < std(px) * 0.6)
+        // The edge between the halves stays sharp.
+        assertTrue(Color.green(q[40 * w + 57]) < 90 && Color.green(q[40 * w + 62]) > 160)
+        // As an adjustment.
+        assertFalse(ColorAdjustments(noiseReduction = 20f).isIdentity())
+    }
+
+    @Test
+    fun `noise reduction on a preview matches the export`() {
+        val fw = 400; val fh = 300; val rnd = java.util.Random(7)
+        // Flat grey on the left, fine texture on the right, all with noise.
+        val full = IntArray(fw * fh) { i ->
+            val x = i % fw; val y = i / fw
+            val base = if (x < 200) 120 else if (((x / 4) + (y / 4)) % 2 == 0) 90 else 160
+            val n = (rnd.nextGaussian() * 12).toInt(); val cn = (rnd.nextGaussian() * 10).toInt()
+            Color.rgb((base + n + cn).coerceIn(0, 255), (base + n).coerceIn(0, 255), (base + n - cn).coerceIn(0, 255))
+        }
+        fun down(a: IntArray, w: Int, h: Int): IntArray = IntArray((w / 2) * (h / 2)) { j ->
+            val x = j % (w / 2); val y = j / (w / 2)
+            var r = 0; var g = 0; var b = 0
+            for (dy in 0..1) for (dx in 0..1) { val p = a[(y * 2 + dy) * w + x * 2 + dx]; r += Color.red(p); g += Color.green(p); b += Color.blue(p) }
+            Color.rgb(r / 4, g / 4, b / 4)
+        }
+        fun diff(a: IntArray, b: IntArray) = a.indices.sumOf { kotlin.math.abs(Color.green(a[it]) - Color.green(b[it])).toDouble() } / a.size
+        for (amount in listOf(60f, 90f)) {
+            val export = full.copyOf().also { com.example.engine.NoiseAndGrain.reduceNoise(it, fw, fh, amount) }
+            // Preview at half and at a quarter of the size, with and without the scale.
+            var ew = fw; var eh = fh; var exp = export; var src = full
+            for (scale in listOf(0.5f, 0.25f)) {
+                exp = down(exp, ew, eh); src = down(src, ew, eh); ew /= 2; eh /= 2
+                val old = src.copyOf().also { com.example.engine.NoiseAndGrain.reduceNoise(it, ew, eh, amount) }
+                val new = src.copyOf().also { com.example.engine.NoiseAndGrain.reduceNoise(it, ew, eh, amount, {}, scale) }
+                assertTrue("amount $amount scale $scale: ${diff(new, exp)} vs ${diff(old, exp)}", diff(new, exp) < diff(old, exp))
+            }
+        }
+    }
+
+    @Test
+    fun `grain adds a fixed pattern that scales with the image`() {
+        fun grained(size: Int): IntArray {
+            val a = IntArray(size * size) { Color.rgb(128, 128, 128) }
+            com.example.engine.NoiseAndGrain.addGrain(a, size, size, 60f, 40f, 50f)
+            return a
+        }
+        val a = grained(200); val b = grained(200)
+        assertTrue("same every time", a.contentEquals(b))
+        val vals = a.map { Color.red(it) }
+        val m = vals.average(); val sd = kotlin.math.sqrt(vals.sumOf { (it - m) * (it - m) } / vals.size)
+        assertTrue("visible grain: $sd", sd > 4)
+        assertTrue("monochrome", a.all { Color.red(it) == Color.green(it) && Color.green(it) == Color.blue(it) })
+        // Half the resolution: the same pattern at half the size (compare a pixel and its double).
+        val big = grained(1000); val small = grained(500)
+        var close = 0; var total = 0
+        for (y in 0 until 500 step 23) for (x in 0 until 500 step 23) {
+            total++
+            if (kotlin.math.abs(Color.red(small[y * 500 + x]) - Color.red(big[(y * 2) * 1000 + x * 2])) <= 3) close++
+        }
+        assertTrue("pattern lines up across resolutions: $close / $total", close >= total * 0.9)
+        assertFalse(ColorAdjustments(grainAmount = 10f).isIdentity())
+        // Saved with the adjustments.
+        val adj = ColorAdjustments(noiseReduction = 35f, grainAmount = 20f, grainSize = 60f, grainRoughness = 10f)
+        assertEquals(adj, com.example.engine.AdjustmentsJson.fromJson(JSONObject(com.example.engine.AdjustmentsJson.toJson(adj).toString())))
+    }
+
+    // --- Blend If -----------------------------------------------------------------------------
+
+    @Test
+    fun `blend if weights hard and split handles`() {
+        val e = com.example.engine.BlendIfEngine
+        // Hard low handle at 100: below hidden, from it on shown.
+        assertEquals(0f, e.weight(99f, 100f, 100f, 255f, 255f), 0f)
+        assertEquals(1f, e.weight(100f, 100f, 100f, 255f, 255f), 0f)
+        // Split 50/150: halfway at 100.
+        assertEquals(0.5f, e.weight(100f, 50f, 150f, 255f, 255f), 0.001f)
+        // Split high 200/240.
+        assertEquals(1f, e.weight(200f, 0f, 0f, 200f, 240f), 0f)
+        assertEquals(0.5f, e.weight(220f, 0f, 0f, 200f, 240f), 0.001f)
+        assertEquals(0f, e.weight(241f, 0f, 0f, 200f, 240f), 0f)
+        assertTrue(com.example.data.model.BlendIf().isIdentity())
+    }
+
+    @Test
+    fun `blend if hides a layer by its own tones and by the tones under it`() {
+        // Under: left half black, right half white. Layer: red everywhere, dark grey bottom row.
+        val w = 20; val h = 10
+        val under = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        for (y in 0 until h) for (x in 0 until w) under.setPixel(x, y, if (x < 10) Color.BLACK else Color.WHITE)
+        val layer = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        for (y in 0 until h) for (x in 0 until w) layer.setPixel(x, y, if (y == h - 1) Color.rgb(20, 20, 20) else Color.RED)
+        // Show only over the light part of the image under it.
+        val onLight = com.example.engine.BlendIfEngine.apply(layer.copy(Bitmap.Config.ARGB_8888, true), under,
+            com.example.data.model.BlendIf(underLow0 = 128f, underLow1 = 128f))
+        assertEquals(0, Color.alpha(onLight.getPixel(3, 3)))
+        assertEquals(255, Color.alpha(onLight.getPixel(15, 3)))
+        assertEquals(Color.RED, onLight.getPixel(15, 3))
+        // Hide the layer's own darks.
+        val noDarks = com.example.engine.BlendIfEngine.apply(layer.copy(Bitmap.Config.ARGB_8888, true), under,
+            com.example.data.model.BlendIf(thisLow0 = 50f, thisLow1 = 50f))
+        assertEquals(0, Color.alpha(noDarks.getPixel(5, h - 1)))
+        assertEquals(255, Color.alpha(noDarks.getPixel(5, 2)))
+        // Through the renderer and saved with the project.
+        val repo = ProjectRepository(context)
+        val proj = Project(id = "blendif_proj", name = "BI", width = w, height = h)
+        proj.layers.add(Layer(id = "u", name = "U", type = LayerType.IMAGE, bitmap = under, contentWidth = w.toFloat(), contentHeight = h.toFloat()))
+        val top = Layer(id = "t", name = "T", type = LayerType.IMAGE, bitmap = layer, contentWidth = w.toFloat(), contentHeight = h.toFloat(),
+            blendIf = com.example.data.model.BlendIf(channel = 0, underLow0 = 100f, underLow1 = 140f))
+        proj.layers.add(top)
+        val out = runBlocking { com.example.engine.LayerRenderer.renderCompositeCanvas(context, proj.layers, w, h, includeBackground = false) }
+        assertEquals(Color.BLACK, out.getPixel(3, 3))
+        assertEquals(Color.RED, out.getPixel(15, 3))
+        runBlocking { assertTrue(repo.saveProject(proj)) }
+        val loaded = runBlocking { repo.getProjectById("blendif_proj") }!!.layers.first { it.id == "t" }.blendIf
+        assertEquals(top.blendIf, loaded)
     }
 
     // --- Text effects -----------------------------------------------------------------------
@@ -229,6 +619,93 @@ class ProToolsTest {
         com.example.engine.RetouchCanvas(w, h, px4).fill(1, 1, Color.BLUE, 0.5f, 0, true, false)
         assertTrue(kotlin.math.abs((px4[0] ushr 24) - 128) <= 1)
         assertEquals(255, px4[0] and 255)
+    }
+
+    @Test
+    fun `brushes and healing stay inside the selection`() {
+        val grey = Color.rgb(120, 120, 120)
+        // Left half selected.
+        val sel = ByteArray(60 * 60) { i -> if (i % 60 < 30) 255.toByte() else 0 }
+        for (tool in listOf(RetouchTool.DODGE, RetouchTool.BURN, RetouchTool.BRUSH, RetouchTool.ERASER)) {
+            val c = canvasOf(60, 60, grey)
+            c.beginStroke(tool, RetouchBrush(hardness = 1f, strength = 1f, fillColor = Color.RED), selection = sel, selectionStride = 60)
+            c.stroke(floatArrayOf(10f, 30f, 50f, 30f), 12f)
+            c.endStroke()
+            assertNotEquals("$tool inside", grey, c.pix[30 * 60 + 15])
+            assertEquals("$tool outside", grey, c.pix[30 * 60 + 45])
+        }
+        // A stroke after the selected one paints everywhere again.
+        val c = canvasOf(60, 60, grey)
+        c.beginStroke(RetouchTool.BRUSH, RetouchBrush(hardness = 1f, fillColor = Color.RED), selection = sel, selectionStride = 60)
+        c.stroke(floatArrayOf(45f, 30f), 6f); c.endStroke()
+        assertEquals(grey, c.pix[30 * 60 + 45])
+        c.beginStroke(RetouchTool.BRUSH, RetouchBrush(hardness = 1f, fillColor = Color.RED))
+        c.stroke(floatArrayOf(45f, 30f), 6f); c.endStroke()
+        assertNotEquals(grey, c.pix[30 * 60 + 45])
+        // Healing entirely outside the selection does nothing.
+        val h = canvasOf(60, 60, grey)
+        h.pix[30 * 60 + 45] = Color.BLACK
+        assertNull(h.heal(floatArrayOf(45f, 30f), 4f, sel, 60))
+        assertEquals(Color.BLACK, h.pix[30 * 60 + 45])
+    }
+
+    @Test
+    fun `selection delete fill and stroke`() {
+        val w = 40; val h = 30
+        val sel = ByteArray(w * h) { i -> val x = i % w; val y = i / w; if (x in 10..29 && y in 8..21) 255.toByte() else 0 }
+        val px = IntArray(w * h) { Color.WHITE }
+        com.example.engine.SelectionOps.erase(px, w, h, sel, w)
+        assertEquals(0, px[15 * w + 15] ushr 24); assertEquals(Color.WHITE, px[0])
+        val f = IntArray(w * h) { Color.WHITE }
+        com.example.engine.SelectionOps.fill(f, w, h, sel, w, Color.RED, 1f)
+        assertEquals(Color.RED, f[15 * w + 15]); assertEquals(Color.WHITE, f[15 * w + 5])
+        // A 3 px stroke inside the edge: the border rows are covered, the middle and outside not.
+        val st = IntArray(w * h) { Color.WHITE }
+        com.example.engine.SelectionOps.stroke(st, w, h, sel, w, Color.BLUE, 3f, com.example.engine.StrokePosition.INSIDE, 1f)
+        assertEquals(Color.BLUE, st[15 * w + 10]); assertEquals(Color.BLUE, st[15 * w + 12])
+        assertEquals(Color.WHITE, st[15 * w + 13]); assertEquals(Color.WHITE, st[15 * w + 9]); assertEquals(Color.WHITE, st[15 * w + 20])
+        val out = IntArray(w * h) { Color.WHITE }
+        com.example.engine.SelectionOps.stroke(out, w, h, sel, w, Color.BLUE, 3f, com.example.engine.StrokePosition.OUTSIDE, 1f)
+        assertEquals(Color.BLUE, out[15 * w + 7]); assertEquals(Color.BLUE, out[15 * w + 9]); assertEquals(Color.WHITE, out[15 * w + 10])
+    }
+
+    @Test
+    fun `liquify does not move what is outside the selection`() {
+        val src = Bitmap.createBitmap(80, 80, Bitmap.Config.ARGB_8888)
+        for (y in 0 until 80) for (x in 0 until 80) src.setPixel(x, y, if ((x / 4 + y / 4) % 2 == 0) Color.BLACK else Color.WHITE)
+        val e = LiquifyEngine(src)
+        // Only the left half is selected.
+        e.freezeOutside(ByteArray(80 * 80) { i -> if (i % 80 < 40) 255.toByte() else 0 }, 80)
+        e.beginStroke()
+        repeat(6) { e.dab(LiquifyTool.FORWARD_WARP, 30f + it * 3, 40f, 3f, 0f, LiquifyBrush(size = 60f, pressure = 100f, density = 50f)) }
+        assertTrue(e.hasChanges)
+        for (y in 0 until 80) for (x in 42 until 80) assertEquals("($x,$y)", src.getPixel(x, y), e.output[y * 80 + x])
+    }
+
+    @Test
+    fun `a new fill on the previous fill replaces it`() {
+        val w = 40; val h = 20
+        val px = IntArray(w * h) { i -> if (i % w == 20) Color.BLACK else Color.WHITE }
+        val c = com.example.engine.RetouchCanvas(w, h, px)
+        // A pattern of red stripes with transparent gaps.
+        val stripes: (Int, Int) -> Int = { x, _ -> if (x % 4 < 2) Color.RED else 0 }
+        assertNotNull(c.fill(5, 5, stripes, 1f, 32, true, false))
+        assertEquals(Color.WHITE, px[5 * w + 2])
+        // Clicking a red stripe with another pattern: the whole first fill is replaced.
+        val blueDots: (Int, Int) -> Int = { x, y -> if ((x + y) % 2 == 0) Color.BLUE else 0 }
+        assertNotNull(c.fill(1, 5, blueDots, 1f, 32, true, false))
+        for (y in 0 until h) for (x in 0 until 20) {
+            val expect = if ((x + y) % 2 == 0) Color.BLUE else Color.WHITE
+            assertEquals("($x,$y)", expect, px[y * w + x])
+        }
+        assertEquals(Color.BLACK, px[5 * w + 20]); assertEquals(Color.WHITE, px[5 * w + 30])
+        // A solid colour then replaces the pattern everywhere.
+        assertNotNull(c.fill(3, 3, Color.GREEN, 1f, 0, true, false))
+        assertTrue((0 until 20).all { px[7 * w + it] == Color.GREEN })
+        // Once something else changes the area, a fill works on the pixels as they are.
+        px[2 * w + 2] = Color.YELLOW
+        assertNotNull(c.fill(10, 10, Color.CYAN, 1f, 0, true, false))
+        assertEquals(Color.YELLOW, px[2 * w + 2]); assertEquals(Color.CYAN, px[10 * w + 10])
     }
 
     @Test

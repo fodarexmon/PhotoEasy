@@ -234,6 +234,41 @@ fun CurvesView(
             }
         }
 
+        Spacer(Modifier.height(8.dp))
+
+        // Eyedroppers (Photoshop): set the black, grey and white points by tapping the image, or add a point.
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            PickChip(stringResource(R.string.curves_pick_black), Icons.Default.Colorize, Color(0xFF555555), pickMode == CurvePickMode.BLACK) {
+                onPickModeChange(if (pickMode == CurvePickMode.BLACK) null else CurvePickMode.BLACK)
+            }
+            PickChip(stringResource(R.string.curves_pick_gray), Icons.Default.Colorize, Color(0xFF9E9E9E), pickMode == CurvePickMode.GRAY) {
+                onPickModeChange(if (pickMode == CurvePickMode.GRAY) null else CurvePickMode.GRAY)
+            }
+            PickChip(stringResource(R.string.curves_pick_white), Icons.Default.Colorize, Color.White, pickMode == CurvePickMode.WHITE) {
+                onPickModeChange(if (pickMode == CurvePickMode.WHITE) null else CurvePickMode.WHITE)
+            }
+            PickChip(stringResource(R.string.curves_pick_point), Icons.Default.TouchApp, Color.White, pickMode == CurvePickMode.POINT) {
+                onPickModeChange(if (pickMode == CurvePickMode.POINT) null else CurvePickMode.POINT)
+            }
+        }
+        if (pickMode != null) {
+            Text(
+                stringResource(when (pickMode) {
+                    CurvePickMode.BLACK -> R.string.curves_pick_black_hint
+                    CurvePickMode.GRAY -> R.string.curves_pick_gray_hint
+                    CurvePickMode.WHITE -> R.string.curves_pick_white_hint
+                    else -> R.string.curves_pick_hint
+                }),
+                color = AmberAccent,
+                fontSize = 11.sp,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 2.dp)
+            )
+        }
+
         Spacer(Modifier.height(10.dp))
 
         // Square graph that adapts to the available width.
@@ -450,33 +485,6 @@ fun CurvesView(
 
         Spacer(Modifier.height(6.dp))
 
-        // Pick on the image: target point, black / grey / white points.
-        Row(
-            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            PickChip(stringResource(R.string.curves_pick_point), Icons.Default.TouchApp, Color.White, pickMode == CurvePickMode.POINT) {
-                onPickModeChange(if (pickMode == CurvePickMode.POINT) null else CurvePickMode.POINT)
-            }
-            PickChip(stringResource(R.string.curves_pick_black), Icons.Default.Colorize, Color(0xFF555555), pickMode == CurvePickMode.BLACK) {
-                onPickModeChange(if (pickMode == CurvePickMode.BLACK) null else CurvePickMode.BLACK)
-            }
-            PickChip(stringResource(R.string.curves_pick_gray), Icons.Default.Colorize, Color(0xFF9E9E9E), pickMode == CurvePickMode.GRAY) {
-                onPickModeChange(if (pickMode == CurvePickMode.GRAY) null else CurvePickMode.GRAY)
-            }
-            PickChip(stringResource(R.string.curves_pick_white), Icons.Default.Colorize, Color.White, pickMode == CurvePickMode.WHITE) {
-                onPickModeChange(if (pickMode == CurvePickMode.WHITE) null else CurvePickMode.WHITE)
-            }
-        }
-        if (pickMode != null) {
-            Text(
-                stringResource(R.string.curves_pick_hint),
-                color = AmberAccent,
-                fontSize = 11.sp,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 2.dp)
-            )
-        }
 
         Spacer(Modifier.height(6.dp))
 

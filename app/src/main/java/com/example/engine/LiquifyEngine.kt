@@ -64,8 +64,15 @@ class LiquifyEngine(private val source: Bitmap) {
 
     /** Sets (or clears, with nulls) the face field; arrays are width x height. Re-renders everything. */
     fun setFaceField(faceDx: FloatArray?, faceDy: FloatArray?, post: ((Float, Float, Int) -> Int)?): Rect {
-        fx = faceDx?.takeIf { it.size == n }
-        fy = faceDy?.takeIf { it.size == n }
+        // Frozen areas (e.g. outside the selection) keep still for the face sliders too.
+        val anyFrozen = frozen.any { it > 0f }
+        fun thawed(f: FloatArray?): FloatArray? {
+            val a = f?.takeIf { it.size == n } ?: return null
+            if (!anyFrozen) return a
+            return FloatArray(n) { a[it] * (1f - frozen[it]) }
+        }
+        fx = thawed(faceDx)
+        fy = thawed(faceDy)
         postProcess = post
         return render(Rect(0, 0, width, height))
     }
@@ -108,6 +115,18 @@ class LiquifyEngine(private val source: Bitmap) {
     }
 
     fun frozenAt(i: Int) = frozen[i]
+
+    /**
+     * Freezes everything outside a selection ([selection]: one alpha byte per working pixel,
+     * row stride [stride]), like Photoshop's Liquify on a selection: only the selected area moves.
+     */
+    fun freezeOutside(selection: ByteArray, stride: Int) {
+        for (y in 0 until height) for (x in 0 until width) {
+            val i = y * width + x
+            val outside = 1f - (selection[y * stride + x].toInt() and 255) / 255f
+            if (outside > frozen[i]) frozen[i] = outside
+        }
+    }
 
     /** Brush weight at distance [d] for radius [r]: 1 in the core, soft edge set by density. */
     private fun falloff(d: Float, r: Float, density: Float): Float {

@@ -333,6 +333,151 @@ class PhotoEasyRobolectricTest {
         assertEquals(100, processed.height)
     }
 
+    private fun groupVm(): Pair<com.example.ui.viewmodel.EditorViewModel, Project> {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val vm = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "Groups", width = 100, height = 100)
+        for (n in listOf("a", "b", "c", "d")) project.layers.add(Layer(id = n, name = n, type = LayerType.TEXT))
+        vm.openProject(project)
+        return vm to project
+    }
+
+    private fun ids(vm: com.example.ui.viewmodel.EditorViewModel) = vm.uiState.value.currentProject!!.layers.map { it.id }
+
+    @Test
+    fun `smart object keeps effects as editable smart filters and asks before pixel tools`() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val vm = com.example.ui.viewmodel.EditorViewModel(app)
+        val bmp = Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888).apply { eraseColor(android.graphics.Color.RED) }
+        val project = Project(name = "Smart", width = 20, height = 20)
+        project.layers.add(Layer(id = "s", name = "S", type = LayerType.IMAGE, bitmap = bmp, contentWidth = 20f, contentHeight = 20f))
+        vm.openProject(project)
+        vm.convertToSmartObject()
+        val layer = vm.uiState.value.currentProject!!.layers[0]
+        assertTrue(layer.isSmartObject)
+        val before = layer.bitmap
+        vm.applyProFilter(com.example.data.model.ProFilterType.GAUSSIAN_BLUR, com.example.engine.ProEffects.defaults(com.example.data.model.ProFilterType.GAUSSIAN_BLUR))
+        assertEquals(1, layer.smartFilters.size)
+        assertTrue("pixels untouched", layer.bitmap === before)
+        assertFalse(vm.uiState.value.isProcessing)
+        // Undo removes the filter.
+        vm.undo()
+        assertTrue(vm.uiState.value.currentProject!!.layers[0].smartFilters.isEmpty())
+        // A painting tool asks to rasterize first.
+        vm.selectTool(com.example.ui.viewmodel.ActiveTool.RETOUCH)
+        assertTrue(vm.uiState.value.askRasterize)
+        assertFalse(vm.uiState.value.activeTool == com.example.ui.viewmodel.ActiveTool.RETOUCH)
+        vm.answerRasterize(false)
+        assertFalse(vm.uiState.value.askRasterize)
+        assertTrue(vm.uiState.value.currentProject!!.layers[0].isSmartObject)
+    }
+
+    @Test
+    fun `grouping picked layers keeps them together under a group and ungroup restores them`() {
+        val (vm, _) = groupVm()
+        vm.selectLayer(0)
+        vm.setLayerMultiSelect(true)
+        vm.toggleLayerPicked("c")
+        assertEquals(setOf("a", "c"), vm.uiState.value.selectedLayerIds)
+        vm.groupLayers()
+        val layers = vm.uiState.value.currentProject!!.layers
+        val g = layers.single { it.type == LayerType.GROUP }
+        // Members directly below the group, in their order; b stays outside.
+        assertEquals(listOf("b", "a", "c", g.id, "d"), layers.map { it.id })
+        assertEquals(g.id, layers.first { it.id == "a" }.parentId)
+        assertEquals(null, layers.first { it.id == "b" }.parentId)
+        assertFalse(vm.uiState.value.isLayerMultiSelect)
+        // Ungroup.
+        vm.selectLayer(layers.indexOf(g))
+        vm.ungroupLayers()
+        assertEquals(listOf("b", "a", "c", "d"), ids(vm))
+        assertTrue(vm.uiState.value.currentProject!!.layers.all { it.parentId == null })
+        vm.undo()
+        assertTrue(vm.uiState.value.currentProject!!.layers.any { it.type == LayerType.GROUP })
+    }
+
+    @Test
+    fun `deleting picked layers and a group removes their contents and keeps one layer at least`() {
+        val (vm, _) = groupVm()
+        vm.selectLayer(1)
+        vm.setLayerMultiSelect(true)
+        vm.toggleLayerPicked("c")
+        vm.groupLayers()
+        val gIdx = vm.uiState.value.currentProject!!.layers.indexOfFirst { it.type == LayerType.GROUP }
+        vm.selectLayer(gIdx)
+        vm.deleteSelectedLayer()
+        assertEquals(listOf("a", "d"), ids(vm))
+        vm.setLayerMultiSelect(true)
+        vm.pickAllLayers(true)
+        vm.deleteLayers()
+        assertEquals("all layers cannot go", 2, ids(vm).size)
+    }
+
+    @Test
+    fun `moving a group moves its members and a layer dropped inside joins it`() {
+        val (vm, _) = groupVm()
+        vm.selectLayer(0)
+        vm.setLayerMultiSelect(true)
+        vm.toggleLayerPicked("b")
+        vm.groupLayers()
+        // [a, b, G, c, d]
+        var layers = vm.uiState.value.currentProject!!.layers
+        val g = layers.first { it.type == LayerType.GROUP }.id
+        assertEquals(listOf("a", "b", g, "c", "d"), layers.map { it.id })
+        // Group to the top.
+        vm.moveLayer(2, 4)
+        assertEquals(listOf("c", "d", "a", "b", g), ids(vm))
+        // d dropped onto b (between the members) joins the group.
+        layers = vm.uiState.value.currentProject!!.layers
+        vm.moveLayer(1, 3)
+        layers = vm.uiState.value.currentProject!!.layers
+        assertEquals(g, layers.first { it.id == "d" }.parentId)
+        assertEquals(g, layers.last().id)
+    }
+
+    @Test
+    fun `align and moving several layers together`() {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val vm = com.example.ui.viewmodel.EditorViewModel(app)
+        val project = Project(name = "Align", width = 200, height = 200)
+        project.layers.add(Layer(id = "p", name = "p", type = LayerType.IMAGE, bitmap = Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888), contentWidth = 20f, contentHeight = 20f, positionX = -50f, positionY = 10f))
+        project.layers.add(Layer(id = "q", name = "q", type = LayerType.IMAGE, bitmap = Bitmap.createBitmap(40, 40, Bitmap.Config.ARGB_8888), contentWidth = 40f, contentHeight = 40f, positionX = 30f, positionY = -20f))
+        vm.openProject(project)
+        vm.setLayerMultiSelect(true)
+        vm.pickAllLayers(true)
+        vm.alignLayers(com.example.ui.viewmodel.EditorViewModel.LayerAlign.LEFT)
+        var ls = vm.uiState.value.currentProject!!.layers
+        // Left edges: p at -60 (centre -50, half width 10); q's left (centre - 20) moves there.
+        assertEquals(-50f, ls[0].positionX, 0.01f)
+        assertEquals(-40f, ls[1].positionX, 0.01f)
+        vm.alignLayers(com.example.ui.viewmodel.EditorViewModel.LayerAlign.TOP)
+        ls = vm.uiState.value.currentProject!!.layers
+        assertEquals(ls[0].positionY - 10f, ls[1].positionY - 20f, 0.01f)
+        // Dragging the selected layer moves the other picked one by the same amount.
+        val pBefore = ls[0].positionX
+        assertEquals("q is the selected layer", 1, vm.uiState.value.selectedLayerIndex)
+        vm.updateSelectedLayerTransient { it.positionX += 15f }
+        ls = vm.uiState.value.currentProject!!.layers
+        assertEquals(pBefore + 15f, ls[0].positionX, 0.01f)
+    }
+
+    @Test
+    fun `a group is drawn as one layer with its opacity and hides its members when hidden`() = runBlocking {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        fun solid(c: Int) = Bitmap.createBitmap(10, 10, Bitmap.Config.ARGB_8888).apply { eraseColor(c) }
+        val g = Layer(id = "g", name = "G", type = LayerType.GROUP, opacity = 0.5f)
+        val red = Layer(id = "r", name = "R", type = LayerType.IMAGE, bitmap = solid(android.graphics.Color.RED), contentWidth = 10f, contentHeight = 10f, parentId = "g")
+        val blue = Layer(id = "b", name = "B", type = LayerType.IMAGE, bitmap = solid(android.graphics.Color.BLUE), contentWidth = 10f, contentHeight = 10f, parentId = "g")
+        val out = com.example.engine.LayerRenderer.renderCompositeCanvas(app, listOf(red, blue, g), 10, 10, includeBackground = false)
+        val p = out.getPixel(5, 5)
+        // Blue covers red inside the group; the group then shows at half opacity (not red through blue).
+        assertTrue(android.graphics.Color.alpha(p) in 120..135)
+        assertTrue(android.graphics.Color.red(p) < 10 && android.graphics.Color.blue(p) > 240)
+        g.isVisible = false
+        val hidden = com.example.engine.LayerRenderer.renderCompositeCanvas(app, listOf(red, blue, g), 10, 10, includeBackground = false)
+        assertEquals(0, android.graphics.Color.alpha(hidden.getPixel(5, 5)))
+    }
+
     @Test
     fun `transient slider updates capture initial state and undo correctly restores initial state`() {
         val app = ApplicationProvider.getApplicationContext<android.app.Application>()
@@ -661,7 +806,8 @@ class PhotoEasyRobolectricTest {
 
     @Test
     fun `every preset filter has a recipe or a special implementation`() {
-        val special = setOf(FilterType.NONE, FilterType.PIXELATE, FilterType.EDGES, FilterType.GLITCH, FilterType.SOLARIZE)
+        val special = setOf(FilterType.NONE, FilterType.PIXELATE, FilterType.EDGES, FilterType.GLITCH, FilterType.SOLARIZE,
+            FilterType.OIL_PAINTING, FilterType.CHARCOAL)
         for (f in FilterType.values()) {
             if (f in special) continue
             assertNotNull("missing recipe for $f", com.example.engine.FilterRecipes.recipeFor(f))

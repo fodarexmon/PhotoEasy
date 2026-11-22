@@ -34,6 +34,19 @@ import com.example.data.model.ProjectSummary
 
 class ProjectRepository(private val context: Context) {
 
+    companion object {
+        /** Before/After images: before_<layerId>_<w>_<h>.<ext>. */
+        const val BEFORE_PREFIX = "before_"
+        /** Marker in protected file names: keep the Before image of this layer id. */
+        const val BEFORE_KEEP_PREFIX = "keep-before:"
+        /** Smart filter masks: sfmask_<layerId>.png. */
+        const val SMART_MASK_PREFIX = "sfmask_"
+        fun beforeLayerId(fileName: String): String? =
+            if (!fileName.startsWith(BEFORE_PREFIX)) null
+            else fileName.removePrefix(BEFORE_PREFIX).substringBefore('_').takeIf { it.isNotEmpty() }
+    }
+
+
     val projectsDir: File
         get() = File(context.filesDir, "projects").apply { if (!exists()) mkdirs() }
 
@@ -326,6 +339,44 @@ class ProjectRepository(private val context: Context) {
                         put("isMaskLinked", layer.isMaskLinked)
                         put("isClipped", layer.isClipped)
                         put("isSticker", layer.isSticker)
+                        layer.parentId?.let { put("parentId", it) }
+                        if (layer.isSmartObject) {
+                            put("smartObject", true)
+                            if (!layer.smartFiltersVisible) put("smartFiltersVisible", false)
+                            put("smartFilters", JSONArray().apply {
+                                layer.smartFilters.forEach { f ->
+                                    put(JSONObject().apply {
+                                        put("id", f.id); put("effect", f.effect.name)
+                                        put("enabled", f.enabled); put("opacity", f.opacity.toDouble()); put("blend", f.blendMode.name)
+                                        val p = f.params
+                                        put("p1", p.p1.toDouble()); put("p2", p.p2.toDouble()); put("p3", p.p3.toDouble())
+                                        put("cx", p.centerX.toDouble()); put("cy", p.centerY.toDouble()); put("mode", p.mode)
+                                        put("angle", p.angle.toDouble()); put("fade", p.fade.toDouble())
+                                    })
+                                }
+                            })
+                            // The filter mask, as a grey PNG next to the project.
+                            val sfName = "$SMART_MASK_PREFIX${layer.id}.png"
+                            val sfFile = File(projDir, sfName)
+                            val m = layer.smartFilterMask?.takeIf { !it.isRecycled }
+                            if (m != null) {
+                                val grey = encodeMaskAsGray(m)
+                                try {
+                                    val tmp = File(projDir, "$sfName.tmp")
+                                    FileOutputStream(tmp).use { out -> grey.compress(Bitmap.CompressFormat.PNG, 100, out); out.flush(); out.fd.sync() }
+                                    if (sfFile.exists()) sfFile.delete()
+                                    tmp.renameTo(sfFile)
+                                } finally { grey.recycle() }
+                                put("smartFilterMask", sfName)
+                            } else if (sfFile.exists()) sfFile.delete()
+                        }
+                        if (!layer.blendIf.isIdentity()) put("blendIf", JSONObject().apply {
+                            val b = layer.blendIf
+                            put("channel", b.channel)
+                            put("t", JSONArray(listOf(b.thisLow0, b.thisLow1, b.thisHigh0, b.thisHigh1).map { it.toDouble() }))
+                            put("u", JSONArray(listOf(b.underLow0, b.underLow1, b.underHigh0, b.underHigh1).map { it.toDouble() }))
+                        })
+                        if (layer.isCollapsed) put("isCollapsed", true)
                         layer.maskAnchor?.let { a ->
                             put("maskAnchor", JSONObject().apply {
                                 put("x", a.x.toDouble()); put("y", a.y.toDouble())
@@ -398,8 +449,20 @@ class ProjectRepository(private val context: Context) {
 
             // CRITICAL: Cleanup orphaned files ONLY AFTER new manifest has been successfully committed
             val now = System.currentTimeMillis()
+            val liveLayerIds = project.layers.map { it.id }.toSet()
             projDir.listFiles()?.forEach { file ->
                 val name = file.name
+                if (name.startsWith(SMART_MASK_PREFIX) && !name.endsWith(".tmp")) {
+                    val id = name.removePrefix(SMART_MASK_PREFIX).removeSuffix(".png")
+                    if (id !in liveLayerIds && (BEFORE_KEEP_PREFIX + id) !in protectedFileNames) file.delete()
+                    return@forEach
+                }
+                // Before images of layers that no longer exist (and that history cannot bring back).
+                if (name.startsWith(BEFORE_PREFIX) && !name.endsWith(".tmp")) {
+                    val id = beforeLayerId(name)
+                    if (id != null && id !in liveLayerIds && (BEFORE_KEEP_PREFIX + id) !in protectedFileNames) file.delete()
+                    return@forEach
+                }
                 val isLayerAsset = (name.startsWith("layer_") || name.startsWith("mask_") || name.startsWith("source_")) && !name.endsWith(".tmp")
                 if (isLayerAsset && name !in activeLayerFiles && name !in protectedFileNames) {
                     // Source assets may be written by an in-flight destructive edit that is not yet
@@ -416,6 +479,52 @@ class ProjectRepository(private val context: Context) {
             e.printStackTrace()
             false
         }
+    }
+
+    /**
+     * Saves a layer's pixels from before its first pixel edit (Before/After) next to the project
+     * as before_<layerId>_<contentW bits>_<contentH bits>.webp|png, replacing an older one.
+     */
+    suspend fun saveBeforeImage(projectId: String, layerId: String, before: com.example.data.model.LayerBefore): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val dir = getProjectDir(projectId)
+            if (!dir.exists()) return@withContext false
+            if (before.bitmap.isRecycled) return@withContext false
+            val ext = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) "webp" else "png"
+            val name = "$BEFORE_PREFIX${layerId}_${Integer.toHexString(before.contentWidth.toRawBits())}_${Integer.toHexString(before.contentHeight.toRawBits())}.$ext"
+            val file = File(dir, name)
+            val tmp = File(dir, "$name.tmp")
+            if (!com.example.engine.ImageProcessor.saveLosslessBitmap(before.bitmap, tmp)) { tmp.delete(); return@withContext false }
+            dir.listFiles()?.forEach { f -> if (f.name != name && f.name.startsWith("$BEFORE_PREFIX${layerId}_") && !f.name.endsWith(".tmp")) f.delete() }
+            if (file.exists()) file.delete()
+            tmp.renameTo(file)
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** The saved Before images of [layerIds] (see [saveBeforeImage]). */
+    suspend fun loadBeforeImages(projectId: String, layerIds: Set<String>): Map<String, com.example.data.model.LayerBefore> = withContext(Dispatchers.IO) {
+        val out = HashMap<String, com.example.data.model.LayerBefore>()
+        try {
+            getProjectDir(projectId).listFiles()?.forEach { f ->
+                val name = f.name
+                if (!name.startsWith(BEFORE_PREFIX) || name.endsWith(".tmp")) return@forEach
+                val id = beforeLayerId(name) ?: return@forEach
+                if (id !in layerIds) return@forEach
+                val parts = name.removePrefix(BEFORE_PREFIX).substringBeforeLast('.').split('_')
+                if (parts.size != 3) return@forEach
+                val cw = java.lang.Float.intBitsToFloat(java.lang.Long.parseLong(parts[1], 16).toInt())
+                val ch = java.lang.Float.intBitsToFloat(java.lang.Long.parseLong(parts[2], 16).toInt())
+                val bmp = try {
+                    BitmapFactory.decodeFile(f.absolutePath, BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.ARGB_8888 })
+                } catch (e: OutOfMemoryError) { null } ?: return@forEach
+                out[id] = com.example.data.model.LayerBefore(bmp, cw, ch)
+            }
+        } catch (e: Exception) {
+            // Before/After of earlier sessions is a convenience: missing files are fine.
+        }
+        out
     }
 
     /**
@@ -940,6 +1049,41 @@ class ProjectRepository(private val context: Context) {
                     isMaskLinked = layerObj.optBoolean("isMaskLinked", true),
                     isClipped = layerObj.optBoolean("isClipped", false),
                     isSticker = layerObj.optBoolean("isSticker", false),
+                    parentId = layerObj.optString("parentId", "").ifBlank { null },
+                    isCollapsed = layerObj.optBoolean("isCollapsed", false),
+                    isSmartObject = layerObj.optBoolean("smartObject", false),
+                    smartFiltersVisible = layerObj.optBoolean("smartFiltersVisible", true),
+                    smartFilters = layerObj.optJSONArray("smartFilters")?.let { arr ->
+                        (0 until arr.length()).mapNotNull { k ->
+                            val f = arr.optJSONObject(k) ?: return@mapNotNull null
+                            val effect = try { com.example.data.model.ProFilterType.valueOf(f.optString("effect")) } catch (e: Exception) { return@mapNotNull null }
+                            com.example.data.model.SmartFilter(
+                                id = f.optString("id").ifBlank { java.util.UUID.randomUUID().toString() },
+                                effect = effect,
+                                params = com.example.engine.ProEffectParams(
+                                    p1 = f.optDouble("p1", 0.0).toFloat(), p2 = f.optDouble("p2", 0.0).toFloat(), p3 = f.optDouble("p3", 0.0).toFloat(),
+                                    centerX = f.optDouble("cx", 0.5).toFloat(), centerY = f.optDouble("cy", 0.5).toFloat(), mode = f.optInt("mode", 0),
+                                    angle = f.optDouble("angle", 0.0).toFloat(), fade = f.optDouble("fade", 100.0).toFloat()
+                                ),
+                                enabled = f.optBoolean("enabled", true),
+                                opacity = f.optDouble("opacity", 1.0).toFloat().coerceIn(0f, 1f),
+                                blendMode = try { BlendModeType.valueOf(f.optString("blend", "NORMAL")) } catch (e: Exception) { BlendModeType.NORMAL }
+                            )
+                        }
+                    } ?: emptyList(),
+                    smartFilterMask = layerObj.optString("smartFilterMask", "").takeIf { it.isNotBlank() }?.let { name ->
+                        val f = File(projDir, name)
+                        if (f.exists()) try { decodeMask(f, storedAsGray = true) } catch (e: Throwable) { null } else null
+                    },
+                    blendIf = layerObj.optJSONObject("blendIf")?.let { o ->
+                        val t = o.optJSONArray("t"); val u = o.optJSONArray("u")
+                        fun v(a: JSONArray?, i: Int, d: Float) = a?.optDouble(i, d.toDouble())?.toFloat()?.coerceIn(0f, 255f) ?: d
+                        com.example.data.model.BlendIf(
+                            channel = o.optInt("channel", 0).coerceIn(0, 3),
+                            thisLow0 = v(t, 0, 0f), thisLow1 = v(t, 1, 0f), thisHigh0 = v(t, 2, 255f), thisHigh1 = v(t, 3, 255f),
+                            underLow0 = v(u, 0, 0f), underLow1 = v(u, 1, 0f), underHigh0 = v(u, 2, 255f), underHigh1 = v(u, 3, 255f)
+                        )
+                    } ?: com.example.data.model.BlendIf(),
                     skewX = layerObj.optDouble("skewX", 0.0).toFloat(),
                     skewY = layerObj.optDouble("skewY", 0.0).toFloat(),
                     distort = layerObj.optJSONArray("distort")?.takeIf { it.length() == 8 }?.let { a ->
