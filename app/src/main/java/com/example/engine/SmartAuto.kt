@@ -225,12 +225,13 @@ object SmartAuto {
         var shadowsExtra = 0f
         if (ev > 0 && st.p995 > 0) {
             val room = log2(250.0 / st.p995).coerceAtLeast(0.0) + 0.15
-            if (ev > room) { shadowsExtra = ((ev - room) * 45).toFloat(); ev = room }
+            if (ev > room) { shadowsExtra = ((ev - room) * (if (faceLuma != null || scene == Scene.BACKLIT) 70 else 45)).toFloat(); ev = room }
         }
         val exposure = (ev * 50).toFloat().coerceIn(-60f, 60f)
 
         val blacks = when {
-            scene == Scene.NIGHT || scene == Scene.LOW_KEY -> 0f
+            // The darkest part of a backlit picture or a portrait is the subject: do not crush it.
+            scene == Scene.NIGHT || scene == Scene.LOW_KEY || scene == Scene.BACKLIT || faceLuma != null -> 0f
             st.p005 > 10 -> -((st.p005 - 4) * 4f).coerceAtMost(60f)
             st.clipLow > 0.03f -> 15f
             else -> 0f
@@ -251,7 +252,7 @@ object SmartAuto {
             Scene.BACKLIT -> (25f + st.darkFrac * 80f).coerceAtMost(55f)
             else -> if (st.darkFrac > 0.15f) (st.darkFrac * 120f).coerceAtMost(40f) else 0f
         }
-        shadows = (shadows + shadowsExtra).coerceAtMost(65f)
+        shadows = (shadows + shadowsExtra).coerceAtMost(80f)
         // Only for really flat images; the tone curve does the rest.
         val contrast = when {
             st.std < 30f && scene != Scene.HIGH_KEY -> ((34f - st.std) * 1.0f).coerceIn(0f, 15f)
@@ -265,7 +266,7 @@ object SmartAuto {
             st.meanChroma < 0.2f -> ((0.24f - st.meanChroma) * 120f).coerceIn(0f, if (skinColor != null) 15f else 30f)
             else -> 0f
         }
-        val dehaze = if (st.p005 > 35 && st.meanChroma < 0.18f && scene != Scene.HIGH_KEY) ((st.p005 - 30) * 0.8f).coerceIn(0f, 30f) else 0f
+        val dehaze = if (st.p005 > 35 && st.meanChroma < 0.18f && scene != Scene.HIGH_KEY && scene != Scene.BACKLIT && faceLuma == null) ((st.p005 - 30) * 0.8f).coerceIn(0f, 30f) else 0f
         return ColorAdjustments(
             exposure = exposure, contrast = contrast, highlights = highlights, shadows = shadows,
             whites = whites, blacks = blacks, temperature = temperature, tint = tint,
@@ -291,15 +292,16 @@ object SmartAuto {
         if (wsum < 0.15f) return 0f to 0f
         val mt = est.sumOf { (it.first * it.third).toDouble() }.toFloat() / wsum
         val mi = est.sumOf { (it.second * it.third).toDouble() }.toFloat() / wsum
-        // Estimates that disagree mean the cast is not certain.
+        // Estimates that disagree mean the cast is not certain. They are compared with the size
+        // of the cast: all pointing the same way with different strengths is still a clear cast.
         val spread = sqrt(est.sumOf { (((it.first - mt) * (it.first - mt)) * it.third).toDouble() }.toFloat() / wsum)
-        var conf = 1f / (1f + spread / 12f)
+        var conf = 1f / (1f + spread / max(12f, abs(mt) * 0.6f))
         // One-colour scenes (forest, coloured wall): few neutrals to trust.
         if (st.neutralFrac < 0.08f && skinColor == null) conf *= 0.5f
-        var temp = mt * 0.65f * conf
-        var tint = mi * 0.6f * conf
+        var temp = mt * 0.8f * conf
+        var tint = mi * 0.7f * conf
         if (scene == Scene.SUNSET || scene == Scene.NIGHT) temp = temp.coerceAtLeast(-6f)
-        temp = temp.coerceIn(-40f, 40f); tint = tint.coerceIn(-30f, 30f)
+        temp = temp.coerceIn(-70f, 70f); tint = tint.coerceIn(-40f, 40f)
         if (abs(temp) < 3f) temp = 0f
         if (abs(tint) < 3f) tint = 0f
         return temp to tint
@@ -368,12 +370,19 @@ object SmartAuto {
             } else if (target != null && abs(st1.median - target) > 12) {
                 fixEv = log2(target.toDouble() / st1.median) * 0.5
             }
-            if (fixEv > 0 && st1.p995 > 0) fixEv = min(fixEv, log2(252.0 / st1.p995).coerceAtLeast(0.0))
+            // A face still too dark while the highlights leave no room: lift its shadows more.
+            var fixShadows = 0f
+            if (fixEv > 0 && st1.p995 > 0) {
+                val allowed = min(fixEv, log2(252.0 / st1.p995).coerceAtLeast(0.0))
+                if (sk1 != null) fixShadows = ((fixEv - allowed) * 70).toFloat().coerceIn(0f, 30f)
+                fixEv = allowed
+            }
             val (rt, rti) = whiteBalance(st1, scene, sk1?.first)
             delta = plus(delta, ColorAdjustments(
                 exposure = (fixEv * 50).toFloat().coerceIn(-20f, 20f),
-                temperature = (rt * 0.5f).coerceIn(-8f, 8f),
-                tint = (rti * 0.5f).coerceIn(-8f, 8f)
+                shadows = fixShadows,
+                temperature = (rt * 0.6f).coerceIn(-15f, 15f),
+                tint = (rti * 0.6f).coerceIn(-15f, 15f)
             ))
 
             // Intended warmth (sunset, night lights) stays: limit cooling and tint after both passes.
