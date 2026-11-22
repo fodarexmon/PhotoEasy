@@ -156,3 +156,12 @@ dependencies {
   // "ksp"(libs.androidx.room.compiler)
   // "ksp"(libs.moshi.kotlin.codegen)
 }
+
+// CI logs show why a unit test failed (the assertion message), not just where.
+tasks.withType<Test>().configureEach {
+  testLogging {
+    events("failed")
+    exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    showCauses = true
+  }
+}
