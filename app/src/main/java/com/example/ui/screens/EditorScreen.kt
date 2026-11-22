@@ -380,6 +380,8 @@ fun EditorScreen(
     val transformSnap = uiState.transformSnap
     val onToggleTransformSnap: () -> Unit = { viewModel.toggleTransformSnap() }
     val maskBrushOpacity = uiState.maskBrushOpacity
+    // Blend If dialog for the selected layer.
+    var showBlendIf by remember { mutableStateOf(false) }
     val layerActions = com.example.ui.components.LayerPanelActions(
         onToggleVisibilityAt = { viewModel.toggleLayerVisibilityAt(it) },
         onToggleLockAt = { viewModel.toggleLayerLockAt(it) },
@@ -406,7 +408,8 @@ fun EditorScreen(
         onToggleCollapsed = { viewModel.toggleGroupCollapsed(it) },
         onMergeVisible = { viewModel.mergeVisibleLayers() },
         onFlatten = { viewModel.flattenImage() },
-        onAlign = { viewModel.alignLayers(com.example.ui.viewmodel.EditorViewModel.LayerAlign.values()[it]) }
+        onAlign = { viewModel.alignLayers(com.example.ui.viewmodel.EditorViewModel.LayerAlign.values()[it]) },
+        onBlendIf = { showBlendIf = true }
     )
     var currentCropRect by remember { mutableStateOf<android.graphics.RectF?>(null) }
     var showExportDialog by remember { mutableStateOf(false) }
@@ -1742,6 +1745,18 @@ fun EditorScreen(
             previewGeom = uiState.refinePreviewGeom,
             documentMaxDim = maxOf(project.width, project.height)
         )
+    }
+
+    if (showBlendIf) {
+        val biLayer = project.layers.getOrNull(selectedLayerIndex)
+        if (biLayer == null) showBlendIf = false else {
+            com.example.ui.components.BlendIfDialog(
+                initial = biLayer.blendIf,
+                onChange = { b -> onUpdateLayerTransient { l -> l.blendIf = b } },
+                onApply = { showBlendIf = false; onCommitHistoryState() },
+                onCancel = { showBlendIf = false; onCancelHistoryState() }
+            )
+        }
     }
 
     if (selectionFillStroke != 0) {

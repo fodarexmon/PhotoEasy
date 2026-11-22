@@ -170,6 +170,23 @@ data class AdjustmentLayerParams(
  */
 class LayerBefore(val bitmap: Bitmap, val contentWidth: Float, val contentHeight: Float)
 
+/**
+ * Blend If: the layer shows only where its own pixels ([thisLow]..[thisHigh]) and the pixels
+ * under it ([underLow]..[underHigh]) are in range, measured on [channel] (0 = grey / luminosity,
+ * 1 = red, 2 = green, 3 = blue), 0..255. Each end is a pair: equal values give a hard edge, a
+ * split pair (Alt-drag in Photoshop) fades between its two values.
+ */
+data class BlendIf(
+    val channel: Int = 0,
+    val thisLow0: Float = 0f, val thisLow1: Float = 0f, val thisHigh0: Float = 255f, val thisHigh1: Float = 255f,
+    val underLow0: Float = 0f, val underLow1: Float = 0f, val underHigh0: Float = 255f, val underHigh1: Float = 255f
+) {
+    val thisIsDefault: Boolean get() = thisLow1 <= 0f && thisHigh0 >= 255f
+    val underIsDefault: Boolean get() = underLow1 <= 0f && underHigh0 >= 255f
+    /** True when it hides nothing. */
+    fun isIdentity(): Boolean = thisIsDefault && underIsDefault
+}
+
 enum class LayerType {
     IMAGE,
     TEXT,
@@ -496,7 +513,9 @@ data class Layer(
     /** The group this layer belongs to (id of a [LayerType.GROUP] layer), or null at the top level. */
     var parentId: String? = null,
     /** Groups: members hidden in the layers panel. */
-    var isCollapsed: Boolean = false
+    var isCollapsed: Boolean = false,
+    /** Photoshop's Blend If (Layer Style > Blending Options). */
+    var blendIf: BlendIf = BlendIf()
 ) {
     fun currentMaskAnchor(): MaskAnchor = MaskAnchor(positionX, positionY, scaleX, scaleY, rotation)
 

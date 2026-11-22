@@ -1185,4 +1185,14 @@
     <string name="layers_lock">Lock</string>
     <string name="layers_unlock">Unlock</string>
     <string name="layers_align">Align</string>
+    <string name="blend_if_title">Blend If</string>
+    <string name="blend_if_menu">Blend If…</string>
+    <string name="blend_if_badge">Blend If</string>
+    <string name="blend_if_gray">Gray</string>
+    <string name="channel_red">Red</string>
+    <string name="channel_green">Green</string>
+    <string name="channel_blue">Blue</string>
+    <string name="blend_if_this_layer">This layer</string>
+    <string name="blend_if_underlying">Underlying layer</string>
+    <string name="blend_if_hint">Drag a handle to hide darker or lighter tones. Long press a handle to split it for a soft fade (or join it again).</string>
 </resources>

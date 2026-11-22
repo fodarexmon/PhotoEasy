@@ -338,6 +338,12 @@ class ProjectRepository(private val context: Context) {
                         put("isClipped", layer.isClipped)
                         put("isSticker", layer.isSticker)
                         layer.parentId?.let { put("parentId", it) }
+                        if (!layer.blendIf.isIdentity()) put("blendIf", JSONObject().apply {
+                            val b = layer.blendIf
+                            put("channel", b.channel)
+                            put("t", JSONArray(listOf(b.thisLow0, b.thisLow1, b.thisHigh0, b.thisHigh1).map { it.toDouble() }))
+                            put("u", JSONArray(listOf(b.underLow0, b.underLow1, b.underHigh0, b.underHigh1).map { it.toDouble() }))
+                        })
                         if (layer.isCollapsed) put("isCollapsed", true)
                         layer.maskAnchor?.let { a ->
                             put("maskAnchor", JSONObject().apply {
@@ -1008,6 +1014,15 @@ class ProjectRepository(private val context: Context) {
                     isSticker = layerObj.optBoolean("isSticker", false),
                     parentId = layerObj.optString("parentId", "").ifBlank { null },
                     isCollapsed = layerObj.optBoolean("isCollapsed", false),
+                    blendIf = layerObj.optJSONObject("blendIf")?.let { o ->
+                        val t = o.optJSONArray("t"); val u = o.optJSONArray("u")
+                        fun v(a: JSONArray?, i: Int, d: Float) = a?.optDouble(i, d.toDouble())?.toFloat()?.coerceIn(0f, 255f) ?: d
+                        com.example.data.model.BlendIf(
+                            channel = o.optInt("channel", 0).coerceIn(0, 3),
+                            thisLow0 = v(t, 0, 0f), thisLow1 = v(t, 1, 0f), thisHigh0 = v(t, 2, 255f), thisHigh1 = v(t, 3, 255f),
+                            underLow0 = v(u, 0, 0f), underLow1 = v(u, 1, 0f), underHigh0 = v(u, 2, 255f), underHigh1 = v(u, 3, 255f)
+                        )
+                    } ?: com.example.data.model.BlendIf(),
                     skewX = layerObj.optDouble("skewX", 0.0).toFloat(),
                     skewY = layerObj.optDouble("skewY", 0.0).toFloat(),
                     distort = layerObj.optJSONArray("distort")?.takeIf { it.length() == 8 }?.let { a ->

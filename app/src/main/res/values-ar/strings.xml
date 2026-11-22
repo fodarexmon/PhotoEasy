@@ -1189,4 +1189,14 @@
     <string name="layers_lock">قفل</string>
     <string name="layers_unlock">فتح القفل</string>
     <string name="layers_align">محاذاة</string>
+    <string name="blend_if_title">المزج الشرطي (Blend If)</string>
+    <string name="blend_if_menu">المزج الشرطي (Blend If)…</string>
+    <string name="blend_if_badge">Blend If</string>
+    <string name="blend_if_gray">رمادي</string>
+    <string name="channel_red">أحمر</string>
+    <string name="channel_green">أخضر</string>
+    <string name="channel_blue">أزرق</string>
+    <string name="blend_if_this_layer">هذه الطبقة</string>
+    <string name="blend_if_underlying">الطبقة التحتية</string>
+    <string name="blend_if_hint">اسحب مقبضًا لإخفاء الدرجات الأغمق أو الأفتح. اضغط مطولًا على مقبض لتقسيمه إلى نصفين لانتقال ناعم (أو لدمجه مرة أخرى).</string>
 </resources>

@@ -95,7 +95,9 @@ class LayerPanelActions(
     val onMergeVisible: () -> Unit = {},
     val onFlatten: () -> Unit = {},
     /** 0..5 = left, centre, right, top, middle, bottom; 6 / 7 = distribute horizontally / vertically. */
-    val onAlign: (Int) -> Unit = {}
+    val onAlign: (Int) -> Unit = {},
+    /** Opens Blend If for the selected layer. */
+    val onBlendIf: () -> Unit = {}
 )
 
 /** Align / distribute choices, in [LayerPanelActions.onAlign] order. */
@@ -469,6 +471,12 @@ fun LayersPanel(
                             enabled = selectedIndex > 0,
                             onClick = { showActionsMenu = false; onMergeDown() }
                         )
+                        DropdownMenuItem(
+                            text = { Text(stringResource(R.string.blend_if_menu)) },
+                            leadingIcon = { Icon(Icons.Default.Gradient, null) },
+                            onClick = { showActionsMenu = false; actions.onBlendIf() },
+                            modifier = Modifier.testTag("menu_blend_if")
+                        )
                         HorizontalDivider()
                         DropdownMenuItem(
                             text = { Text(stringResource(R.string.layers_select_several)) },
@@ -768,6 +776,7 @@ fun LayersPanel(
                                     )
                                     if (layer.blendMode != BlendModeType.NORMAL) append(" · ").append(stringResource(layer.blendMode.resId))
                                     if (layer.opacity < 0.995f) append(" · ").append((layer.opacity * 100).roundToInt()).append('%')
+                                    if (!layer.blendIf.isIdentity()) append(" · ").append(stringResource(R.string.blend_if_badge))
                                 }
                             },
                             color = when {

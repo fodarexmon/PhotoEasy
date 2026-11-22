@@ -104,6 +104,57 @@ class ProToolsTest {
         assertTrue(runBlocking { repo.loadBeforeImages("before_proj", setOf("img-1")) }.isEmpty())
     }
 
+    // --- Blend If -----------------------------------------------------------------------------
+
+    @Test
+    fun `blend if weights hard and split handles`() {
+        val e = com.example.engine.BlendIfEngine
+        // Hard low handle at 100: below hidden, from it on shown.
+        assertEquals(0f, e.weight(99f, 100f, 100f, 255f, 255f), 0f)
+        assertEquals(1f, e.weight(100f, 100f, 100f, 255f, 255f), 0f)
+        // Split 50/150: halfway at 100.
+        assertEquals(0.5f, e.weight(100f, 50f, 150f, 255f, 255f), 0.001f)
+        // Split high 200/240.
+        assertEquals(1f, e.weight(200f, 0f, 0f, 200f, 240f), 0f)
+        assertEquals(0.5f, e.weight(220f, 0f, 0f, 200f, 240f), 0.001f)
+        assertEquals(0f, e.weight(241f, 0f, 0f, 200f, 240f), 0f)
+        assertTrue(com.example.data.model.BlendIf().isIdentity())
+    }
+
+    @Test
+    fun `blend if hides a layer by its own tones and by the tones under it`() {
+        // Under: left half black, right half white. Layer: red everywhere, dark grey bottom row.
+        val w = 20; val h = 10
+        val under = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        for (y in 0 until h) for (x in 0 until w) under.setPixel(x, y, if (x < 10) Color.BLACK else Color.WHITE)
+        val layer = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        for (y in 0 until h) for (x in 0 until w) layer.setPixel(x, y, if (y == h - 1) Color.rgb(20, 20, 20) else Color.RED)
+        // Show only over the light part of the image under it.
+        val onLight = com.example.engine.BlendIfEngine.apply(layer.copy(Bitmap.Config.ARGB_8888, true), under,
+            com.example.data.model.BlendIf(underLow0 = 128f, underLow1 = 128f))
+        assertEquals(0, Color.alpha(onLight.getPixel(3, 3)))
+        assertEquals(255, Color.alpha(onLight.getPixel(15, 3)))
+        assertEquals(Color.RED, onLight.getPixel(15, 3))
+        // Hide the layer's own darks.
+        val noDarks = com.example.engine.BlendIfEngine.apply(layer.copy(Bitmap.Config.ARGB_8888, true), under,
+            com.example.data.model.BlendIf(thisLow0 = 50f, thisLow1 = 50f))
+        assertEquals(0, Color.alpha(noDarks.getPixel(5, h - 1)))
+        assertEquals(255, Color.alpha(noDarks.getPixel(5, 2)))
+        // Through the renderer and saved with the project.
+        val repo = ProjectRepository(context)
+        val proj = Project(id = "blendif_proj", name = "BI", width = w, height = h)
+        proj.layers.add(Layer(id = "u", name = "U", type = LayerType.IMAGE, bitmap = under, contentWidth = w.toFloat(), contentHeight = h.toFloat()))
+        val top = Layer(id = "t", name = "T", type = LayerType.IMAGE, bitmap = layer, contentWidth = w.toFloat(), contentHeight = h.toFloat(),
+            blendIf = com.example.data.model.BlendIf(channel = 0, underLow0 = 100f, underLow1 = 140f))
+        proj.layers.add(top)
+        val out = runBlocking { com.example.engine.LayerRenderer.renderCompositeCanvas(context, proj.layers, w, h, includeBackground = false) }
+        assertEquals(Color.BLACK, out.getPixel(3, 3))
+        assertEquals(Color.RED, out.getPixel(15, 3))
+        runBlocking { assertTrue(repo.saveProject(proj)) }
+        val loaded = runBlocking { repo.getProjectById("blendif_proj") }!!.layers.first { it.id == "t" }.blendIf
+        assertEquals(top.blendIf, loaded)
+    }
+
     // --- Text effects -----------------------------------------------------------------------
 
     @Test

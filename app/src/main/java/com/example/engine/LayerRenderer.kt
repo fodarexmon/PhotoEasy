@@ -260,7 +260,7 @@ object LayerRenderer {
                             drawClippedLayer(context, groupBmp, c, targetW, targetH, scaleRatio, docW, docH, currentJob,
                                 if (c.id == selectedLayerId) activeSelectionMask else null)
                         }
-                        drawBlended(canvas, composite, groupBmp, layer.blendMode, layer.opacity, paint)
+                        drawBlended(canvas, composite, groupBmp, layer.blendMode, layer.opacity, paint, layer.blendIf)
                     } finally {
                         if (!sub.isRecycled) sub.recycle()
                         if (!groupBmp.isRecycled) groupBmp.recycle()
@@ -279,7 +279,7 @@ object LayerRenderer {
                             // A masked adjustment layer only affects the revealed area; the hidden
                             // area becomes transparent and the composite below shows through unchanged.
                             applyLayerMask(Canvas(adjustedComposite), layer, adjustedComposite.width, adjustedComposite.height, docW, docH)
-                            drawBlended(canvas, composite, adjustedComposite, layer.blendMode, layer.opacity, paint)
+                            drawBlended(canvas, composite, adjustedComposite, layer.blendMode, layer.opacity, paint, layer.blendIf)
                         } finally {
                             if (!copy.isRecycled) copy.recycle()
                             if (!adjustedComposite.isRecycled) adjustedComposite.recycle()
@@ -306,7 +306,7 @@ object LayerRenderer {
                             if (c.id == selectedLayerId) activeSelectionMask else null)
                     }
                     coroutineContext.ensureActive()
-                    drawBlended(canvas, composite, layerBitmap, layer.blendMode, layer.opacity, paint)
+                    drawBlended(canvas, composite, layerBitmap, layer.blendMode, layer.opacity, paint, layer.blendIf)
                 } finally {
                     if (pooled) releaseScratch(layerBitmap)
                     else if (!layerBitmap.isRecycled) layerBitmap.recycle()
@@ -403,7 +403,7 @@ object LayerRenderer {
                 adjusted = applyLook(copy, c, currentJob)
                 applyLayerMask(Canvas(adjusted), c, adjusted.width, adjusted.height, docW, docH)
                 Canvas(adjusted).drawBitmap(base, 0f, 0f, keepBaseAlpha)
-                drawBlended(Canvas(base), base, adjusted, c.blendMode, c.opacity, paint)
+                drawBlended(Canvas(base), base, adjusted, c.blendMode, c.opacity, paint, c.blendIf)
             } finally {
                 if (!copy.isRecycled) copy.recycle()
                 if (!adjusted.isRecycled) adjusted.recycle()
@@ -413,7 +413,7 @@ object LayerRenderer {
         val cb = renderSingleLayerToBitmap(context, c, targetW, targetH, scaleRatio, selectionForLayer) ?: return
         try {
             Canvas(cb).drawBitmap(base, 0f, 0f, keepBaseAlpha)
-            drawBlended(Canvas(base), base, cb, c.blendMode, c.opacity, paint)
+            drawBlended(Canvas(base), base, cb, c.blendMode, c.opacity, paint, c.blendIf)
         } finally {
             if (!cb.isRecycled) cb.recycle()
         }
@@ -1005,7 +1005,20 @@ object LayerRenderer {
      * Draws canvas-sized [layerBitmap] onto [target] (drawn through [canvas]) with [mode] and
      * [opacity]. Blend modes Android lacks (Linear Light) are computed per pixel.
      */
-    private fun drawBlended(canvas: Canvas, target: Bitmap, layerBitmap: Bitmap, mode: BlendModeType, opacity: Float, paint: Paint) {
+    private fun drawBlended(
+        canvas: Canvas, target: Bitmap, layerBitmapIn: Bitmap, mode: BlendModeType, opacity: Float, paint: Paint,
+        blendIf: com.example.data.model.BlendIf = com.example.data.model.BlendIf()
+    ) {
+        // Blend If: the layer's pixels fade out by their own value and the value under them.
+        val layerBitmap = if (blendIf.isIdentity()) layerBitmapIn else BlendIfEngine.apply(layerBitmapIn, target, blendIf)
+        try {
+            drawBlendedPlain(canvas, target, layerBitmap, mode, opacity, paint)
+        } finally {
+            if (layerBitmap !== layerBitmapIn && !layerBitmap.isRecycled) layerBitmap.recycle()
+        }
+    }
+
+    private fun drawBlendedPlain(canvas: Canvas, target: Bitmap, layerBitmap: Bitmap, mode: BlendModeType, opacity: Float, paint: Paint) {
         if (mode == BlendModeType.LINEAR_LIGHT) {
             FrequencySeparation.linearLight(target, layerBitmap, opacity)
             return
