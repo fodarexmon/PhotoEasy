@@ -12,8 +12,8 @@ android {
     applicationId = "com.aistudio.photoeasy.app"
     minSdk = 24
     targetSdk = 36
-    versionCode = 12
-    versionName = "1.8.1"
+    versionCode = 13
+    versionName = "1.8.2"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

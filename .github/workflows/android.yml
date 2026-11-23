@@ -87,6 +87,15 @@ jobs:
       - name: Build APKs
         run: ./gradlew assembleDist --stacktrace
 
+      # R8 once renamed ML Kit's internal classes, and face detection silently found nothing in
+      # release builds. Fail the build if that happens again.
+      - name: Check ML Kit survived R8
+        run: |
+          apk=$(ls app/build/outputs/apk/dist/*arm64-v8a*.apk | head -1)
+          n=$(unzip -p "$apk" 'classes*.dex' | strings -a | grep -c 'mlkit_vision_face_bundled' || true)
+          echo "ML Kit internal class references in $apk: $n"
+          if [ "$n" -lt 10 ]; then echo "::error::R8 renamed ML Kit's internal classes; face detection would fail"; exit 1; fi
+
       - name: Rename APKs
         run: |
           mkdir -p dist
