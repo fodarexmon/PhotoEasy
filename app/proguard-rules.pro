@@ -26,3 +26,12 @@
 -dontwarn com.google.mlkit.**
 -dontwarn javax.annotation.**
 -dontwarn org.checkerframework.**
+
+# ML Kit face detection (bundled) talks to its native detector through internal protobuf-lite
+# classes that are read by reflection. R8 full mode renamed / merged them, and the detector then
+# found no faces at all (Liquify "Smart face", Smart Auto). Keep ML Kit and its internals whole.
+-keep class com.google.mlkit.** { *; }
+-keep class com.google.android.gms.vision.** { *; }
+-keep class com.google.android.gms.internal.mlkit_** { *; }
+-keep class com.google.android.libraries.vision.** { *; }
+-keep class com.google.android.gms.common.internal.** { *; }
