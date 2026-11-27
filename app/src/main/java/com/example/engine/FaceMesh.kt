@@ -313,17 +313,21 @@ object FaceMesh {
         }
         var best: PointF? = null; var bestScore = Float.MAX_VALUE
         val step = max(1f, eyeW / 24f)
+        // A probe smaller than the opening locates the iris; the lids usually cover part of it, so
+        // its centre is searched near the middle height of the opening only.
+        val rp = min(r, eyeH * 0.42f).coerceAtLeast(1.5f)
+        val midY = b.centerY()
         var cx = b.left + r * 0.6f
         while (cx <= b.right - r * 0.6f) {
-            var cy = b.top + eyeH * 0.25f
-            while (cy <= b.bottom - eyeH * 0.25f + 0.01f) {
+            var cy = midY - eyeH * 0.15f
+            while (cy <= midY + eyeH * 0.15f + 0.01f) {
                 var s = 0f; var n = 0
-                val k = max(1f, r / 4f)
-                var dy = -r
-                while (dy <= r) {
-                    var dx = -r
-                    while (dx <= r) {
-                        if (dx * dx + dy * dy <= r * r && insidePolygon(contour, cx + dx, cy + dy)) { s += lum((cx + dx).toInt(), (cy + dy).toInt()); n++ }
+                val k = max(1f, rp / 4f)
+                var dy = -rp
+                while (dy <= rp) {
+                    var dx = -rp
+                    while (dx <= rp) {
+                        if (dx * dx + dy * dy <= rp * rp && insidePolygon(contour, cx + dx, cy + dy)) { s += lum((cx + dx).toInt(), (cy + dy).toInt()); n++ }
                         dx += k
                     }
                     dy += k
