@@ -109,6 +109,10 @@ jobs:
           if [ "$n" -lt 10 ]; then echo "::error::R8 renamed ML Kit's internal classes; face detection would fail"; exit 1; fi
           if ! unzip -l "$apk" | grep -q "assets/face_landmarker.task"; then echo "::error::face_landmarker.task missing from the APK"; exit 1; fi
           if ! unzip -l "$apk" | grep -q "libmediapipe_tasks_vision_jni.so"; then echo "::error::MediaPipe native library missing from the APK"; exit 1; fi
+          echo "Largest parts of $apk (size in APK / unpacked):"
+          unzip -v "$apk" | awk 'NR>3 && $1 ~ /^[0-9]+$/ {print $3, $1, $8}' | sort -rn | head -15
+          uapk=$(ls app/build/outputs/apk/dist/*universal*.apk | head -1)
+          echo "ABIs in the universal APK:"; unzip -l "$uapk" | grep -oE "lib/[^/]+/" | sort | uniq -c
 
       - name: Rename APKs
         run: |
