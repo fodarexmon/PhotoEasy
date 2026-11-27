@@ -72,6 +72,13 @@ android {
       isUniversalApk = true
     }
   }
+  // Native libraries (MediaPipe, ML Kit, LiteRT) are stored compressed in the APK: a much
+  // smaller download. Android unpacks them once at install, so they load and work the same.
+  packaging {
+    jniLibs {
+      useLegacyPackaging = true
+    }
+  }
   compileOptions {
     sourceCompatibility = JavaVersion.VERSION_11
     targetCompatibility = JavaVersion.VERSION_11
@@ -120,6 +127,8 @@ dependencies {
   implementation(libs.mlkit.face.detection)
   // AI Colorize runtime (the model itself is downloaded on first use).
   implementation(libs.litert)
+  // 478-point face mesh with irises, for makeup (model: assets/face_landmarker.task, fetched by CI).
+  implementation(libs.mediapipe.tasks.vision)
   // implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)
   // Uncomment to use Firestore:

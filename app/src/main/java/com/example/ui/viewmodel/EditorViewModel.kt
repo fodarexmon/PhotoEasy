@@ -212,7 +212,9 @@ data class EditorUiState(
     /** A pixel tool was used on a Smart Object: ask to rasterize it (true = dialog shown). */
     val askRasterize: Boolean = false,
     /** AI Colorize dialog, or null when closed. */
-    val aiColorize: EditorViewModel.AiColorizeState? = null
+    val aiColorize: EditorViewModel.AiColorizeState? = null,
+    /** Smart makeup: the selected layer as it looks (preview size), while the dialog is open. */
+    val makeupSource: Bitmap? = null
 )
 
 data class EditableShape(
@@ -5652,6 +5654,87 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_ai_colorize_failed))
             } finally {
                 listOf(full, looked, colored).distinct().forEach { b -> b?.let { if (it !== layer.bitmap && !it.isRecycled) it.recycle() } }
+            }
+        }
+    }
+
+    // --- Smart makeup ---------------------------------------------------------------------------
+
+    /** Opens smart makeup on the selected image layer (its preview with the layer's look). */
+    fun openMakeup() {
+        val proj = _uiState.value.currentProject ?: return
+        val layer = proj.layers.getOrNull(_uiState.value.selectedLayerIndex) ?: return
+        val bmp = layer.bitmap?.takeIf { !it.isRecycled && layer.type == LayerType.IMAGE } ?: return
+        viewModelScope.launch {
+            val looked = withContext(Dispatchers.Default) {
+                try { com.example.engine.LayerRenderer.applyLayerLook(bmp, layer) } catch (e: Throwable) { bmp }
+            }
+            _uiState.value = _uiState.value.copy(makeupSource = looked)
+        }
+    }
+
+    fun closeMakeup() {
+        _uiState.value = _uiState.value.copy(makeupSource = null)
+    }
+
+    /**
+     * Draws the makeup at full resolution into a new layer above the selected one. The layer holds
+     * only the made-up pixels, so its opacity sets the strength and a mask can take parts away.
+     * [faces] are in the dialog's working copy, [workWidth] wide.
+     */
+    fun applyMakeup(faces: List<com.example.engine.MakeupFace>, workWidth: Int, settings: List<com.example.engine.MakeupSettings>) {
+        val proj = _uiState.value.currentProject ?: return
+        if (_uiState.value.isProcessing) return
+        val idx = _uiState.value.selectedLayerIndex
+        val layer = proj.layers.getOrNull(idx) ?: return
+        if (layer.type != LayerType.IMAGE || layer.bitmap == null) return
+        _uiState.value = _uiState.value.copy(makeupSource = null)
+        if (pendingTransactionSnapshot != null) saveHistoryState()
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isProcessing = true, statusMessage = tr(R.string.status_makeup_applying))
+            var full: Bitmap? = null
+            var looked: Bitmap? = null
+            var made: Bitmap? = null
+            var only: Bitmap? = null
+            var historySaved = false
+            try {
+                full = loadAuthoritativeLayerBitmap(layer) ?: throw IllegalStateException("Image unavailable")
+                looked = withContext(Dispatchers.Default) { com.example.engine.LayerRenderer.applyLayerLook(full!!, layer) }
+                val s = looked!!.width / workWidth.coerceAtLeast(1).toFloat()
+                made = withContext(Dispatchers.Default) { com.example.engine.Makeup.render(looked!!, faces.map { it.scaled(s) }, settings) }
+                only = withContext(Dispatchers.Default) { com.example.engine.Makeup.layerFrom(looked!!, made!!) }
+                val n = layer.copy(
+                    id = java.util.UUID.randomUUID().toString(),
+                    name = uniqueLayerName(tr(R.string.layer_name_makeup), proj),
+                    bitmap = null, sourceAssetPath = null,
+                    filter = FilterType.NONE, filterIntensity = 1f, lutId = null, adjustments = ColorAdjustments(),
+                    isVisible = true, isLocked = false, isEditingMask = false,
+                    isSmartObject = false, smartFilters = emptyList(), smartFilterMask = null,
+                    textConfig = layer.textConfig.copy(), distort = layer.distort?.copyOf(),
+                    isEffectResult = true
+                )
+                if (!commitDestructiveBitmap(proj, n, only!!, layer.intrinsicDocumentWidth(), layer.intrinsicDocumentHeight(), "makeup")) {
+                    throw java.io.IOException("Save failed")
+                }
+                n.maskAnchor = layer.maskAnchor
+                saveHistoryState()
+                historySaved = true
+                proj.layers.add(idx + 1, n)
+                commitProjectMutation(selectedLayerIndex = idx + 1, statusMessage = tr(R.string.status_makeup_done),
+                    transformState = { it.copy(isProcessing = false) })
+            } catch (e: OutOfMemoryError) {
+                if (historySaved) rollbackToLastHistoryState()
+                System.gc()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_processing_failed_memory))
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                if (historySaved) rollbackToLastHistoryState()
+                _uiState.value = _uiState.value.copy(isProcessing = false)
+                throw e
+            } catch (e: Throwable) {
+                if (historySaved) rollbackToLastHistoryState()
+                _uiState.value = _uiState.value.copy(isProcessing = false, statusMessage = tr(R.string.status_makeup_failed))
+            } finally {
+                listOf(full, looked, made, only).distinct().forEach { b -> b?.let { if (it !== layer.bitmap && !it.isRecycled) it.recycle() } }
             }
         }
     }

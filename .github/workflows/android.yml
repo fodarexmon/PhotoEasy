@@ -64,6 +64,18 @@ jobs:
 
       # Robolectric downloads its Android framework jars from Maven Central while the tests run.
       # Keep them between runs so a Maven Central hiccup doesn't fail the build.
+      # MediaPipe's face mesh model for makeup (Apache 2.0, ~3.7 MB). Not kept in git: fetched
+      # here and packed into the APK's assets.
+      - name: Fetch face landmarker model
+        run: |
+          mkdir -p app/src/main/assets
+          curl -fsSL --retry 4 --retry-delay 5 -o app/src/main/assets/face_landmarker.task \
+            https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
+          ls -l app/src/main/assets/face_landmarker.task
+          sha256sum app/src/main/assets/face_landmarker.task
+          size=$(stat -c %s app/src/main/assets/face_landmarker.task)
+          if [ "$size" -lt 1000000 ]; then echo "::error::face_landmarker.task looks wrong ($size bytes)"; exit 1; fi
+
       - name: Cache Robolectric Android jars
         uses: actions/cache@v4
         with:
@@ -95,6 +107,12 @@ jobs:
           n=$(unzip -p "$apk" 'classes*.dex' | strings -a | grep -c 'mlkit_vision_face_bundled' || true)
           echo "ML Kit internal class references in $apk: $n"
           if [ "$n" -lt 10 ]; then echo "::error::R8 renamed ML Kit's internal classes; face detection would fail"; exit 1; fi
+          if ! unzip -l "$apk" | grep -q "assets/face_landmarker.task"; then echo "::error::face_landmarker.task missing from the APK"; exit 1; fi
+          if ! unzip -l "$apk" | grep -q "libmediapipe_tasks_vision_jni.so"; then echo "::error::MediaPipe native library missing from the APK"; exit 1; fi
+          echo "Largest parts of $apk (size in APK / unpacked):"
+          unzip -v "$apk" | awk 'NR>3 && $1 ~ /^[0-9]+$/ {print $3, $1, $8}' | sort -rn | head -15
+          uapk=$(ls app/build/outputs/apk/dist/*universal*.apk | head -1)
+          echo "ABIs in the universal APK:"; unzip -l "$uapk" | grep -oE "lib/[^/]+/" | sort | uniq -c
 
       - name: Rename APKs
         run: |

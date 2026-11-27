@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.SelectAll
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -122,6 +123,8 @@ fun FiltersPanel(
     onOpenLiquify: (() -> Unit)? = null,
     /** Opens Liquify on its Face-Aware tab. */
     onOpenFaceLiquify: (() -> Unit)? = null,
+    /** Smart makeup (lips, blush, contour, eyes, brows, eye colour, teeth). */
+    onOpenMakeup: (() -> Unit)? = null,
     /** Opens AI Colorize (model downloaded on first use). */
     onOpenAiColorize: (() -> Unit)? = null,
     /** Opens the frequency separation setup. */
@@ -652,6 +655,18 @@ fun FiltersPanel(
                         onClick = onOpenFrequencySeparation,
                         modifier = Modifier.weight(1f).heightIn(min = 44.dp).testTag("btn_open_fs")
                     ) { Text(stringResource(R.string.fs_open), fontSize = 12.sp, maxLines = 2) }
+                }
+                if (onOpenMakeup != null) {
+                    Spacer(Modifier.height(6.dp))
+                    OutlinedButton(
+                        onClick = onOpenMakeup,
+                        enabled = isImageLayer,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 44.dp).testTag("btn_open_makeup")
+                    ) {
+                        Icon(Icons.Default.Face, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(stringResource(R.string.mk_open), fontWeight = FontWeight.SemiBold)
+                    }
                 }
                 if (onSmoothSelection != null) {
                     Spacer(Modifier.height(6.dp))

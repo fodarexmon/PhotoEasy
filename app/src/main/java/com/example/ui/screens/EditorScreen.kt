@@ -955,6 +955,7 @@ fun EditorScreen(
                                 onOpenLiquify = { if (viewModel.canLiquifySelectedLayer() && viewModel.requireRasterized { liquifyFaceTab = false; showLiquify = true }) { liquifyFaceTab = false; showLiquify = true } },
                                 onOpenFaceLiquify = { if (viewModel.canLiquifySelectedLayer() && viewModel.requireRasterized { liquifyFaceTab = true; showLiquify = true }) { liquifyFaceTab = true; showLiquify = true } },
                                 onOpenAiColorize = { viewModel.openAiColorize() },
+                                onOpenMakeup = { if (viewModel.canLiquifySelectedLayer() && viewModel.requireRasterized { viewModel.openMakeup() }) viewModel.openMakeup() },
                                 onOpenFrequencySeparation = { if (viewModel.canLiquifySelectedLayer() && viewModel.requireRasterized { showFrequencySeparation = true }) showFrequencySeparation = true },
                                 hasSelection = hasActiveSelectionCached,
                                 onSmoothSelection = { viewModel.smoothSelectionOnLayer() },
@@ -1856,6 +1857,14 @@ fun EditorScreen(
                 selection = liqSelection
             )
         }
+    }
+
+    uiState.makeupSource?.let { mkSource ->
+        com.example.ui.components.MakeupDialog(
+            source = mkSource,
+            onDismiss = { viewModel.closeMakeup() },
+            onApply = { faces, workWidth, settings -> viewModel.applyMakeup(faces, workWidth, settings) }
+        )
     }
 
     if (showFrequencySeparation) {
