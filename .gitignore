@@ -16,3 +16,6 @@
 local.properties
 .env
 debug.keystore
+
+# Fetched by CI (MediaPipe face mesh model)
+app/src/main/assets/face_landmarker.task

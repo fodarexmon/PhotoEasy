@@ -120,6 +120,8 @@ dependencies {
   implementation(libs.mlkit.face.detection)
   // AI Colorize runtime (the model itself is downloaded on first use).
   implementation(libs.litert)
+  // 478-point face mesh with irises, for makeup (model: assets/face_landmarker.task, fetched by CI).
+  implementation(libs.mediapipe.tasks.vision)
   // implementation(libs.converter.moshi)
   // implementation(libs.firebase.ai)
   // Uncomment to use Firestore:

@@ -35,3 +35,10 @@
 -keep class com.google.android.gms.internal.mlkit_** { *; }
 -keep class com.google.android.libraries.vision.** { *; }
 -keep class com.google.android.gms.common.internal.** { *; }
+
+# MediaPipe Tasks (face mesh for makeup): JNI and protobuf messages looked up by name.
+-keep class com.google.mediapipe.** { *; }
+-keep class com.google.protobuf.** { *; }
+-dontwarn com.google.mediapipe.**
+-dontwarn com.google.protobuf.**
+-dontwarn com.google.auto.value.**
